@@ -3,9 +3,6 @@ inlined by `flock launch`, and world-backed settings accepted by the model but r
 
 from __future__ import annotations
 
-import re
-from pathlib import Path
-
 import pytest
 import yaml
 from fastapi.testclient import TestClient
@@ -24,7 +21,7 @@ def spec_with(loop: dict, **type_kw) -> SwarmSpec:
 
 def test_loop_fields_and_the_while_alias_round_trip():
     s = spec_with({"prompt": "r{round}", "every": "120s",
-                   "on": ["comms.mention", "comms.thread"],
+                   "on": ["message_board.mention", "message_board.thread"],
                    "while": {"until": "2h", "max_rounds": 200, "budget_usd": 12, "agent_usd": 3.6},
                    "final": {"prompt": "fin", "reserve_usd": 0.6}})
     lp = s.types["researcher"].loop
@@ -40,14 +37,14 @@ def test_loop_fields_and_the_while_alias_round_trip():
     ({}, "loop needs prompt or prompt_file"),
     ({"prompt": "x", "every": "often"}, "bad duration"),
     ({"prompt": "x", "every": "0s"}, "duration > 0"),
-    ({"prompt": "x", "on": ["board.mention"]}, "expected comms.<name>"),
+    ({"prompt": "x", "on": ["slack.mention"]}, "expected message_board.<name>"),
     ({"prompt": "x", "while": {"max_rounds": 0}}, ">= 1"),
     ({"prompt": "x", "while": {"until": "soon"}}, "bad until"),
     ({"prompt": "x", "while": {"agent_usd": -1}}, ">= 0"),
     ({"prompt": "x", "while": {"rounds": 3}}, "Extra inputs"),
     ({"prompt": "x", "final": {"reserve_usd": 1}}, "final needs prompt"),
     ({"prompt": "x", "final": {"prompt": "f", "reserve_usd": -1}}, ">= 0"),
-    ({"prompt": "x", "while": {"agent_usd": {"glm": 2.1}}}, "no entry for model 'claude-opus-5-5'"),
+    ({"prompt": "x", "while": {"agent_usd": {"glm": 2.1}}}, "no entry for model 'fake:m'"),
     ({"prompt": "x", "wake": {"min_gap": "soon"}}, "bad duration"),
     ({"prompt": "x", "wake": {"window": "0s"}}, "window must be a duration > 0"),
     ({"prompt": "x", "wake": {"max": -1}}, ">= 0"),
@@ -61,13 +58,13 @@ def test_bad_loops_are_rejected(loop, msg):
 
 
 def test_agent_usd_by_model():
-    s = spec_with({"prompt": "x", "while": {"agent_usd": {"claude-opus-5-5": 3.6, "glm": 2.1}}})
+    s = spec_with({"prompt": "x", "while": {"agent_usd": {"m": 3.6, "glm": 2.1}}})
     assert agent_cap(s.types["researcher"]) == 3.6
     assert agent_cap(spec_with({"prompt": "x"}).types["researcher"]) is None
 
 
 def test_world_backed_settings_are_accepted_but_refused():
-    s = spec_with({"prompt": "x", "on": ["world.event:claim", "comms.mention"]})
+    s = spec_with({"prompt": "x", "on": ["world.event:claim", "message_board.mention"]})
     assert loop_refusals(s) == [
         "types.researcher.loop.on: world.event:claim needs a world (not in this version)"]
 
@@ -89,14 +86,13 @@ def test_flock_apply_inlines_prompt_files_and_refuses_world_settings(tmp_path, m
     (tmp_path / "prompts" / "final.md").write_text("Final: submit.\n")
     raw = make_spec(researcher={"replicas": 1}).model_dump(mode="json", exclude_none=True)
     raw["types"]["researcher"]["loop"] = {
-        "prompt_file": "prompts/round.md", "every": "30s", "on": ["comms.mention", "comms.channel"],
+        "prompt_file": "prompts/round.md", "every": "30s", "on": ["message_board.mention", "message_board.channel"],
         "final": {"prompt_file": "prompts/final.md", "reserve_usd": 0.5}}
     f = tmp_path / "spec.yaml"
     f.write_text(yaml.safe_dump(raw))
     r = CliRunner().invoke(cli.app, ["launch", str(f), "--skip-preflight"])
     assert r.exit_code == 0, r.output
-    assert "loop.on comms.mention: no comms feeder: the type is not on the board" in r.output
-    assert "loop.on comms.channel: no comms feeder" in r.output  # fed, so only the board is missing
+    assert "loop.on message_board.mention: no feeder: the run has no message_board resource" in r.output
     lp = store.get_swarm("demo")["spec"].types["researcher"].loop
     assert lp.prompt == "Round {round} ({why}).\n" and lp.final.prompt == "Final: submit.\n"
 
@@ -105,7 +101,7 @@ def test_flock_apply_inlines_prompt_files_and_refuses_world_settings(tmp_path, m
     r = CliRunner().invoke(cli.app, ["launch", str(f), "--skip-preflight"])
     assert r.exit_code == 1
     assert "refused: types.researcher.loop.on: world.event:claim needs a world" in r.output
-    raw["types"]["researcher"]["loop"]["on"] = ["comms.mention"]
+    raw["types"]["researcher"]["loop"]["on"] = ["message_board.mention"]
     raw["types"]["researcher"]["loop"]["prompt_file"] = "prompts/missing.md"
     f.write_text(yaml.safe_dump(raw))
     r = CliRunner().invoke(cli.app, ["launch", str(f), "--skip-preflight"])
@@ -129,50 +125,18 @@ def test_local_run_checks_loops_like_apply(tmp_path, monkeypatch):
     raw = make_spec(researcher={"replicas": 1}).model_dump(mode="json", exclude_none=True)
     raw["compute"] = {"kind": "local"}
     raw["types"]["researcher"]["loop"] = {"prompt_file": "prompts/round.md", "every": "30s",
-                                          "on": ["comms.mention"]}
+                                          "on": ["message_board.mention"]}
     f = tmp_path / "spec.yaml"
     f.write_text(yaml.safe_dump(raw))
     r = CliRunner().invoke(localrun.app, [str(f), "--skip-preflight"])
     assert r.exit_code == 0, r.output
-    assert "loop.on comms.mention: no comms feeder" in r.output and len(started) == 1
+    assert "loop.on message_board.mention: no feeder" in r.output and len(started) == 1
 
     raw["types"]["researcher"]["loop"]["on"] = ["world.event:claim"]
     f.write_text(yaml.safe_dump(raw))
     r = CliRunner().invoke(localrun.app, [str(f), "--skip-preflight"])
     assert r.exit_code == 1 and len(started) == 1  # refused on the CLI: no run started
     assert "refused: types.researcher.loop.on: world.event:claim needs a world" in r.output
-
-
-DOCS = Path(__file__).parent.parent / "docs" / "loop.md"
-HEADER = """\
-swarm: demo
-namespace: ns
-bucket: hf://buckets/ns/sh
-providers:
-  hf: {type: openai_compat, base_url: https://router.huggingface.co/v1, api_key_env: HF_TOKEN,
-       pricing: {"m/lfm": [0, 0, 0], "m/ds": [0, 0, 0], "m/glm": [0, 0, 0]}}
-models: {lfm: {model: "hf:m/lfm"}, deepseek: {model: "hf:m/ds"}, glm: {model: "hf:m/glm"}}
-"""
-
-
-def _doc_example(heading: str) -> str:
-    """The first ```yaml block after `heading` in docs/loop.md, verbatim."""
-    rest = DOCS.read_text(encoding="utf-8").split(heading, 1)[1]
-    return re.search(r"```yaml\n(.*?)```", rest, re.DOTALL).group(1)
-
-
-@pytest.mark.parametrize("heading", ["## Spec", "### Eliza"])
-def test_documented_examples_load_with_an_unquoted_on_key(heading, tmp_path):
-    """`on:` is a YAML 1.1 boolean: `flock launch` must read it as the key "on" (defect 2)."""
-    (tmp_path / "prompts").mkdir()
-    for f in ("system.md", "round.md", "final.md"):
-        (tmp_path / "prompts" / f).write_text(f)
-    example = _doc_example(heading)
-    assert re.search(r"^\s+on: \[comms\.", example, re.MULTILINE)  # unquoted, as documented
-    (tmp_path / "spec.yaml").write_text(HEADER + example)
-    spec = cli.load_spec(str(tmp_path / "spec.yaml"))
-    for ts in spec.types.values():
-        assert ts.loop.on and all(x.startswith("comms.") for x in ts.loop.on)
 
 
 def test_spec_yaml_keeps_yes_no_on_off_as_strings():

@@ -19,7 +19,6 @@ from flock.controller.reconcile import Settings, reconcile
 from flock.controller.store import Store
 from flock.models import SwarmSpec
 
-from . import fake_openai
 from .tinyrun import TinyRun
 
 TOKEN = "test-token"
@@ -38,20 +37,51 @@ class Clock:
         return self.t
 
 
+# A provider-backed placeholder model for specs whose harness never runs (`fake:m`), with the
+# smallest `harbor:` block a harbor type validates with (no Trial ever starts from it).
+FAKE_PROVIDERS = {"fake": {"type": "openai_compat", "base_url": "http://fake.invalid/v1",
+                           "api_key_env": "FAKE_KEY", "self_hosted": True}}
+SHA = "0" * 40
+HARBOR = {"task": {"registry_commit": SHA, "task": {"git_commit_id": SHA}},
+          "config": {"task": {}}}  # pinned, as the compile step writes it
+HB = {"harness": "harbor", "harbor": HARBOR}  # a placeholder harbor type: {**HB, "model": ...}
+
+
+PRICED = "priced-model"  # $4 input, $20 output per 1M tokens (the `priced` fixture)
+
+
+@pytest.fixture
+def priced(tmp_path, monkeypatch):
+    """Adds the `PRICED` row to the controller's price table (FLOCK_PRICES)."""
+    import json
+
+    from flock.controller import prices
+
+    path = tmp_path / "prices.json"
+    path.write_text(json.dumps({PRICED: {"input": 4, "output": 20, "cache_read": 0.2,
+                                         "cache_write": 5}}))
+    monkeypatch.setenv("FLOCK_PRICES", str(path))
+    prices.price_table.cache_clear()
+    yield PRICED
+    prices.price_table.cache_clear()
+
+
 def make_spec(swarm: str = "demo", **types: dict) -> SwarmSpec:
     if not types:
         types = {"researcher": {"replicas": 3, "agents_per_worker": 2}}
     full = {}
     for name, overrides in types.items():
         base = {
-            "harness": "claude",
-            "model": "claude-opus-5-5",
+            "harness": "harbor",
+            "harbor": HARBOR,
+            "model": "fake:m",
             "secrets": ["ANTHROPIC_API_KEY"],
             "env": {"MSGBOARD_URL": "https://example.invalid"},
         }
         full[name] = {**base, **overrides}
     return SwarmSpec.model_validate(
-        {"swarm": swarm, "namespace": "ns", "bucket": "hf://buckets/ns/sh", "types": full}
+        {"swarm": swarm, "namespace": "ns", "bucket": "hf://buckets/ns/sh",
+         "providers": FAKE_PROVIDERS, "types": full}
     )
 
 
@@ -116,20 +146,34 @@ def slurm(tmp_path, monkeypatch) -> Slurm:
 
 @pytest.fixture(autouse=True)
 def no_local_checkpoint(monkeypatch):
-    """A local run checkpoints to <bucket>/controller/<swarm> by default: never from tests."""
+    """A local run checkpoints to <bucket>/controller/<swarm> by default: never from tests. Nor
+    does any test (or process it starts) get the machine's Hub token."""
     monkeypatch.setenv("FLOCK_STATE_URL", "")
+    monkeypatch.setenv("HF_TOKEN", "fake-hub-token")
 
 
 @pytest.fixture
 def tiny(tmp_path, monkeypatch):
-    """A tiny real run (tests/tinyrun.py) working in tmp_path, its model server started."""
-    srv = fake_openai.serve(0, str(tmp_path / "requests.jsonl"))
+    """A tiny real run (tests/tinyrun.py) working in tmp_path, Harbor faked in each of its
+    processes (tests/harbor/site/sitecustomize.py), the task pin in this one."""
+    from flock.harbor import sources
+
+    from .harbor import fake_worker
+
+    monkeypatch.setattr(sources, "resolve_task", fake_worker.resolve)
     monkeypatch.chdir(tmp_path)
     for k in [k for k in os.environ if k.startswith("FLOCK_")]:
         monkeypatch.delenv(k)
+    site = Path(__file__).with_name("harbor") / "site"
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(
+        [str(site), *filter(None, [os.environ.get("PYTHONPATH")])]))
+    monkeypatch.setenv("TINY_FAKE_HARBOR", "1")
     monkeypatch.setenv("FLOCK_STATE_URL", "")  # see no_local_checkpoint
     monkeypatch.setenv("FLOCK_HEALTH_INTERVAL", "1")  # a verdict within a second
     monkeypatch.setenv("FLUSH_INTERVAL", "0.2")  # workers send their events within 0.2 s
+    monkeypatch.setenv("FLOCK_RECONCILE_INTERVAL", "0.2")  # the local run's cadence
+    monkeypatch.setenv("FLOCK_LOCAL_REFRESH", "0.2")
+    monkeypatch.setenv("FLOCK_LOOP_INTERVAL", "0.2")
     monkeypatch.setenv("FAKE_KEY", "fake-key")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     waited = []
@@ -140,10 +184,9 @@ def tiny(tmp_path, monkeypatch):
         time.sleep(0.2)
 
     monkeypatch.setattr(ops, "_sleep", sleep)
-    run = TinyRun(tmp_path, f"http://127.0.0.1:{srv.server_port}/v1", monkeypatch)
+    run = TinyRun(tmp_path, monkeypatch)
     yield run
     run.close()
-    srv.shutdown()
 
 
 @pytest.fixture

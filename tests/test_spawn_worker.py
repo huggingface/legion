@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import asyncio
 
-from flock.controller.jobs import bootstrap_command
 from flock.models import AssignCommand, PromptCommand
 
 from .test_worker_main import FakeController, make_worker
@@ -15,16 +14,9 @@ from .worker_fakes import spec, until
 CHILD = "leader-0000-analyst-0001"
 
 
-def test_bootstrap_puts_the_flock_cli_on_path():
-    script = bootstrap_command()[2]
-    assert 'export PATH="$HOME/.local/bin:$PATH"' in script  # where `uv tool install` puts it
-    check = script.index("command -v flock")
-    assert script.index("uv tool install") < check < script.index("exec flock-worker")
-
-
 async def test_unassign_purges_an_ephemeral_agent_and_keeps_others(tmp_path):
     """docs/spawn.md "Ephemeral types": after its final sync, the worker deletes an ephemeral
-    agent's workdir, session log, state and pin; a normal agent's files stay."""
+    agent's workdir, session log and state; a normal agent's files stay."""
     from flock.models import UnassignCommand
 
     keep = "leader-0000-analyst-0002"

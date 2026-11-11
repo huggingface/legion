@@ -40,9 +40,12 @@ LOCAL_ENV_DEFAULTS = {"HEARTBEAT_INTERVAL": f"{LOCAL_HEARTBEAT_INTERVAL.total_se
                       "PYTHONUNBUFFERED": "1"}
 # The caller's own flock connection and auth never leak into a worker (it gets the
 # controller's): FLOCK_* is dropped except these documented harness settings.
-KEEP_FLOCK_ENV = frozenset({"FLOCK_CLAUDE_CLI", "FLOCK_CODEX_CLI", "FLOCK_PI_CLI",
-                            "FLOCK_PROMPTS_DIR"})
+KEEP_FLOCK_ENV = frozenset({"FLOCK_PROMPTS_DIR"})
 STOP_GRACE = 5.0  # s between SIGTERM and SIGKILL on cancel
+# s a harbor worker gets instead, also at its job timeout: on SIGTERM it cancels its Trials and
+# waits up to 60 s (adapters/harbor.py CANCEL_WAIT) for their environments to stop; a SIGKILL
+# before that leaves their containers running
+HARBOR_STOP_GRACE = 90.0
 
 
 def _children_map() -> dict[int, list[int]]:
@@ -74,8 +77,8 @@ def _children_map() -> dict[int, list[int]]:
 
 
 def descendants(pid: int) -> list[int]:
-    """Every live descendant of `pid`, also those in their own session (the `llm` harness starts
-    each bash tool with start_new_session, outside the worker's process group)."""
+    """Every live descendant of `pid`, also those in their own session (outside the worker's
+    process group)."""
     kids, found, todo = _children_map(), [], [pid]
     while todo:
         for child in kids.get(todo.pop(), []):
@@ -112,13 +115,14 @@ class _Proc:
     log_handle: IO[bytes]
     canceled: bool = False
     timed_out: bool = False
+    kill_grace: float = 0.0  # s at least between SIGTERM and SIGKILL (HARBOR_STOP_GRACE)
 
 
 @dataclass
 class LocalJobsClient:
     """Launch, inspect and cancel worker subprocesses. `root` holds `agents/` (WORK_ROOT,
-    shared by all workers so a restarted slot finds its agents' workdirs), `state/llm`
-    (FLOCK_LLM_HOME) and `logs/<worker>.log` (stdout and stderr of each process)."""
+    shared by all workers so a restarted slot finds its agents' workdirs) and
+    `logs/<worker>.log` (stdout and stderr of each process)."""
 
     root: Path
     command: list[str] = field(default_factory=lambda: list(WORKER_COMMAND))
@@ -143,13 +147,8 @@ class LocalJobsClient:
         base = dict(os.environ if self.base_env is None else self.base_env)
         base = {k: v for k, v in base.items()
                 if not k.startswith("FLOCK_") or k in KEEP_FLOCK_ENV}
-        slot = env.get("WORKER_ID") or env.get("TYPE") or "worker"
         local = {
             "WORK_ROOT": str(self.work_root),
-            "FLOCK_LLM_HOME": str(self.root / "state" / "llm"),
-            # Pi writes models.json for its worker's type into this dir: one per worker slot
-            # (a slot hosts one type), never the operator's ~/.pi/agent.
-            "PI_CODING_AGENT_DIR": str(self.root / "state" / "pi" / slot),
             # The worker exits when the controller process is gone (no orphans after a kill -9).
             "FLOCK_LOCAL_PARENT_PID": str(os.getpid()),
         }
@@ -182,7 +181,8 @@ class LocalJobsClient:
             raise
         with self._lock:
             self.procs[job_id] = _Proc(job_id, worker_id, popen, dict(labels), dict(env),
-                                       time.monotonic(), float(timeout), log_file, handle)
+                                       time.monotonic(), float(timeout), log_file, handle,
+                                       kill_grace=HARBOR_STOP_GRACE)
         log.info("launched %s for %s (pid %d)", job_id, worker_id, popen.pid)
         return job_id
 
@@ -192,9 +192,12 @@ class LocalJobsClient:
         if p is None:
             return JobState("DELETED")
         rc = p.popen.poll()
-        if rc is None and time.monotonic() - p.started > p.timeout:
+        if rc is None and not p.timed_out and time.monotonic() - p.started > p.timeout:
             p.timed_out = True
-            self._stop([p], grace=0)
+            if p.kill_grace:  # RUNNING until its Trials are stopped (or the grace is over)
+                threading.Thread(target=self._stop, args=([p], 0), daemon=True).start()
+            else:
+                self._stop([p], grace=0)
             rc = p.popen.poll()
         if rc is None:
             return JobState("RUNNING")
@@ -248,17 +251,18 @@ class LocalJobsClient:
 
     def _stop(self, procs: list[_Proc], grace: float) -> None:
         """SIGTERM each worker's process group (a local worker then stops its agents, and the
-        adapters kill their tools), SIGKILL the group after `grace`, then SIGKILL any
-        descendant still alive: a worker's detached tool processes (own session) are recorded
-        before the worker can exit and leave them reparented."""
+        adapters kill their tools), SIGKILL the group after `grace` (at least its
+        `kill_grace`), then SIGKILL any descendant still alive: a worker's detached tool
+        processes (own session) are recorded before the worker can exit and leave them
+        reparented."""
         tree = {p.job_id: descendants(p.popen.pid) for p in procs}
         for p in procs:
             p.canceled = p.canceled or not p.timed_out
             self._signal(p, signal.SIGTERM)
-        end = time.monotonic() + grace
+        start = time.monotonic()
         for p in procs:
             try:
-                p.popen.wait(max(0.0, end - time.monotonic()))
+                p.popen.wait(max(0.0, start + max(grace, p.kill_grace) - time.monotonic()))
             except subprocess.TimeoutExpired:
                 tree[p.job_id] += [d for d in descendants(p.popen.pid) if d not in tree[p.job_id]]
                 self._signal(p, signal.SIGKILL)
@@ -279,7 +283,7 @@ class LocalJobsClient:
 
     @staticmethod
     def _signal(p: _Proc, sig: signal.Signals) -> None:
-        try:  # the process group: harness children (claude, codex, pi) go with the worker
+        try:  # the process group: harness children (pi, tools) go with the worker
             os.killpg(p.popen.pid, sig)
         except (ProcessLookupError, PermissionError):
             pass

@@ -1,9 +1,0 @@
-# Overlay for the Slurm cluster, deep-merged over spec.yaml (null deletes a key):
-#   flock apply spec.yaml --env run.env --overlay spec.slurm.yaml   (render.py does the same)
-compute: {kind: slurm, partition: '${RUN3_SLURM_PARTITION:-hopper-cpu}', cpus: 4, mem: 7G, time: '54:00:00'}
-bucket: ${RUN3_BUCKET:-hf://buckets/cmpatino/eliza-swarm}
-namespace: ${RUN3_NAMESPACE:-cmpatino}
-world:  # the world runs as its own job; the controller follows ${WORLD_HOST} (FLOCK_WORLD_HOST_FILE)
-  dir: null
-  command: null
-  url: http://${WORLD_HOST}:7860

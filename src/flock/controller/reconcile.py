@@ -43,13 +43,10 @@ from flock.models import (
     WorkerHeartbeat,
     WorkerState,
     WorldSpec,
-    comms_tools,
     max_workers,
     parse_duration,
     worker_type_spec,
 )
-from flock.world.host import world_token
-from flock.world.protocol import TOKEN_ENV as WORLD_TOKEN_ENV
 
 log = logging.getLogger("flock.reconcile")
 
@@ -119,7 +116,7 @@ def _iso(ts: float) -> str:
 
 def last_seen(w: Row) -> float | None:
     """When the current job last reached us: its last heartbeat, or a later command poll or
-    event post. Heartbeats can be throttled away (HTTP 429 at the Space edge, pixel run 1k)
+    event post. Heartbeats can be throttled away (HTTP 429 at the Space edge)
     while other requests get through; only silence on every route makes a worker dead."""
     hb = w["last_heartbeat"]
     if hb is None:
@@ -176,6 +173,7 @@ class _Pass:
     lv: Liveness = Liveness(0, 0, 0)  # noqa: RUF009 - a tuple; the swarm's, set per swarm
     local: bool = False  # the swarm's compute is local, set per swarm
     list_failed: bool = False  # the batch list raised: a missing job is unknown, not ended
+    roster: dict[str, str | None] | None = None  # the swarm's, for its assigns (harbor_roster)
 
     def act(self, kind: str, target: str, detail: str = "") -> None:
         self.actions.append(Action(kind, target, detail))
@@ -238,7 +236,12 @@ def reconcile(
             except Exception as exc:  # noqa: BLE001
                 log.warning("list_jobs for %s failed: %s", spec.swarm, type(exc).__name__)
                 p.listed, p.list_failed = {}, True
-        for type_name in sorted(set(spec.types) | set(store.type_names(spec.swarm))):
+        names = sorted(set(spec.types) | set(store.type_names(spec.swarm)))
+        # every type's agents first: an assign's roster lists the run's agents of all types
+        for type_name in names:
+            _sync_agents(p, spec, type_name, None if sw["removing"] else spec.types.get(type_name))
+        p.roster = harbor_roster(store, spec)
+        for type_name in names:
             ts = None if sw["removing"] else spec.types.get(type_name)
             _reconcile_type(p, spec, type_name, ts)
         if not sw["removing"]:
@@ -430,6 +433,25 @@ def _ramp_type(p: _Pass, spec: SwarmSpec, name: str, st: dict) -> tuple[int, dic
     return (live + 1, None) if live < pending else None
 
 
+def _sync_agents(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec | None) -> None:
+    """Desired agents; scale down removes the highest slots first. Spawned agents (parent set)
+    are not replicas: they go with their parent, their type or the swarm (docs/spawn.md)."""
+    store = p.store
+    replicas = ts.replicas if ts else 0
+    existing = {a["name"]: a for a in store.list_agents(spec.swarm, type_name)}
+    reason = "type_removed" if type_name not in spec.types else "swarm_removed"
+    for a in sorted(existing.values(), key=lambda a: a["slot"], reverse=True):
+        if ts is None or a["removing"] or (a["parent"] is None and a["slot"] >= replicas):
+            for r in spawning.remove_subtree(store, a["name"], reason, p.now):
+                p.act("unassign", r["name"], r["worker"] or "")
+    # words: a ramp's names are reserved up to its max, so rosters list them from the start
+    most = max(replicas, ts.replicas_ramp.max if ts and ts.replicas_ramp else 0)
+    names = naming.replica_names(store, spec, type_name, most, p.now)
+    for slot, name in enumerate(names[:replicas]):
+        if name not in existing:
+            store.insert_agent(name, spec.swarm, type_name, slot, p.now)
+
+
 def _reconcile_type(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec | None) -> None:
     store = p.store
     for w in store.list_workers(spec.swarm, type_name):
@@ -443,19 +465,6 @@ def _reconcile_type(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec | No
                 store.enqueue_command(w["id"], DrainCommand().model_dump_json())
                 store.update_worker(w["id"], draining=1)
                 p.act("release", w["id"], w["job_id"])
-
-    # Desired agents; scale down removes the highest slots first. Spawned agents (parent set)
-    # are not replicas: they go with their parent, their type or the swarm (docs/spawn.md).
-    replicas = ts.replicas if ts else 0
-    existing = {a["name"]: a for a in store.list_agents(spec.swarm, type_name)}
-    reason = "type_removed" if type_name not in spec.types else "swarm_removed"
-    for a in sorted(existing.values(), key=lambda a: a["slot"], reverse=True):
-        if ts is None or a["removing"] or (a["parent"] is None and a["slot"] >= replicas):
-            for r in spawning.remove_subtree(store, a["name"], reason, p.now):
-                p.act("unassign", r["name"], r["worker"] or "")
-    for slot, name in enumerate(naming.replica_names(store, spec, type_name, replicas, p.now)):
-        if name not in existing:
-            store.insert_agent(name, spec.swarm, type_name, slot, p.now)
 
     # Placement: fill live slots in order, never move a placed agent, open new slots as needed.
     if ts is not None and not released:
@@ -517,13 +526,13 @@ def _place(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec) -> None:
             store.update_agent(a["name"], worker=w["id"])
             if w["job_id"]:
                 _send_assign(store, w["id"], a, type_name, ts, spec.tools_version, spec.comms,
-                             spec.world)
+                             spec.world, p.roster)
             p.act("assign", a["name"], w["id"])
 
     for w in workers:
         fill(w)
     # A type that declares `workers` never has more than initial + max_extra worker slots
-    # (retiring ones included); agents that do not fit wait unplaced. Others: v1, unbounded.
+    # (retiring ones included); agents that do not fit wait unplaced. Others: unbounded.
     slots = max_workers(ts) if ts.workers is not None else None
     while pending:
         if slots is not None and len(store.list_workers(spec.swarm, type_name)) >= slots:
@@ -566,9 +575,22 @@ def _nudge_stuck(p: _Pass, swarm: str, type_name: str, text: str | None) -> None
         p.act("nudge", a["name"], f"stuck: resume_prompt queued ({nudges + 1}/{NUDGE_MAX})")
 
 
+def harbor_roster(store: Store, spec: SwarmSpec) -> dict[str, str | None]:
+    """With `naming: words`, each replica of the swarm's Harbor types (spawned children are not
+    teammates) -> its role, the type's `harbor.role`: what the upstream launcher passes as the
+    roster. A replica's name is reserved with its slot; a ramp's are, up to its max."""
+    roster: dict[str, str | None] = {}
+    for type_name, ts in spec.types.items():
+        if ts.harbor and spec.naming == "words":
+            most = max(ts.replicas, ts.replicas_ramp.max if ts.replicas_ramp else 0)
+            slots = store.reserved_slot_names(spec.swarm, type_name)
+            roster |= {slots[s]: ts.harbor.role for s in sorted(slots) if s < most}
+    return roster
+
+
 def _send_assign(store: Store, worker_id: str, a: Row, type_name: str, ts: TypeSpec,
                  tools_version: str | None = None, comms: CommsSpec | None = None,
-                 world: WorldSpec | None = None) -> None:
+                 world: WorldSpec | None = None, roster: dict | None = None) -> None:
     if a["removing"]:
         return  # mid-removal (docs/spawn.md): never re-assign it or re-issue its token
     resume = ts.resume_prompt if a["resume_pending"] else None
@@ -582,6 +604,11 @@ def _send_assign(store: Store, worker_id: str, a: Row, type_name: str, ts: TypeS
     hard = flags.get("budget_stop") == "hard" or store.held(a, flags)  # or paused
     hold = bool(resume) and (hard or bool(r and r.provider.max_working))
     held, resume = (resume, None) if hold else (None, resume)
+    if ts.harbor and not ts.harbor.roster:  # words: the run's agents (harbor_roster), with roles
+        if roster is None:
+            sw = store.get_swarm(a["swarm"])
+            roster = harbor_roster(store, sw["spec"]) if sw else {}
+        ts = ts.model_copy(update={"harbor": ts.harbor.model_copy(update={"roster": roster})})
     cmd = AssignCommand(
         agent=a["name"], type=type_name, spec=worker_type_spec(ts), restore=True, resume_prompt=resume,
         parent=a["parent"], agent_token=spawning.agent_token(store, a["name"], a["swarm"], time.time()),
@@ -747,7 +774,7 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
     timeout = lifetime + s.rng.uniform(0, jitter)
     deadline = p.now + timeout
     # Binds polls and heartbeats to this job: a parked poll or a late heartbeat from the job
-    # this one replaces must not take the new job's commands (e2e run 1, see the API).
+    # this one replaces must not take the new job's commands (see the API).
     incarnation = uuid.uuid4().hex
     env = {
         **ts.env,
@@ -761,15 +788,9 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
         "BUCKET": spec.bucket,
     }
     secrets = {"FLOCK_TOKEN": s.token}
-    names = [*ts.secrets, *([ts.msgboard_invite] if ts.msgboard_invite else [])]
-    if comms_tools(ts, spec.comms):  # the worker joins its agents with the swarm's invite
-        names.append(spec.comms.invite_env)
+    names = list(ts.secrets)
     if ts.resolved_model is not None:  # the provider's key, by name, for the worker to inject
         names.append(ts.resolved_model.provider.api_key_env)
-    if spec.world is not None and (wt := world_token(spec, s.token, s.secret_source)):
-        # the world's shared secret (docs/world.md), as of this launch: a worker whose secret no
-        # longer matches the world's `credential_id` drains and is relaunched with the new one
-        secrets[WORLD_TOKEN_ENV] = wt
     for name in dict.fromkeys(names):
         if name in s.secret_source:
             secrets[name] = s.secret_source[name]
@@ -827,7 +848,8 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
         next_launch_at=None,
     )
     for a in store.list_agents(worker=wid):
-        _send_assign(store, wid, a, type_name, ts, spec.tools_version, spec.comms, spec.world)
+        _send_assign(store, wid, a, type_name, ts, spec.tools_version, spec.comms, spec.world,
+                     p.roster)
     p.act("launch", wid, job_id)
 
 
@@ -899,7 +921,6 @@ def record_heartbeat(store: Store, worker_id: str, hb: WorkerHeartbeat, now: dat
                 "idle_since": ah.idle_since.timestamp() if ah.idle_since else None,
                 "session_id": ah.session_id,
                 "resumed": None if ah.resumed is None else int(ah.resumed),
-                "harness_estimate_usd": ah.harness_estimate_usd,
                 "turns": ah.turns,
                 "last_sync": ah.last_sync.timestamp() if ah.last_sync else None,
                 "msgboard_principal": ah.msgboard_principal,
@@ -929,11 +950,13 @@ def _reassign_missing(store: Store, w: Row, reported: set[str], queued: set[str]
     if ts is None:
         return
     pending = {AssignCommand.model_validate_json(b).agent for b in queued if '"assign"' in b}
+    roster = None  # computed once, for the first re-sent assign
     for a in missing:
         if a["name"] not in pending:
             log.warning("re-sending assign for %s: missing from %s heartbeat", a["name"], w["id"])
+            roster = roster if roster is not None else harbor_roster(store, sw["spec"])
             _send_assign(store, w["id"], a, w["type"], ts, sw["spec"].tools_version,
-                         sw["spec"].comms, sw["spec"].world)
+                         sw["spec"].comms, sw["spec"].world, roster)
 
 
 # --------------------------------------------------------------------------- startup and runner

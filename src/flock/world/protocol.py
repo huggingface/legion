@@ -7,7 +7,8 @@ A world is any HTTP server that answers two routes with a shared secret:
                                               |  {"ok": false, "error": {"code", "message"}}
     POST /hooks               {"event", "agent", "type", "swarm", "data"}   (optional)
 
-Every request carries `X-World-Token`; a tool call also names the calling agent
+Every request carries `X-World-Token` (the secret, or on `/manifest` and tool calls the calling
+agent's own `agent_token`); a tool call also names the calling agent
 (`X-Flock-Agent`, `X-Flock-Type`, `X-Flock-Swarm`, `X-Flock-Turn`, `X-Request-Id`). This module
 is pydantic-only, so the worker, the controller and a world written with `flock.world` share it.
 """
@@ -45,7 +46,6 @@ HOOK_EVENTS = ("agent_start", "agent_done", "turn")
 
 WORLD_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 TOOL_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
-RESERVED = frozenset({"bash", "done"})  # the llm harness's own tools
 
 
 class WorkspaceUpload(BaseModel):
@@ -83,8 +83,6 @@ class WorldTool(BaseModel):
     def _name(cls, v: str) -> str:
         if not TOOL_NAME_RE.match(v):
             raise ValueError(f"tool name {v!r} must match {TOOL_NAME_RE.pattern}")
-        if v in RESERVED:
-            raise ValueError(f"tool name {v!r} is reserved (the llm harness's own tool)")
         return v
 
     @field_validator("parameters")
@@ -148,6 +146,13 @@ class WorldManifest(BaseModel):
 
     def get(self, name: str) -> WorldTool | None:
         return next((t for t in self.tools if t.name == name), None)
+
+
+def agent_token(secret: str, agent: str) -> str:
+    """One agent's own world token: a world accepts it instead of its secret on `/manifest` and
+    tool calls whose `X-Flock-Agent` is `agent`, so a token in an agent's hands acts only as it."""
+    return hmac.new(secret.encode(), f"flock-world-agent\0{agent}".encode(),
+                    hashlib.sha256).hexdigest()
 
 
 def credential_id(token: str, origin: str) -> str:

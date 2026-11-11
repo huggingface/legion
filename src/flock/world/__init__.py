@@ -21,7 +21,7 @@ with `python -m flock.world serve module:Class` (`flock.world.server`):
             return {"n": self.n, "by": agent.name}
 
 Tool schemas come from the type hints and docstrings with the tools-folder rules
-(docs/tools.md, "Contract"); a parameter named `agent` (or annotated `Agent`) receives the
+(flock.tools.loader); a parameter named `agent` (or annotated `Agent`) receives the
 caller and is never shown to the model. Override `manifest()` and `call()` to serve tools some
 other way. The hooks `on_agent_start`, `on_agent_done` and `on_turn` are sent only when a
 subclass overrides them (the manifest lists them in `hooks`).

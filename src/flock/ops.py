@@ -28,9 +28,9 @@ import yaml
 from pydantic import ValidationError
 
 from flock.client import Client, ClientError, local_run
-from flock.models import SwarmSpec, comms_tools, loop_refusals
-from flock.registry import HARNESSES
+from flock.models import SwarmSpec, loop_refusals
 from flock.specrender import render, source_of
+from flock.worker.agents import VERIFY_WAIT
 
 
 class SpecError(Exception):
@@ -54,10 +54,14 @@ def read_spec(spec_file: str, env_files=(), sources: dict[str, str] | None = Non
     """Read a spec (${VAR} from --env files and the environment substituted:
     flock.specrender, `sources` filled) and inline each type's
     system_prompt_file (plus system_prompt_append_file) and loop prompt files, and the comms
-    kickoff and protocol files (relative to the spec file). Raises SpecError."""
+    kickoff and protocol files (relative to the spec file). A Harbor spec (the upstream YAML plus
+    flock's blocks: a top-level `task:`) is compiled instead (`harbor_spec`). Raises SpecError."""
     path = Path(spec_file)
     try:
-        spec = SwarmSpec.model_validate(render(path, env_files, sources))
+        data = render(path, env_files, sources)
+        if isinstance(data, dict) and "task" in data:
+            return harbor_spec(path, env_files)
+        spec = SwarmSpec.model_validate(data)
     except ValidationError as e:
         lines = []
         for err in e.errors():
@@ -94,21 +98,96 @@ def read_spec(spec_file: str, env_files=(), sources: dict[str, str] | None = Non
     return spec
 
 
-# `loop.on` sources the workers' comms events feed (docs/comms.md) -> their `comms.wake` kind.
-COMMS_WAKES = {f"comms.{k}": k for k in ("mention", "thread", "dm", "channel")}  # = controller.api.COMMS_WAKE_EVENTS values
+def harbor_spec(path: Path, env_files=()) -> SwarmSpec:
+    """A Harbor spec as flock runs it, done here on the operator's machine as the upstream
+    launcher does: load it (${VAR} from the environment, then the --env files), pin the task to
+    one revision and build the tool bundle, whose sha every worker checks against the bundle it
+    builds, then compile it (flock.harbor.spec.compile_spec). The tools and resources folders
+    go to the workers packed (`pack_folders`, uploaded by `check_spec`'s caller as the swarm's
+    tools version); the compiled spec names that version."""
+    import asyncio
+    import tempfile
+
+    from flock.harbor import sources
+    from flock.harbor.spec import Spec, compile_spec, pack_folders
+    from flock.harbor.tools.bundle import build_tool_bundle
+    from flock.specrender import read_env_file
+    from flock.tools.loader import ToolsError
+
+    env = {**os.environ, **{k: v for f in env_files for k, v in read_env_file(f).items()}}
+    spec = Spec.load(path, env)
+    try:
+        task = asyncio.run(sources.resolve_task(spec.task)).manifest()
+    except Exception as e:  # noqa: BLE001 - the Hub, git or the selector: the operator's to fix
+        raise SpecError([(f"{path}: task: cannot pin {spec.task.repo} "
+                          f"({spec.task.selector}@{spec.task.revision}): {e}")]) from None
+    bundle = None
+    if spec.tools:
+        try:
+            with tempfile.TemporaryDirectory() as d:  # only its sha and manifest go in the spec
+                bundle = build_tool_bundle(spec.tools_dir, spec.tools, Path(d) / "tools.tar.gz")
+        except Exception as e:  # noqa: BLE001 - the folder's modules are imported to list them
+            raise SpecError([f"{path}: tools: {e}"]) from None
+    try:
+        folders = pack_folders(spec.tools_dir, spec.resources_dir).version
+    except ToolsError as e:  # a link inside a folder, or over the bundle limits
+        raise SpecError([f"{path}: tools_dir, resources_dir: {e}"]) from None
+    return compile_spec(spec, task, bundle, folders)
+
+
+def keep_pins(old: SwarmSpec, spec: SwarmSpec) -> None:
+    """A Harbor type keeps the task revision its run pinned while the spec names the same task
+    (a branch that moved since is not a change), and the folder paths it was launched from
+    while the folders' content is the same (the run folder moved or copied, `--ref`'s copy:
+    workers unpack the shipped folders). With `naming: consecutive-id` the roster (every role's
+    agents, compiled from the file's counts) keeps the running agents of each role whose live
+    replicas and ramp were kept (`keep_replicas` first), so teammates are never told of agents
+    that do not exist; a count change that would rename running agents is refused. With words
+    there is no roster in the file: each assign carries the run's agents (reconcile.harbor_roster).
+    Changes `spec` in place."""
+    if any(ts.harbor for ts in spec.types.values()) and old.naming != spec.naming:
+        raise SpecError([(f"naming: the run names its agents `{old.naming}`, the file "
+                          f"`{spec.naming}`: names never change in a run: launch a new run "
+                          f"(`flock launch {old.swarm}` still resumes this one as it is)")])
+    if spec.naming == "consecutive-id":
+        kept = {old.types[n].harbor.role for n, ts in spec.types.items() if n in old.types
+                and ts.harbor and old.types[n].harbor and ts.replicas == old.types[n].replicas
+                and ts.replicas_ramp == old.types[n].replicas_ramp}
+        running = next((t.harbor.roster for t in old.types.values() if t.harbor), {})  # run-wide
+        new = next((t.harbor.roster for t in spec.types.values() if t.harbor), {})
+
+        def first(roster):  # role -> its first name
+            return {r: a for a, r in reversed(roster.items())}
+
+        if moved := [r for r, a in first(running).items() if first(new).get(r, a) != a]:
+            # consecutive names run across the roles: another count would rename running agents
+            where = ", ".join(f"role {r}" for r in moved)
+            raise SpecError([(f"agents.roles: a count change before {where} renumbers its "
+                              "agents (names run agent-001, ... across the roles in order): "
+                              "change only the last role's count, or launch a new run")])
+        for ts in spec.types.values():
+            if ts.harbor:  # a role's names: its role label in the run-wide roster
+                ts.harbor.roster = {
+                    **{a: r for a, r in running.items() if r in kept},
+                    **{a: r for a, r in ts.harbor.roster.items() if r not in kept}}
+    for name, ts in spec.types.items():
+        was = old.types.get(name)
+        if not (ts.harbor and was and was.harbor):
+            continue
+        if was.harbor.config["task"] == ts.harbor.config["task"]:
+            ts.harbor.task = was.harbor.task
+        if was.harbor.folders is not None and was.harbor.folders == ts.harbor.folders:
+            for key in ("tools_dir", "resources_dir"):
+                ts.harbor.config[key] = was.harbor.config[key]
 
 
 def _unfed(spec: SwarmSpec, ts, src: str) -> str | None:
-    """Why `src` in a type's `loop.on` can never wake its loop; None when comms feeds it."""
-    kind = COMMS_WAKES.get(src)
-    if kind is None:
-        return "no feeder in this version (comms.mention, comms.thread, comms.dm and comms.channel are fed)"
-    if spec.comms is None or not comms_tools(ts, spec.comms):
-        return ("no comms feeder: the type is not on the board (set `comms: true` and the "
-                "swarm-level `comms:` block)")
-    if kind not in spec.comms.wake:
-        return f"no comms feeder: comms.wake does not list {kind}"
-    return None
+    """Why `src` in a type's `loop.on` can never wake its loop; None when the board feeds it."""
+    if not src.startswith("message_board."):
+        return "no feeder: only message_board.* wakes are fed (the message_board resource)"
+    # shortcut: not checked against resources.message_board.wake (the plugin's kinds)
+    return None if "message_board" in ts.harbor.resources else (
+        "no feeder: the run has no message_board resource")
 
 
 def loop_problems(spec: SwarmSpec) -> tuple[list[str], list[str]]:
@@ -141,20 +220,12 @@ def provider_backed(spec: SwarmSpec) -> bool:
     return any(ts.resolved_model is not None for ts in spec.types.values())
 
 
-# Harnesses that cannot add request-body fields, so a model's `extra` is kept but not sent.
-EXTRA_NOT_SENT = frozenset(name for name, h in HARNESSES.items() if not h.sends_extra)
-
-
 def extra_warnings(spec: SwarmSpec) -> list[str]:
-    from flock.worker.adapters.pi import env_dropped
-
-    return [f"warning: types.{name}.env.{k}: dropped by pi isolation (use `secrets`)"
-            for name, ts in spec.types.items() if ts.harness.value == "pi"
-            for k in env_dropped(ts.env, ts.resolved_model and ts.resolved_model.provider.api_key_env)] + [f"warning: type {name}: `extra` is kept in the spec but not sent by the "
+    """Harbor's Pi cannot add request-body fields: a model's `extra` is kept but not sent."""
+    return [f"warning: type {name}: `extra` is kept in the spec but not sent by the "
             f"{ts.harness.value} harness (docs/open-models.md)"
             for name, ts in spec.types.items()
-            if ts.harness.value in EXTRA_NOT_SENT and ts.resolved_model is not None
-            and ts.resolved_model.extra]
+            if ts.resolved_model is not None and ts.resolved_model.extra]
 
 
 def preflight_lines(results: list[dict]) -> list[str]:
@@ -191,10 +262,12 @@ def source_header(spec_file: str | Path | None) -> dict[str, str]:
 def resume_diff(old: SwarmSpec, spec: SwarmSpec) -> list[str]:
     """What `launch` on a stored swarm refuses: the folder's spec against the stored one,
     without the live replicas (the ramp rewrites them) and `world.dir` (absolute: the same
-    folder copied elsewhere). Changes `spec` in place."""
+    folder copied elsewhere) and a Harbor type's task revision and folder paths (`keep_pins`).
+    Changes `spec` in place."""
     from flock.live import diff_specs, keep_replicas
 
     keep_replicas(old, spec)
+    keep_pins(old, spec)
     if old.world is not None and spec.world is not None:
         spec.world.dir = old.world.dir
     return diff_specs(old, spec)
@@ -361,6 +434,7 @@ def update(api: Client, spec: SwarmSpec, spec_file: str, *, sources: dict[str, s
             before = next((b["tools"] for b in listed if b["version"] == old.tools_version), [])
             names = (before, up["tools"])
     kept = keep_replicas(old, spec, ramps_only=replicas == "spec")
+    keep_pins(old, spec)
     lines = diff_specs(old, spec, names)
     if check:  # `path: old -> new (spec.yaml:41 | run.env WORKER_MEM | default)`
         lines = [f"{x} ({source_of(sources or {}, x.split(':', 1)[0])})" if ": " in x
@@ -461,6 +535,9 @@ def start_local(spec: SwarmSpec, spec_file: str, env_files=(),
     LOCAL_DIR.mkdir(exist_ok=True)
     cmd = [sys.executable, "-m", "flock.controller.localrun", spec_file, "--no-apply",
            "--data-dir", str(LOCAL_DIR), *(a for f in env_files for a in ("--env", f))]
+    if all(ts.loop for ts in spec.types.values()):  # self-driven: end when every loop is over
+        # the drain waits up to VERIFY_WAIT for each Trial's verifier; a shorter grace kills it unscored
+        cmd += ["--until", "idle", "--grace", str(VERIFY_WAIT + 30)]
     with (LOCAL_DIR / "launch.log").open("w") as out:
         proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=out,
                                 start_new_session=True, env=dict(env))

@@ -9,14 +9,15 @@ they can change while the swarm runs. `flock update` does this:
 ## `flock update`
 
 ```console
-$ flock update experiments/calc          # the folder, or its spec.yaml
+$ flock update experiments/my-experiment   # the folder, or its spec.yaml
 tools: 3f9c0e2a7b61d4c8 -> 9a1b2c3d4e5f6a7b (+mul)
 prompts changed: calc (system_prompt); comms (protocols_text)
 types.calc.replicas: 2 -> 3
 ```
 
 It reads the folder exactly as `flock launch` does: the spec, `system_prompt_file`, the loop
-prompt files, the comms kickoff and protocols, and the tools folder. It checks the folder,
+prompt files, the comms kickoff and protocols, and the tools folder. (`system_prompt*` and
+`comms:` come only from a hand-written swarm spec, not a Harbor spec.) It checks the folder,
 compares it with the spec the controller is running and applies it. The output is one line per
 change: the tools version (old -> new, with the tools added and removed), the prompts changed
 per type, then every other key as `path: old -> new`. When nothing changed it prints
@@ -37,7 +38,7 @@ written by the controller and never listed; after the update the world's tool ch
 as `world tools: +a -b`.
 
 `flock update --check` runs every check the controller runs on an apply (tools against the
-bundle and the live world manifest, world, comms channel, harness changes) and prints the
+bundle and the live world manifest, world, comms channel, fixed Harbor settings) and prints the
 diff, storing and posting nothing (`PUT /swarms/{swarm}?dry_run=1` returns the resolved
 spec). Each changed value names where it came from: `(spec.yaml:41)`, `(run.env WORKER_MEM)`,
 `(env WORKER_MEM)`, `(spec.yaml:12 default of WORKER_MEM)` or `(default)`. It exits 1 with
@@ -46,8 +47,7 @@ check is stopped again.
 
 A refused update exits 1, prints the reason and applies nothing. The reasons are the ones
 `flock launch` gives: a spec error, a tools folder error, an unknown tool name, or a 400/409
-from the controller. On a running swarm the controller also refuses to change the harness of a
-type that has agents. Use a new type name for that, or remove the type first.
+from the controller.
 
 Preflight runs only when the update adds a provider-backed model the running spec does not
 have (`--preflight` / `--skip-preflight` to choose). Locally, `flock update` finds the run
@@ -59,9 +59,9 @@ through `.flock/current`, like the other commands do.
 (one `spec.yaml` per run) serves several clusters without a generated copy or an overlay:
 
 ```console
-$ flock launch my-experiment/spec.yaml --env runs/run4/run.env
-$ COMPUTE_KIND=local flock launch my-experiment/spec.yaml --env runs/run4/run.env
-$ flock update my-experiment --env runs/run4/run.env --ref origin/run5 --check
+$ flock launch my-experiment/spec.yaml --env runs/demo/run.env
+$ COMPUTE_KIND=local flock launch my-experiment/spec.yaml --env runs/demo/run.env
+$ flock update my-experiment --env runs/demo/run.env --ref origin/main --check
 ```
 
 - Every string value, inline prompts and commands included, may use `${VAR}` and
@@ -223,16 +223,14 @@ is a crash at once, without waiting for `worker_dead_after`. Raise the keys with
 
 | change | takes effect |
 |---|---|
-| tools folder (a new content hash) | each agent's next turn. The worker fetches the version within a heartbeat (30 s on jobs, 5 s locally); a turn in flight keeps its version (docs/tools.md) |
-| `system_prompt` / `system_prompt_file` | each agent's next turn boundary. The worker rewrites `CLAUDE.md` / `AGENTS.md` and the `llm` harness rebuilds its system message |
 | `loop:` settings and loop prompt files | the next loop tick (docs/loop.md) |
-| `comms.rules`, `comms.protocols` | the next heartbeat; the instructions' board section at the next turn |
 | `comms.kickoff_file` | never: the kickoff is posted once per channel |
 | `limits.budget_usd`, `limits.alive`, `spawn:` | at once (the controller) |
 | `replicas` | the next reconcile pass |
-| other type fields (`max_turns`, `max_budget_usd`, `tool_choice`, `turn_timeout`, ...) | the next turn boundary. A CLI harness takes the per-prompt limits, `model`, `env` and `secrets` at its next start, after `idle_grace` |
+| other type fields (`max_turns`, `max_budget_usd`, `turn_timeout`, ...) | the next turn boundary |
 | `compute.worker_unknown_after`, `worker_dead_after`, `crash_backoff` | at once (the controller) |
-| a type's `harness` (with agents), `compute.kind`, `swarm` | refused |
+| `compute.kind`, `swarm` | refused |
+| a Harbor spec's `task`, `tools`, `resources`, `environment`, `inference`, `model`, `team_file`, `role_file`, `limits.agent_*` or `limits.trial_hours` (its roles have agents) | refused: the workers prepared them at launch. Counts, loops, `workers:` and the run's limits change as above. A task branch that moved since the launch is not a change: the run keeps its pinned revision |
 
 A turn boundary is a prompt that starts a new turn. A prompt that joins a turn in flight
 changes nothing until that turn ends. Changed type specs reach the workers in the
@@ -247,11 +245,3 @@ each kind of change:
 
 <the prompt>
 ```
-
-CLI harnesses (`claude`, `codex`, `pi`) read their instructions file only at start. For them
-the note says which file to re-read (`your instructions in CLAUDE.md changed; re-read them`,
-`your tools changed; re-read the Tools section of AGENTS.md`).
-
-A running `pi` agent takes a provider's new endpoint list (`base_urls`), model id or
-reasoning level at its next Pi start: models.json is rewritten then, and a transport error
-or turn timeout restarts Pi. A change of the provider's `api_key_env` needs a worker restart.

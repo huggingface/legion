@@ -11,6 +11,7 @@ from flock import cli, ops
 from flock.client import Client, ClientError
 from flock.current import write_current
 from flock.ops import SpecError, launch, read_spec, update
+from flock.worker.agents import VERIFY_WAIT
 
 from .conftest import make_spec, write_spec
 
@@ -36,7 +37,7 @@ def test_a_failed_call_after_the_preflight_keeps_what_was_done(api, tmp_path, mo
         launch(api, read_spec(f), f, preflight=True)
     assert e.value.lines == ["error 409: exists"] and e.value.done["preflight"]["ok"]
     r = CliRunner().invoke(cli.app, ["launch", f, "--preflight"])  # the CLI still shows it
-    assert r.exit_code == 1 and "preflight: no provider-backed models" in r.output
+    assert r.exit_code == 1 and "1 model(s) unverified" in r.output
     assert r.output.rstrip().endswith("error 409: exists")
 
 
@@ -51,3 +52,22 @@ def test_start_local_refuses_another_swarms_run(tmp_path, monkeypatch):
     assert ops.start_local(make_spec("other"), "spec.yaml") is None  # already serves it
     monkeypatch.setenv("FLOCK_URL", "http://elsewhere:1")
     assert ops.start_local(make_spec(), "spec.yaml") is None  # an explicit controller
+
+
+@pytest.mark.parametrize("loop", [None, {"prompt": "go"}])
+def test_start_local_ends_a_looped_run_when_idle(tmp_path, monkeypatch, loop):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("FLOCK_URL", raising=False)
+    monkeypatch.delenv("FLOCK_CURRENT", raising=False)
+    cmds = []
+
+    def popen(cmd, **_):
+        cmds.append(cmd)
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(ops.subprocess, "Popen", popen)
+    with pytest.raises(RuntimeError):
+        ops.start_local(make_spec(agent={"replicas": 1, "loop": loop}), "spec.yaml")
+    assert (cmds[0][-4:-2] == ["--until", "idle"]) == (loop is not None)
+    if loop is not None:  # the grace covers the Trials' verifier wait
+        assert float(cmds[0][cmds[0].index("--grace") + 1]) > VERIFY_WAIT

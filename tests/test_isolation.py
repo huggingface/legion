@@ -12,7 +12,6 @@ from pathlib import Path
 import pytest
 
 from flock import isolation
-from flock.worker.adapters.pi import PiMapper
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -145,26 +144,6 @@ assert result.returncode == 0, result.stdout + result.stderr
     subprocess.run([sys.executable, "-c", script], check=True, capture_output=True, timeout=5)
 
 
-@pytest.mark.parametrize("message", ["maximum context length is 131072 tokens; you requested 134290",
-                                      "context length 150300 exceeds 131072", "invalid request 50201",
-                                      "you requested 429 tokens, only 200 available"])
-def test_context_length_numbers_do_not_trigger_transport_retries(message):
-    mapper = PiMapper()
-    mapper.on_record({"type": "agent_start"})
-    mapper.on_record({"type": "message_end", "message": {"role": "assistant", "stopReason": "error", "errorMessage": message}})
-    [event] = mapper.on_record({"type": "agent_settled"})
-    assert event.status == "error" and event.data.get("reason") != "model_transport"
-
-
-@pytest.mark.parametrize("message", ["429 Too Many Requests", "HTTP 503: unavailable", "HTTP 502: bad gateway"])
-def test_http_errors_remain_retryable(message):
-    mapper = PiMapper()
-    mapper.on_record({"type": "agent_start"})
-    mapper.on_record({"type": "message_end", "message": {"role": "assistant", "stopReason": "error", "errorMessage": message}})
-    [event] = mapper.on_record({"type": "agent_settled"})
-    assert event.data["reason"] == "model_transport"
-
-
 def test_namespace_hides_supervisor_and_sibling_files_and_keeps_live_pin_updates(tmp_path, kernel_namespaces):
     workspace, home, pin = tmp_path / "agents/cedar", tmp_path / "pi/cedar", tmp_path / "pins/cedar"
     for path in (workspace, home, pin, tmp_path / "pins/birch"):
@@ -249,73 +228,6 @@ print('isolated')
 def test_real_bot_runs_inside_namespaces(tmp_path, kernel_namespaces, bot):
     result = run_bot(bot, tmp_path / "root", ["Hello", "Bye"])
     assert result.returncode == 0 and result.stdout == "Hello!\nHello!\n", result.stderr
-
-
-async def test_pi_start_uses_namespace_wrapper_and_explicit_environment(tmp_path, monkeypatch):
-    from flock.models import TypeSpec
-    from flock.worker.adapters import pi
-
-    monkeypatch.setenv("FLOCK_PROCESS_ISOLATION", "1")
-    monkeypatch.setenv("HF_TOKEN", "worker-secret")
-    workspace, home, pin = tmp_path / "cedar", tmp_path / "home", tmp_path / "pins/cedar/pin.json"
-    workspace.mkdir()
-    adapter = pi.PiAdapter(workspace, agent="cedar", home=home, pi_bin="/usr/bin/false",
-                           model_config=pi.PiModelConfig("http://fake/v1", "MODEL_KEY", "m", "fake"))
-    calls = []
-    async def spawn(*args, **kwargs):
-        calls.append((args, kwargs))
-        raise RuntimeError("stop before exec")
-    monkeypatch.setattr(pi.asyncio, "create_subprocess_exec", spawn)
-    monkeypatch.setattr(isolation, "SANDBOX_TMP", "/nonexistent-sandbox-tmp")  # tmp_path is in /tmp
-    try:
-        with pytest.raises(RuntimeError, match="stop before exec"):
-            await adapter.start(workspace, None, TypeSpec(harness="pi", model="m"), env={
-                "MODEL_KEY": "provider-key", "HF_TOKEN": "explicit-secret", "FLOCK_TOOLS_PIN": str(pin),
-                "FLOCK_WORLD_TOKEN": "world-secret", "UNRELATED_SECRET": "secret"})
-        args, kwargs = calls[0]
-        assert "--mount-proc" in args and "--pid" in args
-        assert "--net" not in args
-        assert kwargs["start_new_session"]
-        assert kwargs["env"]["MODEL_KEY"] == "provider-key"
-        assert kwargs["env"]["FLOCK_TOOLS_PIN"] == str(pin)
-        assert not ({"HF_TOKEN", "FLOCK_TOKEN", "FLOCK_WORLD_TOKEN", "UNRELATED_SECRET"} & kwargs["env"].keys())
-        # HOME, TMPDIR and caches live on the agent's own disk-backed dir, not the tmpfs root.
-        env = kwargs["env"]
-        assert env["HOME"] == str(home / "home") and env["TMPDIR"] == str(home / "tmp")
-        for var in ("XDG_CACHE_HOME", "UV_CACHE_DIR", "npm_config_cache", "PIP_CACHE_DIR"):
-            assert env[var].startswith(str(home / "home") + "/")
-        for d in (home / "home", home / "tmp"):
-            assert d.is_dir() and (d.stat().st_mode & 0o777) == 0o700
-        config = json.loads(args[args.index(str(Path(isolation.__file__).resolve())) + 1])
-        assert str(home.resolve()) in config["writable"] and config["private_dirs"] == []
-        # the sandbox's /tmp is the agent's disk-backed TMPDIR; the tmpfs root is capped
-        assert config["tmp"] == str((home / "tmp").resolve()) and config["tmpfs_size"] == "256m"
-    finally:
-        await adapter.stop()
-
-
-async def test_real_pi_starts_and_resumes_inside_namespaces(tmp_path, monkeypatch, kernel_namespaces):
-    from . import fake_openai
-    from .test_worker_pi import PI_BIN, make_adapter, pi_spec, until_turn_ended
-
-    if not PI_BIN:
-        pytest.skip("Pi CLI is required for isolated integration")
-    monkeypatch.setenv("FLOCK_PROCESS_ISOLATION", "1")
-    server = fake_openai.serve(0, str(tmp_path / "model.jsonl"))
-    adapter, workspace = make_adapter(tmp_path, server, monkeypatch)
-    try:
-        sid = await adapter.start(workspace, None, pi_spec(), env={"FLOCK_TEST_PI_KEY": "fake-key"})
-        await adapter.send("bash: echo namespace-check")
-        events = await until_turn_ended(adapter)
-        assert events[-1].status == "completed"
-        await adapter.stop()
-        assert await adapter.start(workspace, sid, pi_spec(), env={"FLOCK_TEST_PI_KEY": "fake-key"}) == sid
-        await adapter.send("bash: echo namespace-resume")
-        events = await until_turn_ended(adapter)
-        assert events[-1].status == "completed"
-    finally:
-        await adapter.stop()
-        server.shutdown()
 
 
 def test_namespace_wrapper_ignores_direct_spot_usr1(tmp_path, monkeypatch):

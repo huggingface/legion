@@ -12,7 +12,7 @@ from flock import cli
 from flock.client import Client
 from flock.models import AgentHeartbeat
 
-from .conftest import make_spec, wire
+from .conftest import HB, make_spec, wire
 from .test_api import W0, apply, hb_body
 from .test_providers_controller import CAP_PROVIDERS, _cap_client, _delivered, hb, pspec, put
 
@@ -54,7 +54,7 @@ async def test_bulk_prompt_by_type_and_state(client, store, clock, tick):
 
 
 async def test_bulk_prompts_respect_max_working(store, clock, tick):
-    spec = pspec(CAP_PROVIDERS, worker={"harness": "codex", "model": "p:test", "replicas": 3})
+    spec = pspec(CAP_PROVIDERS, worker={**HB, "model": "p:test", "replicas": 3})
     wid = "p-worker-w0000"
     async with await _cap_client(store, clock, True) as c:
         assert (await put(c, spec)).status_code == 200
@@ -108,8 +108,8 @@ def test_cli_prompt_by_type(tmp_path, monkeypatch, app, store, tick):
 
 
 async def test_repeated_idle_bulk_calls_do_not_stack_prompts(store, clock, tick):
-    """Pixel run 1k: with admission blocked, 645 `--state idle` calls queued 73,394 prompts."""
-    spec = pspec(CAP_PROVIDERS, worker={"harness": "codex", "model": "p:test", "replicas": 3})
+    """With admission blocked, repeated `--state idle` calls must not queue a prompt each."""
+    spec = pspec(CAP_PROVIDERS, worker={**HB, "model": "p:test", "replicas": 3})
     wid = "p-worker-w0000"
     body = {"type": "worker", "state": "idle", "text": "paint"}
     async with await _cap_client(store, clock, True) as c:
@@ -132,7 +132,7 @@ async def test_repeated_idle_bulk_calls_do_not_stack_prompts(store, clock, tick)
         await c.post(f"/workers/{wid}/events", json={"worker": wid, "events": evs})
         ack = (await c.post("/swarms/p/prompts", json=body)).json()
         assert (ack["queued"], ack["skipped_pending"]) == (1, 2)
-        # explicit skip_pending=false stacks, as before
+        # explicit skip_pending=false stacks
         ack = (await c.post("/swarms/p/prompts", json={**body, "skip_pending": False})).json()
         assert ack["queued"] == 3 and ack["skipped_pending"] == 0
 

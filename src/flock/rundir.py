@@ -123,6 +123,10 @@ def spec_keys(data: Any, cluster: Mapping[str, str] | None = None) -> dict[str, 
     named += [(p.get("api_key_env"), f"providers.{n}.api_key_env")
               for n, p in (data.get("providers") or {}).items() if isinstance(p, dict)]
     named.append(((data.get("comms") or {}).get("invite_env"), "comms.invite_env"))
+    # a Harbor spec's (flock.harbor.spec): its inference key and its resources' tokens
+    named.append(((data.get("inference") or {}).get("api_key_env"), "inference.api_key_env"))
+    named += [(o.get("token_env"), f"resources.{n}.token_env")
+              for n, o in (data.get("resources") or {}).items() if isinstance(o, dict)]
     named += [(s, f"types.{n}.secrets") for n, t in (data.get("types") or {}).items()
               if isinstance(t, dict) for s in t.get("secrets") or []]
     cluster = cluster or {}
@@ -234,6 +238,34 @@ def _files(root: Path) -> dict[str, Path]:
             if p.is_file() and "__pycache__" not in p.parts}
 
 
+def outside_links(src: Path) -> list[tuple[Path, str]]:
+    """(path in `src`, target) of links below `src`'s top level that point outside it:
+    `copy_experiment` copies what they point to (a secret file, say) as a plain file, which
+    `flock launch` may then ship. A top-level link (a linked `tools` folder) and links within its own
+    target are not listed."""
+    root, out = src.resolve(), []
+    for top in src.iterdir():
+        within = (root, top.resolve())
+        for d, dirs, files in os.walk(top):  # the top link followed, the ones below it not
+            for p in (Path(d) / n for n in dirs + files):
+                if p.is_symlink() and not any(p.resolve().is_relative_to(w) for w in within):
+                    out.append((p.relative_to(src), os.readlink(p)))
+    return sorted(out)
+
+
+def shipped_folders(spec_file: Path) -> list[Path]:
+    """A Harbor spec's (top-level `task:`) tools and resources folders as written, which
+    `flock launch` ships to the workers; [] for any other spec."""
+    try:
+        data = load_spec_yaml(spec_file.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - unreadable or broken: the spec check says so
+        return []
+    if not (isinstance(data, dict) and "task" in data):
+        return []
+    # unset: flock's built-in ones (flock.harbor.config.BUILTIN), not the experiment's
+    return [Path(str(data[f"{k}_dir"])) for k in ("tools", "resources") if data.get(f"{k}_dir")]
+
+
 def copy_experiment(src: Path | None, dst: Path, rep: InitReport,
                     need: str | None = "spec.yaml") -> None:
     """Copy the experiment folder (links followed; any folder holding `need`) into an absent or
@@ -253,6 +285,15 @@ def copy_experiment(src: Path | None, dst: Path, rep: InitReport,
         raise ValueError(f"{dst} is missing or empty: pass --from EXPERIMENT_FOLDER")
     if need and not (src / need).is_file():
         raise ValueError(f"{src}: no spec.yaml (an experiment folder holds spec.yaml + prompts/)")
+    links = outside_links(src)
+    shipped = shipped_folders(src / need) if need else []
+    if refused := [f"{p} -> {t}" for p, t in links if any(p.is_relative_to(f) for f in shipped)]:
+        raise ValueError(f"{src}: links in the tools or resources folder point outside the "
+                         f"experiment, and launch would ship what they point to: "
+                         f"{', '.join(refused)}; copy those files in instead")
+    if links:
+        rep.checks.append(Check("links", True, "copied as files from outside the folder (check "
+                                "none is a secret)", [f"{p} -> {t}" for p, t in links], warn=True))
     shutil.copytree(src, dst, symlinks=False, dirs_exist_ok=True,
                     ignore=shutil.ignore_patterns("__pycache__"))
     rep.created.append(f"{dst} (copy of {src})")
@@ -483,6 +524,25 @@ def check_mounts(env: Mapping[str, str]) -> Check:
         return Check("container mounts", False, f"not under the venv or CONTAINER_MOUNTS "
                      f"({', '.join(mounts)}): {', '.join(bad)}", [" -> ".join(hops)])
     return Check("container mounts", True, " -> ".join(hops) + ": every hop is mounted")
+
+
+def check_task(spec: SwarmSpec) -> Check:
+    """A Harbor spec's task is pinned: loading the spec resolved the registry and the task's repo
+    to commits (flock.harbor.sources), so a branch or tag cannot move under a running swarm."""
+    tasks = {json.dumps(ts.harbor.task, sort_keys=True): ts.harbor.task
+             for ts in spec.types.values() if ts.harbor}
+    if not tasks:
+        return Check("harbor task", None, "not a Harbor spec")
+    sha = re.compile(r"[0-9a-fA-F]{40}")
+    for t in tasks.values():
+        for what, value in (("registry_commit", t.get("registry_commit")),
+                            ("task.git_commit_id", (t.get("task") or {}).get("git_commit_id"))):
+            if not sha.fullmatch(str(value or "")):
+                return Check("harbor task", False, f"{what} is {value!r}, not a commit: the "
+                             "task is not pinned (set task.revision to a commit)")
+    t = next(iter(tasks.values()))
+    return Check("harbor task", True, f"pinned: registry {t['registry_commit'][:12]}, "
+                 f"task {t['task']['git_commit_id'][:12]}")
 
 
 def check_world(spec: SwarmSpec, env: Mapping[str, str], run_dir: Path) -> Check:
@@ -822,6 +882,13 @@ def init(run_dir: str | Path, experiment: str | Path | None = None, *,
                          ("worker slots", "bucket", "providers", "board", "world", "dashboard")),
                        check_venv({**env, **values})]
         return rep
+    # secrets known once compiled (a Harbor resource's default token_env): their lines too
+    more = {s for ts in spec.types.values() for s in ts.secrets} - set(spec_keys(data))
+    if more:
+        compiled = {n: {"secrets": [s for s in ts.secrets if s in more]}
+                    for n, ts in spec.types.items()}
+        write_run_env(d / RUN_ENV, {"types": compiled}, str(experiment or exp),
+                      {k: v for k, v in fill.items() if k in more}, rep)
     unset = [n for n, (default, why) in spec_keys(data).items()  # `NAME=` substitutes ""
              if default is None and not why.startswith("secret:") and not values.get(n)
              and not env.get(n)]
@@ -829,7 +896,7 @@ def init(run_dir: str | Path, experiment: str | Path | None = None, *,
                             f"{RUN_ENV}" if not unset else f"empty, no default: {', '.join(unset)}",
                             warnings))
     secret_env = {**env, **values}
-    rep.checks += [check_slots(spec), check_bucket(spec, secret_env, rep),
+    rep.checks += [check_slots(spec), check_task(spec), check_bucket(spec, secret_env, rep),
                    check_providers(spec, secret_env), check_board(spec, secret_env),
                    check_venv(secret_env), check_world(spec, secret_env, d),
                    register_dashboard(spec, secret_env)]

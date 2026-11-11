@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 
+import pytest
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
@@ -176,7 +177,7 @@ def test_update_replicas_spec_never_lowers_a_ramp_type_and_check_lists_deletions
     assert types["r"].replicas == 2 and types["b"].replicas == 1
 
 
-# ----------------------------------------------------------------- review fixes
+# ----------------------------------------------------------------- bucket guard
 
 
 def test_the_bucket_guard_stops_at_the_first_file(monkeypatch):
@@ -224,6 +225,38 @@ def test_resume_diff_ignores_where_the_folder_is():
 
     assert ops.resume_diff(at("/runs/a/experiment/world"), at("/runs/b/experiment/world")) == []
     assert ops.resume_diff(at("/y"), at("/x", "w2"))
+
+
+def test_resume_keeps_a_harbor_runs_roster_with_its_live_replicas():
+    """With `naming: consecutive-id` the roster lists every type's agents from the file's counts
+    (`agent-001`, ... across the roles): a resume (live replicas kept) keeps the running roster;
+    an update keeps a kept type's agents and takes a new or changed type's from the file."""
+    from flock import live
+    from flock.models import SwarmSpec
+
+    def harbor(**counts):
+        roles = [t for t, n in counts.items() for _ in range(n)]
+        roster = {f"agent-{i + 1:03d}": t for i, t in enumerate(roles)}
+        return SwarmSpec.model_validate({**make_spec().model_dump(mode="json"),
+                                         "naming": "consecutive-id", "types": {
+            t: {"harness": "harbor", "model": "fake:m", "replicas": n, "harbor": {
+                "task": {}, "config": {"task": {}}, "role": t, "roster": roster}}
+            for t, n in counts.items()}})
+
+    old = harbor(writer=2, critic=1)
+    assert ops.resume_diff(old, harbor(writer=2, critic=3)) == []  # the last role grew
+    new = harbor(writer=2, critic=1, scout=1)  # `flock update`: a role added last
+    live.keep_replicas(old, new)
+    ops.keep_pins(old, new)
+    assert new.types["scout"].harbor.roster == {
+        "agent-001": "writer", "agent-002": "writer", "agent-003": "critic",
+        "agent-004": "scout"}
+    new = harbor(writer=2, critic=3)  # `--replicas spec`: the file's count
+    ops.keep_pins(old, new)
+    assert list(new.types["writer"].harbor.roster) == [
+        "agent-001", "agent-002", "agent-003", "agent-004", "agent-005"]
+    with pytest.raises(ops.SpecError, match="a count change before role critic renumbers"):
+        ops.keep_pins(old, harbor(writer=1, critic=1))
 
 
 def test_the_losing_launch_discards_its_candidate_world(monkeypatch, store, clock):

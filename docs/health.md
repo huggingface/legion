@@ -10,11 +10,7 @@ stream is tailed by byte offset.
   manifest lists the `metrics-v1` capability, `GET /metrics` is stored as-is under
   `world.metrics`. Two failed probes in a row write `world_down` to the swarm stream; the next
   success writes `world_up`.
-- **World down: refuse, then pause.** From `world_down` on, every heartbeat response carries
-  `world.down_since` (the first failed probe) and the workers' world hub refuses world calls at
-  once, read-only ones too, without uploading anything: `world <name> down since HH:MM UTC;
-  do local work or end your turn` (`code: world_down`, `local: true`). When the
-  world has been down for `world.down_pause_s` seconds (default `FLOCK_WORLD_DOWN_PAUSE_S`,
+- **World down: pause.** When the world has been down for `world.down_pause_s` seconds (default `FLOCK_WORLD_DOWN_PAUSE_S`,
   1800; `0` turns it off) the controller holds every type that has world tools (docs/loop.md
   "Pause and resume"): `paused {reason: world_down, by: controller, auto: true}`. The first
   successful probe lifts those automatic holds (`resumed {auto: true}`), also ones left by a
@@ -28,7 +24,7 @@ stream is tailed by byte offset.
   so a world waiting for a node is told apart from a crash.
 - **vLLM.** With `providers.<p>.metrics: true`, each base URL's server root `/metrics`
   (Prometheus text): `providers` sums `waiting` and `running` over servers with the highest
-  `kv` (`gpu_cache_usage_perc` or `kv_cache_usage_perc`), as before; `provider_servers` has
+  `kv` (`gpu_cache_usage_perc` or `kv_cache_usage_perc`); `provider_servers` has
   each server (`host:port`): `up`, its queues, or `up: false`, the `error` and `fails` (failed
   scrapes in a row; `dead` from 2 on). Each agent's heartbeat names the server it is pinned to
   (`endpoint`, `pick_endpoint`), so a server counts its `agents`; a dead one lists them
@@ -173,10 +169,8 @@ the last control-plane events.
 `--agent A --events`) an agent's; `--only PREFIX` keeps the names starting with it (`--only
 agent.`), `--after N` starts after a cursor, `--follow` keeps long-polling, `--wait` returns
 once something new arrived (the next cursor on stderr), `--json` prints JSONL.
-`flock.status.events` yields the same pages (a removed agent's stored events too). Hidden,
-for prompts in resumed runs: `flock events NAME [--after --follow --wait --timeout --pretty]`
-(raw JSONL) and `flock agents SWARM [--type --state --parent]` (the old table). Stored events are never rewritten (resume reads
-them); `flock.status.normalise` maps each to one schema:
+`flock.status.events` yields the same pages (a removed agent's stored events too). Stored events
+are never rewritten (resume reads them); `flock.status.normalise` maps each to one schema:
 
 `{name, ts, swarm, agent?, type?, worker?, data}`; `data` is the event's payload, with
 `turn_id` when it has one.
@@ -186,7 +180,7 @@ them); `flock.status.normalise` maps each to one schema:
 | `agent.message` | `message` | agent | a harness message (user, assistant, tool result) |
 | `agent.turn_started`, `agent.turn_ended`, `agent.turn_interrupted` | same | agent | a turn starts, ends, is cut (`reason: timeout` makes the agent stuck) |
 | `agent.session_started`, `agent.session_resumed`, `agent.session_restarted` | same | agent | the harness session |
-| `agent.sync`, `agent.error`, `agent.prompt_deferred`, `agent.harness_recycled`, ... | same | agent | any other worker event: `agent.<stored type>` |
+| `agent.sync`, `agent.error`, `agent.prompt_deferred`, ... | same | agent | any other worker event: `agent.<stored type>` |
 | `agent.stuck` | `stuck` | swarm | the controller first sees an agent stuck (its turn timed out) |
 | `agent.nudged` | `nudge` | swarm | a stuck agent got its type's `resume_prompt` |
 | `agent.spawned`, `agent.child_removed` | `spawned`, `child_removed` | parent agent | a child spawned or removed |
@@ -201,6 +195,5 @@ them); `flock.status.normalise` maps each to one schema:
 | `ramp.step`, `ramp.held` | `ramp_step`, `ramp_held` | swarm | a ramp step, a capacity hold |
 | `world.down`, `world.up`, `world.knob` | `world_down`, `world_up`, `world_knob` | swarm | the world probe; a knob changed |
 | `budget.stop`, `budget.cleared` | `budget_stop`, `budget_cleared` | swarm | `limits.budget_usd` |
-| `comms.dm`, `comms.mention`, `comms.joined`, ... | `comms_*` | agent | the board (docs/comms.md) |
 | `swarm.stopped`, `swarm.resumed`, `swarm.released`, `swarm.unreleased` | `paused`, `resumed`, `released`, `unreleased` | swarm | `flock stop` / `flock launch` |
 | `swarm.spec_applied`, `swarm.removed` | `spec_applied`, `remove_swarm` | swarm | the stored spec; `--delete` done |

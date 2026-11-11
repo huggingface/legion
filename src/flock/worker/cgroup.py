@@ -1,5 +1,5 @@
-"""The worker's memory as its cgroup sees it, and per-agent process memory, for the heartbeat,
-the periodic memory line and the worker's relief ladder (`MemThresholds`, docs/slurm.md
+"""The worker's memory as its cgroup sees it, for the heartbeat, the periodic memory line and
+the worker's relief ladder (`MemThresholds`, docs/slurm.md
 "Memory"; the worker acts on these readings, nothing here does).
 
 `CgroupMem` finds the worker's cgroup from `/proc/self/cgroup` and reads v2
@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from collections import Counter, deque
+from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, fields
 from pathlib import Path
@@ -38,12 +38,10 @@ class MemThresholds:
     """The worker's memory relief ladder, as fractions of the cgroup limit on nonreclaimable
     memory, from FLOCK_MEM_* (docs/slurm.md "Memory")."""
 
-    rotate: float = 0.75  # FLOCK_MEM_ROTATE: wants_rotation, recycle the largest harness
+    rotate: float = 0.75  # FLOCK_MEM_ROTATE: wants_rotation (the controller may drain us)
     drain: float = 0.85  # FLOCK_MEM_DRAIN: bounded drain, exit 0 (planned restart)
     preempt: float = 0.93  # FLOCK_MEM_PREEMPT: preempt("memory"), exit 75
-    recycle_gap_s: float = 600.0  # FLOCK_MEM_RECYCLE_GAP_S: at most one recycle per this
     drain_deadline_s: float = 300.0  # FLOCK_MEM_DRAIN_DEADLINE_S: turns still running are cut
-    spike_mb: float = 3072.0  # FLOCK_MEM_SPIKE_MB: one agent's tools above this get SIGKILL; 0 off
 
     @classmethod
     def read(cls, knob: Callable[[str, float], float]) -> MemThresholds:
@@ -181,77 +179,6 @@ class CgroupMem:
         mv = sum(v for _, v in s) / n
         den = sum((t - mt) ** 2 for t, _ in s)
         return sum((t - mt) * (v - mv) for t, v in s) / den * 3600 if den else None
-
-
-# ---------------------------------------------------------------------- per-agent processes
-
-
-def _rollup(pid: int) -> dict[str, int]:
-    """/proc/<pid>/smaps_rollup in kB ({} when the process is gone or unreadable)."""
-    out: dict[str, int] = {}
-    for line in (_read(Path(f"/proc/{pid}/smaps_rollup")) or "").splitlines():
-        k, _, rest = line.partition(":")
-        parts = rest.split()
-        if parts and parts[0].isdigit():
-            out[k] = int(parts[0])
-    return out
-
-
-def _comm(pid: int) -> str:
-    return (_read(Path(f"/proc/{pid}/comm")) or "?").strip()
-
-
-def du_mb(path: Path) -> float:
-    total = 0
-    for root, _, files in os.walk(path):
-        for f in files:
-            try:
-                total += os.lstat(os.path.join(root, f)).st_size
-            except OSError:
-                pass
-    return total / MB
-
-
-def agent_memory(pid: int | None, descendants: Callable[[int], list[tuple[int, str]]],
-                 tmp_dir: Path | None = None) -> dict:
-    """PSS of an agent's harness process and its tools (by `comm`), its sandbox's tmpfs root
-    and its tmp dir, in MB. `pid` is the process the adapter started (None: none running);
-    under isolation that is `unshare`, and the harness is its first descendant."""
-    out = {} if pid is None else _process_memory(pid, descendants)
-    if tmp_dir is not None and tmp_dir.is_dir():
-        out["tmp_mb"] = round(du_mb(tmp_dir), 1)
-    return out
-
-
-def harness_and_tools(pid: int, descendants: Callable[[int], list[tuple[int, str]]]
-                      ) -> tuple[int, list[tuple[int, str]]]:
-    """(the harness pid, its tool processes as (pid, start time)) under the adapter's process:
-    under isolation that is `unshare`, and the harness is its first descendant."""
-    kids = descendants(pid)
-    if _comm(pid) == "unshare" and kids:
-        return kids[0][0], kids[1:]
-    return pid, kids
-
-
-def _process_memory(pid: int, descendants: Callable[[int], list[tuple[int, str]]]) -> dict:
-    harness, procs = harness_and_tools(pid, descendants)
-    kids = [p for p, _ in procs]
-    roll = _rollup(harness)
-    tools: Counter[str] = Counter()
-    for p in kids:
-        if (kb := _rollup(p).get("Pss")) and p != harness:
-            tools[_comm(p)] += kb
-    try:
-        st = os.statvfs(f"/proc/{harness}/root/")
-        tmpfs = (st.f_blocks - st.f_bfree) * st.f_frsize / MB
-    except PermissionError:  # another user namespace: the shmem it maps is the next best thing
-        tmpfs = roll.get("Pss_Shmem", 0) / 1024
-    except OSError:
-        tmpfs = None
-    return {"pi_pss_mb": round(roll.get("Pss", 0) / 1024, 1),
-            "tools_pss_mb": round(sum(tools.values()) / 1024, 1),
-            "tools_by_comm": {c: round(kb / 1024, 1) for c, kb in tools.most_common(5)},
-            "tmpfs_root_mb": None if tmpfs is None else round(tmpfs, 1)}
 
 
 TMPFS_TYPES = ("tmpfs", "ramfs")

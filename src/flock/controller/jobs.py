@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from flock.models import TypeSpec
-from flock.registry import HARNESSES
 
 TERMINAL_STAGES = frozenset({"COMPLETED", "CANCELED", "ERROR", "DELETED"})
 WORKER_COMMAND = ["flock-worker"]
@@ -18,47 +17,55 @@ WORKER_COMMAND = ["flock-worker"]
 # Unset (or FLOCK_WORKER_BOOTSTRAP=1): bootstrap mode, see `bootstrap_command`.
 DEFAULT_WORKER_IMAGE = os.environ.get("FLOCK_WORKER_IMAGE") or None
 
-# Bootstrap mode: no prebuilt image. A stock Node image installs the pinned harness CLIs, uv and
-# the flock wheel at job start (about 10 s, experiments/common/job_bootstrap.sh), then
-# runs the worker. Versions match Dockerfile.worker, which stays the eventual path.
-# Pi needs Node >= 22.19; pinned to the Node the Pi adapter was tested on.
+# Bootstrap mode: no prebuilt image. A stock image installs uv and the flock wheel at job start
+# (about 10 s),
+# then runs the worker on a uv-managed Python 3.12 (Harbor needs it), with msgboard's wheel and
+# uv.lock's versions from harbor-deps.tar next to the flock wheel (scripts/publish-wheel.sh).
+# shortcut: a Node image, though nothing needs Node; any image with curl works, switch when retested
 BOOTSTRAP_IMAGE = "node:22.23.3-bookworm"
-CLAUDE_CODE_VERSION = HARNESSES["claude"].version
-CODEX_VERSION = HARNESSES["codex"].version
-PI_VERSION = HARNESSES["pi"].version
 HF_HUB_VERSION = "2.2.0"
-CLAUDE_AGENT_SDK_VERSION = "0.2.166"
 
 _BOOTSTRAP = r"""set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH" DEBIAN_FRONTEND=noninteractive
 t0=$(date +%s)
 command -v python3 >/dev/null || { apt-get update -qq && apt-get install -y -qq python3 >/dev/null; }
-npm i -g --silent @anthropic-ai/claude-code@{claude} @openai/codex@{codex} >/dev/null 2>&1
-if [ "${FLOCK_HARNESS:-}" = pi ]; then
-  npm i -g --silent @earendil-works/pi-coding-agent@{pi} >/dev/null 2>&1
-  export FLOCK_PI_CLI="$(command -v pi)"
-fi
 curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1
 uv tool install -q huggingface_hub=={hub} >/dev/null 2>&1
 mkdir -p /opt/wheels
-WHEEL=/opt/wheels/$(basename "$FLOCK_WHEEL_URL")
-hf buckets cp "$FLOCK_WHEEL_URL" "$WHEEL" >/dev/null 2>&1 || uv run -q --no-project \
-  --with huggingface_hub=={hub} python3 -c 'import sys; from huggingface_hub import HfApi
+fetch() {  # fetch hf://buckets/<namespace>/<bucket>/<path> <file>
+  hf buckets cp "$1" "$2" >/dev/null 2>&1 || uv run -q --no-project \
+    --with huggingface_hub=={hub} python3 -c 'import sys; from huggingface_hub import HfApi
 ns, name, path = sys.argv[1].removeprefix("hf://buckets/").split("/", 2)
 HfApi().download_bucket_files(f"{ns}/{name}", [(path, sys.argv[2])], raise_on_missing_files=True)
-' "$FLOCK_WHEEL_URL" "$WHEEL"
-uv tool install -q "$WHEEL[worker]" --with claude-agent-sdk=={sdk} --with huggingface_hub=={hub} \
-  || python3 -m pip install -q --break-system-packages "$WHEEL[worker]" \
-       claude-agent-sdk=={sdk} huggingface_hub=={hub}
-# Agents call the controller with the same package's `flock` CLI (docs/spawn.md).
-command -v flock >/dev/null || { echo "bootstrap: flock CLI is not on PATH" >&2; exit 1; }
-export IS_SANDBOX=1 CLAUDE_CONFIG_DIR=/state/claude CODEX_HOME=/state/codex WORK_ROOT=/work/agents
-export FLOCK_LLM_HOME=/state/llm PI_CODING_AGENT_DIR=/state/pi PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0
-export FLOCK_CLAUDE_CLI="$(command -v claude)" FLOCK_CODEX_CLI="$(command -v codex)"
+' "$1" "$2"
+}
+WHEEL=/opt/wheels/$(basename "$FLOCK_WHEEL_URL")
+fetch "$FLOCK_WHEEL_URL" "$WHEEL"
+# msgboard is private on GitHub (a job cannot clone it): its wheel, and uv.lock's versions for
+# every worker of the run, come next to flock's wheel
+fetch "${FLOCK_WHEEL_URL%/*}/harbor-deps.tar" /opt/wheels/harbor-deps.tar || {
+  echo "bootstrap: no harbor-deps.tar next to the wheel: scripts/publish-wheel.sh" >&2
+  exit 1; }
+tar -xf /opt/wheels/harbor-deps.tar -C /opt/wheels
+echo "msgboard @ file://$(ls /opt/wheels/msgboard-*.whl)" > /opt/wheels/overrides.txt
+uv tool install -q --python 3.12 "$WHEEL" -c /opt/wheels/constraints.txt \
+  --overrides /opt/wheels/overrides.txt
+# Harbor downloads tasks with Git. Scope HF_TOKEN authentication to the Hub,
+# without writing a token or changing the user's Git configuration. (the upstream launch.slurm)
+if [[ -n "${HF_TOKEN:-}" ]]; then
+  git_slot=${GIT_CONFIG_COUNT:-0}
+  export "GIT_CONFIG_KEY_${git_slot}=credential.https://huggingface.co.helper"
+  export "GIT_CONFIG_VALUE_${git_slot}="
+  git_slot=$((git_slot + 1))
+  export "GIT_CONFIG_KEY_${git_slot}=credential.https://huggingface.co.helper"
+  export "GIT_CONFIG_VALUE_${git_slot}="'!f() { if [ "$1" = get ]; then printf "username=hf_user\npassword=%s\n" "$HF_TOKEN"; fi; }; f'
+  export GIT_CONFIG_COUNT=$((git_slot + 1))
+fi
+export GIT_TERMINAL_PROMPT=0
+export WORK_ROOT=/work/agents
 export PYTHONUNBUFFERED=1
-mkdir -p /work/agents /state/claude /state/codex /state/pi /state/llm
-if [ -n "${OPENAI_API_KEY:-}" ]; then printenv OPENAI_API_KEY | codex login --with-api-key >/dev/null; fi
-echo "bootstrap: $(($(date +%s) - t0)) s; claude $(claude --version); codex $(codex --version); $(python3 --version)"
+mkdir -p /work/agents
+echo "bootstrap: $(($(date +%s) - t0)) s"  # flock-worker logs the Python it runs on
 exec flock-worker
 """
 
@@ -69,16 +76,7 @@ def bootstrap_mode(image: str | None = DEFAULT_WORKER_IMAGE) -> bool:
 
 def bootstrap_command() -> list[str]:
     """`bash -c <script>` for BOOTSTRAP_IMAGE; the job env must carry FLOCK_WHEEL_URL."""
-    script = _BOOTSTRAP
-    for key, value in {
-        "claude": CLAUDE_CODE_VERSION,
-        "codex": CODEX_VERSION,
-        "pi": PI_VERSION,
-        "hub": HF_HUB_VERSION,
-        "sdk": CLAUDE_AGENT_SDK_VERSION,
-    }.items():
-        script = script.replace("{" + key + "}", shlex.quote(value))
-    return ["bash", "-c", script]
+    return ["bash", "-c", _BOOTSTRAP.replace("{hub}", shlex.quote(HF_HUB_VERSION))]
 
 
 @dataclass

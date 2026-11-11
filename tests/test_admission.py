@@ -1,5 +1,5 @@
-"""Fair `max_working` admission: FIFO across workers, slots released on turn end (run-1k
-finding 1), and the 1k-shaped simulation in tests/admission_sim.py."""
+"""Fair `max_working` admission: FIFO across workers, slots released on turn end, and
+the many-worker simulation in tests/admission_sim.py."""
 
 from __future__ import annotations
 
@@ -13,14 +13,14 @@ from flock.controller.api import create_app
 from flock.models import AgentHeartbeat, Event, WorkerHeartbeat
 
 from .admission_sim import simulate
-from .conftest import TOKEN
+from .conftest import HB, TOKEN
 from .test_providers_controller import CAP_PROVIDERS, pspec, put
 
 W0, W1 = "p-worker-w0000", "p-worker-w0001"
 
 
 def _spec():
-    return pspec(CAP_PROVIDERS, worker={"harness": "codex", "model": "p:test", "replicas": 2,
+    return pspec(CAP_PROVIDERS, worker={**HB, "model": "p:test", "replicas": 2,
                                         "agents_per_worker": 1})
 
 
@@ -122,11 +122,9 @@ async def test_prompts_on_a_dead_worker_do_not_hold_the_window(store, clock, tic
         assert await _prompts(c, W1) == ["worker-0001"]
 
 
-async def test_run1k_shaped_simulation_every_agent_gets_a_turn():
-    """The run-1k shape at a quarter of its size (see admission_sim.py): 3 providers x
-    max_working 32, 253 agents on 11 workers. Before this change the full 1,000-agent shape
-    reached 410 of 1,000 agents in 60 rounds (stuck at 384 for the first 15), with 87 of 128
-    slots in use on average; this one reached 133 of 253 in 40 rounds, with 22 of 32 in use."""
+async def test_many_workers_fair_admission_every_agent_gets_a_turn():
+    """The 1,000-agent shape at a quarter of its size (see admission_sim.py): 3 providers x
+    max_working 32, 253 agents on 11 workers."""
     res = await simulate(rounds=40, max_working=32, agents=253)
     assert res.agents == 253
     assert res.all_by is not None and res.all_by <= 30, res.coverage

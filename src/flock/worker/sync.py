@@ -4,10 +4,9 @@
     workdir.base.tar, workdir.base.json           (only with the type's workdir.base, below)
     meta.json                                     ({files, bytes, ts} of the mirrored workdir when it last changed)
     sessions/<agent>.jsonl, <agent>.state.json    (pi session log + worker state)
-    harness/<path relative to the harness home>   (CLAUDE_CONFIG_DIR, CODEX_HOME or PI_CODING_AGENT_DIR)
+    harness/<path relative to the harness home>   (a Trial's Pi sessions)
 
-The workdir goes through `sync_bucket` (the Python form of `hf buckets sync`, as in the
-resume-gate experiment), upward with delete so the bucket mirrors the workdir. The handful of
+The workdir goes through `sync_bucket` (the Python form of `hf buckets sync`), upward with delete so the bucket mirrors the workdir. The handful of
 session and harness files go through `batch_bucket_files`, only those whose (mtime, size)
 changed since the last push by this worker. `restore` brings all three areas back to the
 same absolute paths (workdir and work root are fixed, harness homes are fixed by the image)
@@ -25,12 +24,12 @@ already-corrupt copy with ~42k such entries took 636 s to restore with them). Sk
 logged as one summary line per agent. Only a failed listing makes `restore` raise.
 
 Buckets store bytes, not file modes: a restored file comes back 0644, so an executable script
-would stop running after a move (pixel run 1, 2026-10-19: `./canvas: Permission denied`). Each
+would stop running after a move. Each
 push therefore writes `<workdir>/.flock-modes.json` ({relative path: octal mode} for every file
 with an executable bit) when it changed, and restore re-applies it after the workdir download.
 
-Push safety (run 4, 2026-10-27: periodic syncs mirrored half-restored workdirs over 31 agents'
-bucket copies, deleting entries the in-flight restore had not fetched yet):
+Push safety (a periodic sync must never mirror a half-restored workdir over the bucket copy,
+deleting entries the in-flight restore has not fetched yet):
 
 - No push before setup: `AgentRuntime.sync_now` does nothing until the agent's `setup()` has
   finished its restore (every caller: the periodic sync, drain, preempt, unassign), and
@@ -74,7 +73,7 @@ downloads; a base turns most of them into one:
 - Restore with a manifest: download it and the tar, extract the tar member by member from disk,
   apply `deleted` and `links`, then download only the `workdir/` entries newer than
   `created_at` (older ones are already in the tar). A failed manifest, tar or member makes the
-  restore incomplete (no deletes, no new base). Buckets without a manifest restore as before.
+  restore incomplete (no deletes, no new base). Buckets without a manifest restore file by file.
 - Crash safety: before the manifest is written the old manifest (or the plain mirror) stays
   valid; after it, stale `workdir/` entries are older than `created_at`, ignored by restore and
   removed by the next push. Turning `base` off makes the next full-baseline push mirror the whole
@@ -896,7 +895,7 @@ class BucketSync:
                          may_rebase: bool, ws: WorkdirStats) -> bool:
         """Workdir push with a base tar (module docstring, "Base tar"): a new base when due,
         then the files changed since the base, and tombstones and symlinks in the manifest.
-        False: no base yet and none made (stopped, no disk); the caller mirrors as before."""
+        False: no base yet and none made (stopped, no disk); the caller mirrors file by file."""
         pre, dpre = self.prefix(rt), self.prefix(rt) + "workdir/"
         base = self._base.get(pre)
 

@@ -17,7 +17,7 @@ Who sends the loop prompt (`mode`):
   prompts on `turn_ended` events or when `every` has passed since the agent's last loop prompt.
 
 Wake-ups
-(`wake(agent, reason)`, fed by the workers' comms events for `on: comms.*`) queue the loop
+(`wake(agent, reason)`, fed by the workers' resource events for `on: message_board.*`) queue the loop
 prompt after a 2 s debounce, at most one per `wake.min_gap` per agent and `wake.max` per run
 (or `wake.window`); by default a wake prompt is not a round (`wake.counts_as_round`). Each one
 sent is a `loop_wake` event.
@@ -270,7 +270,7 @@ class LoopEngine:
             return True
 
     def notice(self, agent: str, reason: str, data: dict[str, Any]) -> bool:
-        """A board notification for the agent (`comms_mention` / `comms_thread_reply` from its
+        """A board notification for the agent (a message_board `resource` event from its
         worker): kept, with the loop agent's state in the store, until its next round prompt
         names it (`loop.notices`). Ignored for a type without `loop.notices`, an agent out of
         its loop and a message already kept. `reason`: mention or thread."""

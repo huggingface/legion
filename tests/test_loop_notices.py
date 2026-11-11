@@ -1,5 +1,5 @@
 """`loop.notices` (docs/loop.md): the controller keeps each agent's board notifications
-(`comms_mention`, `comms_thread_reply` from its worker) and names them in one line after the
+(message_board `resource` events from its worker) and names them in one line after the
 agent's next round prompt, then forgets them. Controller only: workers never see the key."""
 
 from __future__ import annotations
@@ -16,21 +16,21 @@ from flock.worker.loop import render
 
 from .conftest import TOKEN, make_spec
 from .test_api import W0, hb_body
-from .test_loop_controller import A0, A1, Sim, prompts
+from .test_loop_controller import A0, A1, Sim, board, prompts
 
 HEAD = "New for you since your last round: "
-CTRL = {"prompt": "round {round} ({why})", "every": "1h", "on": ["comms.mention"],
+CTRL = {"prompt": "round {round} ({why})", "every": "1h", "on": ["message_board.mention"],
         "notices": True}  # a duration `every`: the controller sends every round prompt
-WORKER = {"prompt": "round {round}", "on": ["comms.mention", "comms.thread"],
+WORKER = {"prompt": "round {round}", "on": ["message_board.mention", "message_board.thread"],
           "notices": True}  # `turn_end`: the worker re-sends the loop_start text each round
 
 
 def mention(mid: int, thread: int, who: str) -> tuple[str, dict]:
-    return ("comms_mention", {"msg_id": mid, "thread": thread, "from": who})
+    return board("mention", {"msg_id": mid, "thread": thread, "from": who})
 
 
 def reply(mid: int, thread: int, who: str) -> tuple[str, dict]:
-    return ("comms_thread_reply", {"msg_id": mid, "thread": thread, "from": who})
+    return board("thread", {"msg_id": mid, "thread": thread, "from": who})
 
 
 def line(text: str) -> str | None:
@@ -61,11 +61,11 @@ async def started(sim, loop: dict, **kw) -> dict[str, dict]:
 
 # ------------------------------------------------------------------ the line
 def test_line_groups_by_thread_humans_first_and_caps():
-    n = [{"msg_id": 1, "thread": 19455, "from": "tan-jackal", "kind": "reply", "human": False},
-         {"msg_id": 2, "thread": 19455, "from": "ochre-spoon", "kind": "reply", "human": False},
-         {"msg_id": 3, "thread": 19820, "from": "cmpatino", "kind": "mention", "human": True}]
-    assert notice_line(n) == (HEAD + "@cmpatino mentioned you in thread 19820; 2 replies in your "
-                              "thread 19455 (tan-jackal, ochre-spoon). Read them if useful.")
+    n = [{"msg_id": 1, "thread": 40, "from": "tan-jackal", "kind": "reply", "human": False},
+         {"msg_id": 2, "thread": 40, "from": "ochre-spoon", "kind": "reply", "human": False},
+         {"msg_id": 3, "thread": 12, "from": "alice", "kind": "mention", "human": True}]
+    assert notice_line(n) == (HEAD + "@alice mentioned you in thread 12; 2 replies in your "
+                              "thread 40 (tan-jackal, ochre-spoon). Read them if useful.")
     many = [{"msg_id": i, "thread": 100 + i % 8, "from": f"a{i % 5}{{round}}", "kind": "reply",
              "human": False} for i in range(40)]
     many.append({"msg_id": 99, "thread": 7, "from": "amber-otter", "kind": "mention", "human": False})
@@ -80,14 +80,14 @@ def test_line_groups_by_thread_humans_first_and_caps():
 # ------------------------------------------------------------------ controller-side rounds
 async def test_notices_accumulate_render_once_then_clear(sim):
     await started(sim, CTRL)
-    await sim.events(A0, mention(11, 19820, "cmpatino"), reply(12, 19455, A1),
-                     reply(12, 19455, A1), reply(13, 19455, "ochre-spoon"))
+    await sim.events(A0, mention(11, 12, "alice"), reply(12, 40, A1),
+                     reply(12, 40, A1), reply(13, 40, "ochre-spoon"))
     sim.tick(2.1)  # the mention wakes A0; its prompt names the four (one duplicate dropped)
     got = prompts(await sim.commands())
     assert list(got) == [A0]
     assert got[A0]["text"].startswith("round {round} ({why})\n\n")
     assert line(got[A0]["text"]) == (
-        HEAD + "@cmpatino mentioned you in thread 19820; 2 replies in your thread 19455 "
+        HEAD + "@alice mentioned you in thread 12; 2 replies in your thread 40 "
         f"(@ochre-spoon, {A1}). Read them if useful.")  # not an agent of ours: a person
     assert sim.store.get_loop_agent(A0)["notices"] == []
     await sim.turn(A0, got[A0])
@@ -125,8 +125,8 @@ async def test_a_notice_waits_for_the_next_round_of_any_kind(sim):
 async def test_off_by_default(sim):
     await started(sim, {**CTRL, "notices": False})
     spec = sim.store.get_swarm("demo")["spec"]
-    assert "notices" not in spec.model_dump_json()  # the dump (and its hashes) as before
-    await sim.events(A0, mention(11, 19820, "cmpatino"))
+    assert "notices" not in spec.model_dump_json()
+    await sim.events(A0, mention(11, 12, "alice"))
     sim.tick(2.1)
     got = prompts(await sim.commands())
     assert got[A0]["text"] == "round {round} ({why})"  # the wake as it was
@@ -135,14 +135,14 @@ async def test_off_by_default(sim):
 
 async def test_notices_survive_a_controller_restart(sim, store, clock):
     await started(sim, CTRL)
-    await sim.events(A1, reply(5, 40, "cmpatino"))
+    await sim.events(A1, reply(5, 40, "alice"))
     app = create_app(store, TOKEN, clock=clock, loop_interval=0)  # a new controller, same state
     sim.loops = app.state.loops
     sim.clock.advance(3600)
     await sim.heartbeat()
     sim.tick()
     got = prompts(await sim.commands())
-    assert line(got[A1]["text"]) == HEAD + "1 reply in your thread 40 (@cmpatino). Read them if useful."
+    assert line(got[A1]["text"]) == HEAD + "1 reply in your thread 40 (@alice). Read them if useful."
 
 
 async def test_workers_never_see_the_key(sim):
@@ -170,11 +170,11 @@ async def test_worker_loop_gets_the_line_for_one_round(sim):
     assert start[A0]["text"] == "round {round}"
     await sim.events(A0, ("loop_prompt", {"kind": "loop", "round": 1, "why": "start"}),
                      ("turn_started", {}))
-    await sim.events(A0, reply(5, 40, A1), mention(6, 41, "cmpatino"))
+    await sim.events(A0, reply(5, 40, A1), mention(6, 41, "alice"))
     sim.tick(0.5)
     [c] = await sim.commands()  # the next round's text, while round 1 runs
     assert c["kind"] == "loop_start" and c["agent"] == A0 and c["run"] == start[A0]["run"]
-    assert c["text"] == ("round {round}\n\n" + HEAD + "@cmpatino mentioned you in thread 41; "
+    assert c["text"] == ("round {round}\n\n" + HEAD + "@alice mentioned you in thread 41; "
                          f"1 reply in your thread 40 ({A1}). Read them if useful.")
     # the worker renders it like any loop prompt: the line goes through untouched
     meta = LoopMeta.model_validate(c["meta"])
@@ -226,16 +226,19 @@ async def test_a_round_before_the_fetch_does_not_take_the_line(sim):
     assert [c["text"] for c in await sim.commands()] == ["round {round}"]
 
 
-async def test_pi_type_gets_the_line(sim):
-    """The line is plain text after the template, so any harness renders it (here Pi)."""
-    got = await started(sim, CTRL, harness="pi", model="m", secrets=[])
+async def test_harbor_types_get_the_line(sim):
+    """The line is plain text after the template. A harbor type's board events are `resource`
+    events from the message_board resource: wake `message_board.mention`."""
+    wake = "message_board.mention"
+    event = ("resource", {"resource": "message_board", "kind": "mention", "data": {
+        "msg_id": 11, "thread": 12, "from": "alice", "identity_type": "user"}})
+    got = await started(sim, {**CTRL, "on": [wake]}, model="fake:m", secrets=[])
     assert got[A0]["loop"]["kind"] == "loop"
-    await sim.events(A0, mention(11, 19820, "cmpatino"))
+    await sim.events(A0, event)
     sim.tick(2.1)
     got = prompts(await sim.commands())
-    assert line(got[A0]["text"]) == HEAD + "@cmpatino mentioned you in thread 19820. Read them if useful."
-    spec = sim.store.get_swarm("demo")["spec"]
-    assert spec.types["researcher"].harness.value == "pi"
+    assert got[A0]["loop"]["why"] == f"wake: {wake}"
+    assert line(got[A0]["text"]) == HEAD + "@alice mentioned you in thread 12. Read them if useful."
 
 
 def test_spec_accepts_and_round_trips_the_key():

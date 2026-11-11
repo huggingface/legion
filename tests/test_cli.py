@@ -8,7 +8,7 @@ from typer.testing import CliRunner
 from flock import cli, ops
 from flock.client import Client
 
-from .conftest import TOKEN, make_spec, wire, write_spec
+from .conftest import HB, TOKEN, make_spec, wire, write_spec
 
 runner = CliRunner()
 
@@ -74,7 +74,7 @@ PROVIDER_SPEC = {
     "providers": {"gpu1": {"type": "openai_compat", "base_url": "http://fake/v1",
                            "api_key_env": "VLLM_API_KEY", "self_hosted": True}},
     "models": {"q": {"model": "gpu1:Qwen/Q", "extra": {"chat_template_kwargs": {"enable_thinking": False}}}},
-    "types": {"worker": {"harness": "codex", "model": "q", "replicas": 1}},
+    "types": {"worker": {**HB, "model": "q", "replicas": 1}},
 }
 
 
@@ -85,7 +85,6 @@ def test_apply_runs_preflight_and_refuses_on_failure(tmp_path, monkeypatch, stor
     spec_file.write_text(yaml.safe_dump(PROVIDER_SPEC))
     r = runner.invoke(cli.app, ["launch", str(spec_file)])
     assert r.exit_code == 1 and "preflight failed" in r.output and "FAIL" in r.output
-    assert "`extra` is kept in the spec but not sent" in r.output
     assert store.get_swarm("op") is None and len(seen) == 1
     r = runner.invoke(cli.app, ["launch", "--skip-preflight", str(spec_file)])
     assert r.exit_code == 0, r.output
@@ -130,19 +129,16 @@ def test_apply_with_passing_preflight(tmp_path, monkeypatch, store, clock):
     spec_file = tmp_path / "spec.yaml"
     spec_file.write_text(yaml.safe_dump(PROVIDER_SPEC))
     r = runner.invoke(cli.app, ["launch", str(spec_file)])
-    assert r.exit_code == 0 and "ok" in r.output and "responses" in r.output, r.output
+    assert r.exit_code == 0 and "ok" in r.output and "chat_completions" in r.output, r.output
     assert store.get_swarm("op")["spec"].types["worker"].provider_name == "gpu1"
     assert len(seen) == 2  # one probe: a tool call plus a follow-up turn
     r = runner.invoke(cli.app, ["update", "--check", str(spec_file)])  # was `flock preflight`
     assert r.exit_code == 0 and "preflight gpu1:Qwen/Q: ok" in r.output and len(seen) == 4
-    # native-only specs skip preflight unless asked
-    native = tmp_path / "native.yaml"
-    write_spec(native, make_spec())
-    r = runner.invoke(cli.app, ["launch", str(native)])
-    assert r.exit_code == 0 and len(seen) == 4
-    write_spec(native, make_spec("demo2", other={}))
-    r = runner.invoke(cli.app, ["launch", "--preflight", str(native)])
-    assert r.exit_code == 0 and "no provider-backed models" in r.output, r.output
+    # a spec with no types has no model to probe
+    empty = tmp_path / "empty.yaml"
+    write_spec(empty, make_spec("demo2").model_copy(update={"types": {}}))
+    r = runner.invoke(cli.app, ["launch", "--preflight", str(empty)])
+    assert r.exit_code == 0 and "no provider-backed models" in r.output and len(seen) == 4, r.output
 
 
 def test_unverified_models_warn_and_apply_unless_strict(tmp_path, monkeypatch, store, clock):
@@ -176,41 +172,34 @@ def test_unverified_models_warn_and_apply_unless_strict(tmp_path, monkeypatch, s
 
 def test_apply_reports_spec_errors_by_field(tmp_path, monkeypatch, app):
     wire(monkeypatch, app)
-    bad = {**PROVIDER_SPEC, "types": {"writer": {"harness": "claude", "model": "q"}}}
+    bad = {**PROVIDER_SPEC, "types": {"writer": {**HB, "model": "native"}}}
     spec_file = tmp_path / "spec.yaml"
     spec_file.write_text(yaml.safe_dump(bad))
     r = runner.invoke(cli.app, ["launch", str(spec_file)])
     assert r.exit_code == 1
-    assert "types.writer.model: harness 'claude' cannot use provider 'gpu1'" in r.output
+    assert "types.writer.model: harness 'harbor' needs a provider-backed model" in r.output
 
 
-def test_warn_extra_only_for_harnesses_that_cannot_send_it(monkeypatch, capsys):
+def test_warn_extra_that_is_not_sent():
     from flock.models import SwarmSpec
 
     spec = SwarmSpec.model_validate({
         "swarm": "s", "namespace": "n", "bucket": "b",
         "providers": {"p": {"type": "openai_compat", "base_url": "http://x/v1", "api_key_env": "K",
-                            "self_hosted": True},
-                      "a": {"type": "anthropic", "api_key_env": "A", "self_hosted": True}},
+                            "self_hosted": True}},
         "models": {"m": {"model": "p:m", "extra": {"chat_template_kwargs": {"enable_thinking": False}}},
-                   "plain": {"model": "p:m"},
-                   "am": {"model": "a:m", "extra": {"x": 1}}},
-        "types": {"cx": {"harness": "codex", "model": "m"}, "pi": {"harness": "pi", "model": "m"},
-                  "cl": {"harness": "claude", "model": "am"}, "nox": {"harness": "codex", "model": "plain"}}})
+                   "plain": {"model": "p:m"}},
+        "types": {"hb": {"harness": "harbor", "model": "m", "harbor": {"task": {}, "config": {}}},
+                  "nox": {"harness": "harbor", "model": "plain", "harbor": {"task": {}, "config": {}}}}})
     err = "\n".join(ops.extra_warnings(spec))
-    assert all(f"type {t}: `extra`" in err for t in ("cx", "pi", "cl")) and "nox" not in err
-    # the llm harness sends `extra` as body fields: never warned (PR #7 adds the harness)
-    assert "llm" not in ops.EXTRA_NOT_SENT
-    monkeypatch.setattr(ops, "EXTRA_NOT_SENT", frozenset({"claude"}))
-    err = "\n".join(ops.extra_warnings(spec))
-    assert "type cl:" in err and "type cx:" not in err
+    assert "type hb: `extra`" in err and "nox" not in err
 
 
 def test_apply_sends_its_git_source(tmp_path, monkeypatch, app, store):
     import subprocess
 
     wire(monkeypatch, app)
-    monkeypatch.setenv("USER", "carlos")
+    monkeypatch.setenv("USER", "alice")
     git = lambda *a: subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=t",
                                      "-c", "user.email=t@t", *a], check=True, capture_output=True)
     git("init", "-q", "-b", "exp")
@@ -222,16 +211,16 @@ def test_apply_sends_its_git_source(tmp_path, monkeypatch, app, store):
                          capture_output=True, text=True).stdout.strip()
     assert runner.invoke(cli.app, ["launch", str(spec_file)]).exit_code == 0
     (gen1,) = store.spec_history("demo")
-    assert gen1["source"] == {"by": "carlos", "git_sha": sha, "ref": "exp", "dirty": False}
+    assert gen1["source"] == {"by": "alice", "git_sha": sha, "ref": "exp", "dirty": False}
     assert json.loads(ops.source_header(spec_file.parent / "x" / "spec.yaml")["X-Flock-Source"]) == {
-        "by": "carlos"}  # not a repo (the folder does not exist)
+        "by": "alice"}  # not a repo (the folder does not exist)
     spec_file.write_text(spec_file.read_text().replace("replicas: 3", "replicas: 4"))
     assert json.loads(ops.source_header(spec_file)["X-Flock-Source"])["dirty"] is True
 
 
 def test_status_shows_the_generation(tmp_path, monkeypatch, app, store):
     wire(monkeypatch, app)
-    monkeypatch.setenv("USER", "carlos")
+    monkeypatch.setenv("USER", "alice")
     spec_file = tmp_path / "spec.yaml"
     write_spec(spec_file, make_spec())
     assert runner.invoke(cli.app, ["launch", str(spec_file)]).exit_code == 0
@@ -239,20 +228,11 @@ def test_status_shows_the_generation(tmp_path, monkeypatch, app, store):
     assert runner.invoke(cli.app, ["update", str(spec_file), "--replicas", "spec"]).exit_code == 0
     r = runner.invoke(cli.app, ["status", "demo"])
     assert r.exit_code == 0 and " gen 2" in r.output.splitlines()[1], r.output
-    assert store.spec_history("demo")[1]["source"]["by"] == "carlos"
-
-
-def test_extra_warnings_flags_pi_env_dropped_by_isolation():
-    from flock.models import SwarmSpec
-
-    spec = SwarmSpec.model_validate({"swarm": "s", "namespace": "n", "bucket": "b", "types": {
-        "a": {"harness": "pi", "model": "anthropic/x", "env": {"GIT_CONFIG_COUNT": "0", "HF_TOKEN": "x"}},
-        "b": {"harness": "claude", "model": "m", "env": {"HF_TOKEN": "x"}}}})
-    assert ops.extra_warnings(spec) == ["warning: types.a.env.HF_TOKEN: dropped by pi isolation (use `secrets`)"]
+    assert store.spec_history("demo")[1]["source"]["by"] == "alice"
 
 
 def test_hidden_world_app_and_plain_help():
-    """run5-era Slurm world jobs call `flock world serve`; help is not re-wrapped by rich."""
+    """`flock world serve` works but is not listed; help is not re-wrapped by rich."""
     r = runner.invoke(cli.app, ["world", "serve", "--help"])
     assert r.exit_code == 0 and "module:Class" in r.output
     out = runner.invoke(cli.app, ["--help"]).output

@@ -7,7 +7,7 @@ controller) on 127.0.0.1 with a generated token; the reconcile loop launches wor
 `LocalJobsClient` as subprocesses. The run lives in `<data-dir>/<swarm>-<UTC time>/`:
 
     controller/   the controller's SQLite store and raw event streams
-    agents/       agent workdirs (WORK_ROOT)     state/   harness state (FLOCK_LLM_HOME)
+    agents/       agent workdirs (WORK_ROOT)
     logs/         controller.log, <worker>.log, world-<swarm>.log (a started world)
     run.json      the bundle: spec (secret-looking env values redacted), totals, per agent,
                   each type's loop and the budget
@@ -74,12 +74,14 @@ class RunOptions:
     preflight: bool = False
     strict: bool = False
     grace: float = 10.0  # s for in-flight turns at stop
-    refresh: float = 2.0  # s between view frames and stop-condition checks
-    reconcile_interval: float = 1.0
+    # s between view frames and stop-condition checks (FLOCK_LOCAL_REFRESH; tests use less)
+    refresh: float = field(default_factory=lambda: float(os.environ.get("FLOCK_LOCAL_REFRESH", "2")))
+    reconcile_interval: float = field(  # FLOCK_RECONCILE_INTERVAL, as for flock-controller
+        default_factory=lambda: float(os.environ.get("FLOCK_RECONCILE_INTERVAL", "1")))
     host: str = "127.0.0.1"
     out: TextIO = field(default_factory=lambda: sys.stdout)
     worker_command: list[str] | None = None  # tests
-    tools: bytes | None = None  # the packed tools folder (docs/tools.md), uploaded before the PUT
+    tools: bytes | None = None  # the packed tools folder, uploaded before the PUT
     apply: bool = True  # False (`flock launch`): only serve; the CLI creates the swarm
 
 

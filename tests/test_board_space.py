@@ -16,12 +16,15 @@ from flock.ops import SpecError, read_spec
 from flock.specrender import read_env_file
 from tests.fake_msgboard import Board, serve
 
+from .conftest import FAKE_PROVIDERS, HB
+
 SPEC = {
     "swarm": "demo", "namespace": "acme",
     "bucket": "hf://buckets/acme/runs",
     "comms": {"board": "space", "template": "acme/msgboard-template", "invite_env": "BOARD_INVITE",
               "channel": "general", "space_secrets": {"HF_TOKEN": "BOARD_BUCKET_TOKEN"}},
-    "types": {"a": {"harness": "claude", "model": "claude-opus-5-5", "comms": True}},
+    "providers": FAKE_PROVIDERS,
+    "types": {"a": {**HB, "model": "fake:m", "comms": True}},
 }
 
 
@@ -295,7 +298,7 @@ def test_dashboard_row_written_and_rewritten(monkeypatch):
 @pytest.mark.parametrize("over, why", [
     ({"comms": {**SPEC["comms"], "url": "https://elsewhere.invalid/boards/demo"}}, "board"),
     # nothing hard-coded: another org's Spaces are refused for an acme registry
-    ({"dashboard": {**DASH, "viewer": "https://huggingfaceswarms-flock-viewer-v8.hf.space"}}, "viewer"),
+    ({"dashboard": {**DASH, "viewer": "https://otherorg-viewer.hf.space"}}, "viewer"),
     ({"bucket": "hf://buckets/someone/runs"}, "namespace"),
 ])
 def test_dashboard_refuses_rows_the_overview_drops(monkeypatch, over, why):
@@ -329,19 +332,3 @@ def test_dashboard_refused_with_compute_local_and_needs_a_viewer():
         _spec(dashboard={k: v for k, v in DASH.items() if k != "viewer"})
 
 
-async def test_worker_join_sends_the_hf_token_only_to_hf_spaces(monkeypatch):
-    import httpx
-
-    from flock.worker.identity import join
-
-    monkeypatch.setenv("HF_TOKEN", "hf_x")
-    seen = []
-
-    def handler(req):
-        seen.append((req.url.host, req.headers.get("authorization")))
-        return httpx.Response(200, json={"token": "t", "principal": {"id": 3, "external_id": "a"}})
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
-        await join("https://x.hf.space/boards/b", "code", "a", client=c)
-        await join("https://board.invalid/boards/b", "code", "a", client=c)
-    assert seen == [("x.hf.space", "Bearer hf_x"), ("board.invalid", None)]

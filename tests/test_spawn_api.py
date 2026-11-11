@@ -11,14 +11,14 @@ from flock.controller import spawn as spawning
 from flock.controller.store import Store
 from flock.models import AssignCommand, Command, SwarmSpec, TypeHealth
 
-from .conftest import TOKEN
+from .conftest import FAKE_PROVIDERS, HB, TOKEN
 
 CMD = TypeAdapter(Command)
 LEADER = "leader-0000"
 
 
 def spawn_spec(spawn=None, limits=None, **overrides) -> SwarmSpec:
-    base = {"harness": "claude", "model": "claude-opus-5-5"}
+    base = {**HB, "model": "fake:m"}
     types = {
         "leader": {"replicas": 1, "workers": {"initial": 1}},
         "analyst": {"replicas": 0, "agents_per_worker": 2, "workers": {"initial": 1, "max_extra": 1}},
@@ -27,7 +27,7 @@ def spawn_spec(spawn=None, limits=None, **overrides) -> SwarmSpec:
     for name, o in overrides.items():
         types[name] = {**types.get(name, {}), **o}
     body = {
-        "swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/sh",
+        "swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/sh", "providers": FAKE_PROVIDERS,
         "types": {k: {**base, **v} for k, v in types.items()},
         "spawn": spawn if spawn is not None else {
             "leader": {"types": {"analyst": 3, "helper": 2}, "depth": 2},
@@ -309,28 +309,6 @@ async def test_spawned_rows_survive_a_controller_restart(client, store, tmp_path
         assert spawning.agent_for_token(again, tok)["name"] == a
     finally:
         again.close()
-
-
-def test_store_migrates_agents_and_swarms(tmp_path):
-    import sqlite3
-
-    d = tmp_path / "old"
-    d.mkdir()
-    db = sqlite3.connect(d / "controller.db")
-    db.execute("CREATE TABLE agents (name TEXT PRIMARY KEY, swarm TEXT NOT NULL, type TEXT NOT "
-               "NULL, slot INTEGER NOT NULL, worker TEXT, created_at REAL NOT NULL)")
-    db.execute("CREATE TABLE swarms (name TEXT PRIMARY KEY, spec TEXT NOT NULL, "
-               "applied_at REAL NOT NULL, removing INTEGER NOT NULL DEFAULT 0)")
-    db.commit()
-    db.close()
-    s = Store(d)
-    try:
-        cols = {r["name"] for r in s._q("PRAGMA table_info(agents)")}
-        assert {"parent", "depth"} <= cols
-        cols = {r["name"] for r in s._q("PRAGMA table_info(swarms)")}
-        assert {"spawned", "removed_cost"} <= cols
-    finally:
-        s.close()
 
 
 def test_spawn_during_cascade_removal_leaves_no_orphan(store, client, swarm):

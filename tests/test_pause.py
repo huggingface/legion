@@ -3,22 +3,17 @@ world is down (docs/health.md), on the fake controller app and a fake clock."""
 
 from __future__ import annotations
 
-import json
-
 import httpx
 
 from flock.controller.api import create_app
 from flock.controller.health import Health
 from flock.controller.reconcile import swarm_stream
-from flock.models import SwarmSpec, WorldManifest
-from flock.world.hub import WorldHub
-from flock.world.protocol import TOKEN_ENV
+from flock.models import SwarmSpec
 
 from . import test_loop_controller
 from .conftest import make_spec
 from .test_health import FakeWorld
 from .test_loop_controller import A0, A1, prompts
-from .test_world import world_block
 
 sim = test_loop_controller.sim  # the fixture
 
@@ -36,7 +31,7 @@ async def resume(sim, **body) -> dict:
 
 
 async def test_hold_defers_rounds_prompts_and_wakes_without_counting(sim):
-    await sim.apply({"prompt": "r{round}", "every": "30s", "on": ["comms.mention"]})
+    await sim.apply({"prompt": "r{round}", "every": "30s", "on": ["message_board.mention"]})
     await sim.heartbeat()
     sim.tick()
     r1 = prompts(await sim.commands())
@@ -45,7 +40,7 @@ async def test_hold_defers_rounds_prompts_and_wakes_without_counting(sim):
     assert held["types"]["researcher"]["reason"] == "maintenance"
     await sim.turn(A0, r1[A0], tool_calls=0)  # the turn in flight ends under the hold
     await sim.turn(A1, r1[A1], tool_calls=0)
-    assert sim.loops.wake(A0, "comms.mention")  # queued, not lost
+    assert sim.loops.wake(A0, "message_board.mention")  # queued, not lost
     await sim.c.post(f"/agents/{A1}/prompt", json={"text": "by hand"})
     for _ in range(4):
         sim.clock.advance(30)
@@ -64,7 +59,7 @@ async def test_hold_defers_rounds_prompts_and_wakes_without_counting(sim):
     await sim.heartbeat()  # fresh: the agents are idle
     sim.tick()
     got = prompts(await sim.commands())
-    assert got[A0]["loop"]["why"] == "wake: comms.mention" and got[A0]["loop"]["round"] == 1
+    assert got[A0]["loop"]["why"] == "wake: message_board.mention" and got[A0]["loop"]["round"] == 1
     kinds = [(k, d) for k, d in sim.swarm_events() if k in ("paused", "resumed")]
     assert kinds == [("paused", {"types": ["researcher"], "agents": [], "reason": "maintenance",
                                  "by": "operator", "auto": False, "interrupt": False}),
@@ -174,7 +169,6 @@ async def test_world_down_pause_off_per_swarm(store, clock):
     T = clock().timestamp()
     store.put_swarm(world_types_spec(down_pause_s=0), T)
     assert "down_pause_s" in store.get_swarm("demo")["spec"].world.model_dump()
-    assert "down_pause_s" not in world_types_spec().world.model_dump()  # unset: old wire shape
     world = FakeWorld()
     world.up = False
     h = Health(store, transport=httpx.MockTransport(world))
@@ -184,24 +178,3 @@ async def test_world_down_pause_off_per_swarm(store, clock):
     assert "holds" not in store.swarm_flags("demo")
 
 
-async def test_hub_refuses_at_once_when_the_heartbeat_says_the_world_is_down():
-    seen = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.append(1)
-        return httpx.Response(200, json={"ok": True, "text": "fine"})
-
-    hub = WorldHub(swarm="sw", type_name="dev", env={TOKEN_ENV: "t"},
-                   transport=httpx.MockTransport(handler))
-    m = WorldManifest(world_api="v1", name="w", version="1",
-                      tools=[{"name": "a"}, {"name": "peek", "annotations": {"readOnlyHint": True}}])
-    block = {**world_block("http://w", m, "t").model_dump(mode="json"), "tools": ["a", "peek"]}
-    hub.configure_raw({**block, "down_since": "2026-10-28T14:05:00+00:00"})
-    for tool in ("world:a", "world:peek"):  # read-only calls too
-        body = json.loads((await hub.call("x", tool, {})).output)
-        assert body["local"] and body["code"] == "world_down"
-        assert body["error"] == "world w down since 14:05 UTC; do local work or end your turn"
-    assert seen == []
-    hub.configure_raw(block)  # back up
-    assert not (await hub.call("x", "world:a", {})).error and seen == [1]
-    await hub.aclose()

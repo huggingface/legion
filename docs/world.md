@@ -1,32 +1,27 @@
 # Worlds
 
 A world is shared state behind tools: a task board, a canvas, a game. It is an HTTP service
-outside flock, in any language. The spec names it, and its agents get the world's tools next to
-`bash` and their folder tools. Each call reaches the world with the calling agent's name and a
-shared secret. flock starts the world (`compute: local`) or connects to one already running
-(`url:`). It fetches the world's manifest at every apply and hands the tools to the agents. flock
-never reads or stores the world's state.
+outside flock, in any language. Each call reaches the world with the calling agent's name and a
+secret. flock never reads or stores the world's state.
 
-Use a [tools folder](tools.md) when each worker can do the job alone. Use a world when the agents
-must see the same state, across workers (claims, a shared board), at 5 agents or 1,000.
+Harbor agents reach a world through the `world` resource and its `world.*` tools: the run's
+`resources: {world: {url, token_env}}` and `tools: [world.*]`
+(experiments/pybot/spec.yaml; `flock.harbor.builtin.resources.world`). The resource
+adds the secret and the agent's name on the worker, so no world credential enters a Trial's
+container (on hf-sandbox each agent gets its own agent token instead).
+
+The swarm-level `world:` block is the controller's side: it starts the world (`compute: local`)
+or connects to one already running (`url:`), and fetches and checks its manifest at every apply.
+A Harbor spec has no `world:` block: it is reachable only from a hand-written swarm spec. The rest of this page up to "Protocol" is about that block.
 
 ```yaml
 # spec.yaml
 world:
-  dir: ../../worlds/taskboard                       # where `command` runs, relative to the spec
-  command: ["{python}", -m, flock.world, serve, "taskboard:TaskBoard"]
-types:
-  worker:
-    harness: llm
-    model: fake:fake-model
-    replicas: 2                                     # every tool of the world, or:
-    # tools: [world:list_tasks, world:claim_task]   # only these
+  dir: counter                                      # where `command` runs, relative to the spec
+  command: ["{python}", -m, flock.world, serve, "counter:Counter"]
 ```
 
-A runnable version is [`examples/world-demo/`](../examples/world-demo/spec.yaml). It works offline
-with the fake model server from the tests. Its world is [`worlds/taskboard/`](../worlds/taskboard/taskboard.py):
-a shared task board in SQLite with `list_tasks`, `add_task`, `claim_task`, `finish_task` and
-`release_task`, where a claim is exclusive.
+`counter/counter.py` is the one-tool world under "Write your own world" below.
 
 ## Spec
 
@@ -35,9 +30,7 @@ a shared task board in SQLite with `list_tasks`, `add_task`, `claim_task`, `fini
 | `world.command` | Starts the world (a list, or a string split like a shell). flock fills in `{port}` (a free port) and `{python}` (flock's own interpreter). The controller starts it with `compute: local`; with `compute: slurm` the run's world job does (docs/slurm.md "Deploying"), next to `url`. |
 | `world.dir` | Where `command` runs, relative to the spec file. Defaults to the spec's directory. |
 | `world.url` | A world that is already running (a Job, a Space, your laptop). Required with `compute: hf-jobs`. With `compute: local` it is used when there is no `command`. |
-| `world.token_env` | Names the secret sent as `X-World-Token`. It is read from the controller's environment, like provider keys, and handed to the workers. A started world without it gets a generated secret. |
-| `types.<t>.tools: [world:<name>, ...]` | Only these world tools for the type. Without `world:` entries, the type gets every tool in the manifest. |
-| `types.<t>.world: false` | No world tools for this type. |
+| `world.token_env` | Names the secret sent as `X-World-Token`. It is read from the controller's environment, like provider keys; workers do not get this one (the Harbor world resource's own `token_env` is read on the worker). A started world without it gets a generated secret. |
 
 The controller writes `world.endpoint` (the URL it calls) and `world.manifest` into the spec it
 stores. `GET /swarms/{swarm}` shows them, and the run bundle (`run.json`) keeps them. The secret is never
@@ -59,9 +52,8 @@ carry both, and `compute:` is the only line that changes.
    on another port, and the running world stops only after the replacement passed every check
    below and the spec was stored. A world that exited is started again.
 2. It calls `GET /manifest` with the secret and validates it: `world_api: v1`, a name, a version,
-   unique tool names that are not `bash` or `done`, and object schemas.
-3. It checks the types. Every listed `world:<name>` must exist, and no world tool a type gets may
-   share a name with one of its folder or comms tools.
+   unique tool names, and object schemas.
+3. A type's `tools` entries `world:<name>` must name tools of the manifest.
 
 If any step fails, the apply is refused with HTTP 400 and nothing is applied. A replacement
 that was started is stopped, and the running world and the stored spec stay as they were. The
@@ -70,9 +62,8 @@ message says why, for example:
 ```
 world: cannot reach http://127.0.0.1:8770/manifest: ConnectError: [Errno 111] Connection refused
 world: http://w:8000 refused the token (401): check world.token_env
-world: invalid manifest from http://w:8000: tools.0.name: Value error, tool name 'done' is reserved (...)
+world: invalid manifest from http://w:8000: tools.0.name: Value error, tool name '1x' must match (...)
 world.command exited with 1 before serving GET /manifest; its log (.flock/<run>/logs/world-<swarm>.log) ends with: ...
-types.worker.tools: unknown world tool(s) fly; world taskboard has: list_tasks, add_task, ...
 ```
 
 A started world stops when its swarm is removed (`flock stop --delete`), when its block is removed, and
@@ -82,52 +73,6 @@ including helpers that outlived the main process. Its output goes to
 `<run>/logs/world-<swarm>.log` under a `flock launch` run; a standalone local controller lets it inherit
 its own output.
 
-**In the workers.** The world block, with its manifest, comes with every assign and heartbeat
-response.
-
-- **The model sees** the world's tools exactly like folder tools:
-  - the `llm` harness offers them as function tools next to `bash` (and `done`);
-  - the CLI harnesses list them in the generated Tools section of `CLAUDE.md` / `AGENTS.md`, and
-    the agent calls them with `flock-tool <name> --json '<args>'` through the worker's local
-    gateway.
-- **The World section.** A `## World: <name> (version X)` section in the instructions names the
-  world and its tools, with the manifest's `description`.
-- **Calls.** The arguments are checked against the tool's schema before the world is called. A
-  call goes to `POST <endpoint>/tools/<name>` with the secret and the agent's identity. A `429`
-  or `503` is retried once, and only for a read-only tool (`annotations.readOnlyHint`;
-  `Retry-After`, at most 10 s); a write is never resent. There is a 60 s timeout and a 1 MB
-  result limit. Every failure is a tool result the model reads (`{"error": "...", "code": ...}`,
-  plus the world's `retry_after_s` when it gave one); the turn goes on.
-- **Holdoff.** After a `429` (`Retry-After` header or body `retry_after_s`; 30 s if neither,
-  capped at 10 min) the worker refuses every non-read-only call to that world locally until
-  the time is up; after a tool error carrying `retry_after_s` it refuses that agent's calls to
-  that tool only. A held-off call sends no request and captures no workspace: the result is the
-  world's message plus "next slot in N min; do other work or end your turn", with `code`,
-  `retry_after_s` (remaining) and `local: true`, and counts as `refused`. Read-only tools are
-  never held off by a tool hint, and try once during a world holdoff. The turn is never slept.
-- **Changes reach the next turn.** A re-apply re-fetches the manifest, and the next turn sees
-  the new tools. If the version changed, that turn's World section also carries a note: "the
-  world changed since your last turn (version 0.1.0 -> 0.2.0)".
-- **A turn is pinned.** A turn keeps the configuration it started with until it ends: the
-  endpoint, the manifest's schemas, the selection, and whether the worker's secret belongs to
-  them. This holds for in-process calls and for `flock-tool` calls through the gateway (the
-  pinned tool names the configuration).
-- **The secret stays in the worker.** The worker gets it as the job secret `FLOCK_WORLD_TOKEN`,
-  which every worker of a swarm with a world receives at launch. It is removed from the harness
-  environment, even if a type lists it in `secrets`, and every tool call is denied it.
-- **One secret per world.** The world block never carries the secret. It names the secret by
-  `credential_origin` and `credential_id`:
-  - `credential_origin` is the endpoint, or `local:<swarm>` for a world flock started, which is
-    always on 127.0.0.1;
-  - `credential_id` is HMAC(secret, origin).
-
-  A worker sends its secret only when its own HMAC for that origin matches. After a re-apply
-  that points the world at another endpoint or secret, the worker's calls under the new
-  configuration are refused ("world ... now uses another secret or endpoint; this worker
-  restarts ..."), and nothing is sent. The worker then drains, and the controller relaunches it
-  with the new secret. Turns pinned to the old configuration finish against the old world.
-  Restarting a started world keeps its origin and secret, so its workers keep running.
-
 ## Protocol: World API v1
 
 HTTP and JSON. A world is any server that answers these routes:
@@ -136,35 +81,33 @@ HTTP and JSON. A world is any server that answers these routes:
 |---|---|---|
 | `GET /manifest` | | the manifest (below); also the health check |
 | `POST /tools/<name>` | `{"args": {...}}` | `{"ok": true, "result": <any JSON>}` or `{"ok": false, "error": {"code": "...", "message": "..."}}` |
-| `POST /hooks` | `{"event", "agent", "type", "swarm", "turn", "data"}` | `{"ok": true}`; sent only for the events the manifest lists |
+| `POST /hooks` | `{"event", "agent", "type", "swarm", "turn", "data"}` | `{"ok": true}`; not sent by flock now (below) |
 | `GET /metrics` | | optional, capability `metrics-v1`: load and health numbers (below) |
 | `GET /healthz` | | optional, no secret: `{"status": "ready"}` or `{"status": "parked"}` |
 | `/admin/*` | | optional, capability `admin-v1`, the admin secret: knobs and lane pauses (below) |
 
 | header | sent | meaning |
 |---|---|---|
-| `X-World-Token` | every request | the shared secret; answer `401` if it is wrong |
+| `X-World-Token` | every request | the shared secret; answer `401` if it is wrong. `flock.world.server` also takes, on `/manifest` and tool calls, the agent's own token `agent_token(secret, X-Flock-Agent)` (protocol.py), so an agent that holds it acts only as itself |
 | `X-Flock-Agent` | tool calls | the calling agent (`worker-0001`); trust it when the secret matches |
-| `X-Flock-Type`, `X-Flock-Swarm` | tool calls | its type and swarm |
-| `X-Flock-Turn` | tool calls | the agent's turn (`t-3`), when it is in one |
 | `X-Request-Id` | tool calls | unique per call; log it with what the call changed |
 
 The manifest:
 
 ```json
-{"world_api": "v1", "name": "taskboard", "version": "0.1.0",
- "description": "A shared task board. Claim a task before you work on it ...",
- "tools": [{"name": "claim_task", "description": "Claim an open task ...",
-            "parameters": {"type": "object", "properties": {"name": {"type": "string"}},
-                           "required": ["name"], "additionalProperties": false}}],
+{"world_api": "v1", "name": "counter", "version": "0.1.0",
+ "description": "One shared counter.",
+ "tools": [{"name": "bump", "description": "Add `by` to the shared counter ...",
+            "parameters": {"type": "object", "properties": {"by": {"type": "integer"}},
+                           "additionalProperties": false}}],
  "capabilities": ["hooks"], "hooks": ["agent_done"]}
 ```
 
 - `name` matches `[a-z][a-z0-9-]{0,31}`. `version` is any string; change it when the tools
-  change, and the agents are told.
+  change.
 - Each tool is a Chat Completions function: `name`, `description`, and `parameters` (a JSON
   schema of type object). Optional `annotations: {"readOnlyHint": true}` marks a tool that
-  changes nothing; the worker may retry it.
+  changes nothing.
 - Unknown fields are ignored. flock ignores capabilities it does not use, so a world can declare
   more.
 - A tool's error is a `200` with `ok: false`; the agent reads `message`. An optional
@@ -174,22 +117,17 @@ The manifest:
   `{"ok": false, "error": {"code": "overloaded", "message", "retry_after_s"}}`).
 - `result` goes to the model as is if it is a string, otherwise as JSON. If `result` is absent,
   a `text` string is used instead.
-- Hooks are sent by the worker, one request per event, in the background, with a 5 s timeout and
-  no retry:
-  - `agent_start`: an agent's first prompt on a worker (again after a relaunch);
-  - `turn`: every turn end, with `{status, tool_calls}`;
-  - `agent_done`: the agent was unassigned (scale down, removal), with `{reason}`.
-
-  Treat them as hints. A world must stay correct if one is lost.
+- Hooks (`agent_start`, `turn`, `agent_done`) were sent by the worker's world hub, which is
+  gone: Harbor's world resource sends tool calls only. A world must stay correct without them.
 
 ## Write your own world
 
 **In Python**, with the `flock.world` base. Mark tool methods with `@tool`. Schemas come from the
-type hints and the docstring, with the [tools folder rules](tools.md#contract). A parameter named
+type hints and the docstring (`flock.tools.loader`). A parameter named
 `agent` (or annotated `Agent`) receives the caller and is never shown to the model.
 
 ```python
-# worlds/counter/counter.py
+# counter/counter.py
 from flock.world import Agent, ToolError, World, tool
 
 
@@ -217,7 +155,7 @@ class Counter(World):
 ```
 
 ```sh
-cd worlds/counter && FLOCK_WORLD_TOKEN=dev python -m flock.world serve counter:Counter   # :8765
+cd counter && FLOCK_WORLD_TOKEN=dev python -m flock.world serve counter:Counter   # :8765
 curl -s -H 'X-World-Token: dev' localhost:8765/manifest
 curl -s -H 'X-World-Token: dev' -H 'X-Flock-Agent: me' -d '{"args": {"by": 2}}' \
   localhost:8765/tools/bump        # {"ok":true,"result":{"n":2,"last":"me"}}
@@ -241,8 +179,7 @@ args, agent)` serves tools that are not methods. The server checks each call aga
 which `flock launch` needs too.
 
 `raise ToolError(message, code, retry_after_s=N)` adds `retry_after_s` to the error, for a
-refusal that will not change for a while (chatbot4 sends it with its new-PR budget,
-`open_budget`, and with `hub_busy`). The message stays what the agent reads.
+refusal that will not change for a while (a used-up budget, a busy backend). The message stays what the agent reads.
 
 **Admission control.** The server refuses a tool call with `429`, `Retry-After` and
 `code: "overloaded"` when its pool is overloaded: the fast pool's oldest queued call has
@@ -264,9 +201,9 @@ cover the last `window_s` (300 s):
                        "latency_p95_s": 31.0, "latency_max_s": 48.2, "bytes_in": 120000000,
                        "bytes_out": 52000, "calls_total": 310, "errors_total": 44}},
  "pools": {"fast": {"in_flight": 2, "queued": 0, "limit": 40, "queue_wait_oldest_s": 0.0,
-                    "queue_wait_p95_s": 0.0, "queue_wait_max_s": 0.01},
+                    "queue_wait_p95_s": 0.0, "queue_wait_max_s": 0.01, "overloaded_429_total": 0},
            "slow": {"in_flight": 70, "queued": 6, "limit": 64, "queue_wait_oldest_s": 4.2,
-                    "queue_wait_p95_s": 3.0, "queue_wait_max_s": 9.5}},
+                    "queue_wait_p95_s": 3.0, "queue_wait_max_s": 9.5, "overloaded_429_total": 3}},
  "world": {"open_prs": 57}}
 ```
 
@@ -274,13 +211,10 @@ cover the last `window_s` (300 s):
 `overloaded`), latencies (admitted calls only, queue wait included) and bytes are over the
 window; `calls_total` and `errors_total` since start, as are `upload_v1_total` and `upload_v2_total`
 (workspace uploads by format). `pools.*.in_flight` counts running and
-queued calls. `loop_lag_s` is how late a once-a-second timer fired. `world` is the world's own
+queued calls; `pools.*.overloaded_429_total` the refusals since start, by pool (each pool also
+logs one WARNING at most every 10 s with the reason, the tool and how many it refused since). `loop_lag_s` is how late a once-a-second timer fired. `world` is the world's own
 `metrics() -> dict[str, float]` (non-numbers are dropped), called in a thread on every scrape,
-concurrently with tools: keep it cheap. chatbot4 reports `open_prs`, `opens_last_hour`,
-`merges_last_hour`, `open_budget_limit`, `budget_refusals_last_hour`, `parked_drafts`,
-`stale_lease_adoptions_total`, `hub_busy_total`, `save_duration_s` (the last `state.db`
-flush), `save_age_s`, `state_bytes` (`state.db` plus its WAL), `dirty_rows` (changed rows not yet
-saved), and its lanes' numbers as `lane_<lane>_<key>` (below).
+concurrently with tools: keep it cheap.
 
 **Saving state.** A world that keeps its state in memory can save it in O(changes) with
 `flock.world.store`, a `(kind, key) -> JSON` table on SQLite in WAL mode:
@@ -300,15 +234,6 @@ store.backup_to(path)                           # consistent copy while others w
 after, and a row changed meanwhile stays dirty. A failed flush writes nothing and keeps the
 rows dirty for the next one. `close()` checkpoints the WAL into the database file. `backup_to(db_file,
 path)` (module function) copies a database another process is writing, for archive scripts.
-
-chatbot4 keeps its dicts in memory and saves through `state.db` (rows: one per PR, cached
-`open_pr` result, parked draft and inbox, plus `pr_opens` and `pr_merges`), at most every
-`save.interval_s`. On a first start without `state.db` it imports `prs.json`. With `save.legacy_json` off,
-merged and closed PRs leave memory an hour after they ended (`ended_at`), for the cold table; `get_pr` and `list_prs` with
-`state` merged, closed or all still return them. While the knob `save.legacy_json` is on
-(default) it also writes the whole state to `prs.json`, keeps every PR in memory (so a rollback
-to `prs.json` loses nothing), and warns at start when the two differ.
-The archive (`snapshot.py`) carries a `backup_to` copy of `state.db`.
 
 **Lanes for external writes.** A world that writes to an outside service with one token (a
 Git host, an API) can give each kind of write its own lane, from `flock.world.lanes`:
@@ -347,14 +272,6 @@ lanes.outbox("comment", drain=post).put(key=pr, payload=text)   # post(key, payl
   `wait_s_total`, `ok`, `transient`, `final`, `tripped`, `paused`, `outbox_depth`,
   `outbox_oldest_age_s`.
 
-chatbot4 uses `push` (create, push, ready and close PRs; `CHATBOT_HUB_WRITE_SLOTS`), `merge`
-(`CHATBOT_MERGE_HUB_SLOTS`) and `comment` (review comments through the outbox,
-`CHATBOT_HUB_OUTBOX_GAP_S`); `push` and `merge` share one breaker. `git_error`/`hub_error`
-(where "vote failed: transaction was aborted" lands) count as transient, `pr_closed`/`pr_merged`
-as final, and so does a single comment the Hub refuses with a 4xx other than 429 (counted in
-`hub_comments_rejected_total`); joined comments it refuses are split. The pause file pauses
-`push` and `merge` (closes still go through).
-
 **Parked mode.** `python -m flock.world serve` binds its port first and builds the world in a background
 thread. While that raises (a failed restore, the Hub unreachable, a bad config), it is
 *parked*: it logs the error and builds again after 30 s, doubling up to 10 min, forever.
@@ -366,15 +283,13 @@ thread. While that raises (a failed restore, the Hub unreachable, a bad config),
 
 (`error`: the exception's first line, secrets redacted). `GET /healthz` (no secret) says
 `parked` or `ready`; `/metrics` adds `parked` (0 or 1), `attempt` and `paused` (paused lanes);
-`/admin` works. A worker that gets the parked `503` holds every tool of that world off until
-`next_retry_s` (no request, no upload) and the agent reads `world <name> unavailable (<error>);
-work locally`. At an apply, a parked world at the endpoint the stored spec already has keeps
+`/admin` works. At an apply, a parked world at the endpoint the stored spec already has keeps
 the stored manifest; one that was never applied refuses the apply with `world parked ...`.
 The SDK has no separate startup phase: do restores and first fetches in `__init__`, and a
 failure there parks the world.
 
 **Admin API: knobs and lane pauses.** A world registers runtime knobs in `__init__` and reads
-them later; a lane is a kind of work operators may pause (chatbot4: `open`, `push`, `merge`):
+them later; a lane is a kind of work operators may pause (for example `push` and `merge`):
 
 ```python
 class Shop(World):
@@ -393,8 +308,7 @@ class Shop(World):
 
 `on_change(value)` runs in a thread (raise to refuse); without one, read `self.knobs[name]`.
 Values set through the API and the paused lanes are written to `knobs.json` in the world's
-state dir (`World.state_dir()`: `$FLOCK_WORLD_STATE_DIR` by default; chatbot4 uses its
-workspace, archived with it) and read back at the next start, so a requeued world keeps them;
+state dir (`World.state_dir()`: `$FLOCK_WORLD_STATE_DIR` by default) and read back at the next start, so a requeued world keeps them;
 the defaults a world passes (usually from its environment) apply only to knobs never set.
 The manifest lists the knob names under `knobs` and adds the capability `admin-v1`.
 
@@ -408,7 +322,7 @@ The manifest lists the knob names under `knobs` and adds the capability `admin-v
 
 `/admin/*` takes the admin secret in `X-World-Token`, never the world secret (that gets `401`):
 `$FLOCK_WORLD_ADMIN_TOKEN` in the world's environment; unset, `/admin` answers `403`. It is
-never derived from the world secret, which every worker holds. Bodies are capped at 64 KB, and
+never derived from the world secret. Bodies are capped at 64 KB, and
 admission control never applies to `/admin`. Operators go through the controller, which sends
 the same secret and records each knob change as a swarm event (`world_knob {name, old, new,
 by, reason}`):
@@ -417,18 +331,12 @@ by, reason}`):
   its own token and the swarm and starts the world with it in `$FLOCK_WORLD_ADMIN_TOKEN`;
 - any other world (`url`; Slurm, a Space): set `FLOCK_WORLD_ADMIN_TOKEN` in the world's
   environment and in the controller's secrets (the run's secrets file on Slurm,
-  `experiments/run4/slurm/secrets.env.example`), and keep it from the workers.
+  `flock init --secrets`), and keep it from the workers.
 
 ```bash
 python -m flock.world knobs <swarm>                                   # values, defaults, ranges, paused lanes
 python -m flock.world set <swarm> pr.open_floor=10 --reason "hub 429s"
 ```
-
-chatbot4's knobs: `save.interval_s` (`CHATBOT_SAVE_INTERVAL_S`), `save.legacy_json`, `pr.open_floor`
-(`CHATBOT_PR_OPEN_FLOOR`), `hub.push.slots`, `hub.merge.slots`, `hub.comment.slots` and
-`hub.comment.gap_s` (its Hub write lanes, below). `open_pr` honours the `open` lane (new PRs)
-and `push`, `merge_pr` the `merge` lane, besides `CHATBOT_PRS_PAUSED` and its flag file;
-pausing `comment` holds the review comment outbox.
 
 **In any other language:** serve the three routes above. A world without hooks needs only two.
 
@@ -436,7 +344,7 @@ pausing `comment` holds the review comment outbox.
 
 1. List the agent's workflow verbs (find, inspect, act, verify, follow up). Each needs a tool, and each write a read that shows its result.
 2. Serve reads from the world's own mirror, with a freshness field. Agents never need the service's credentials or a fragile transport.
-3. Mark read tools `read_only` (manifest `annotations.readOnlyHint`): they go to the fast pool, the worker may retry them, and admission control treats them separately.
+3. Mark read tools `read_only` (manifest `annotations.readOnlyHint`): they go to the fast pool, and admission control treats them separately.
 4. Bound results: byte caps, pagination, narrowing hints.
 5. Stable error codes plus `retry_after_s`; make writes idempotent on `X-Request-Id` where the backend allows.
 6. Inject the backend, and test with a fake.
@@ -446,9 +354,9 @@ pausing `comment` holds the review comment outbox.
 
 | | `compute: local` (`flock launch`) | `compute: hf-jobs` |
 |---|---|---|
-| who runs the world | the controller, from `command` in `dir` | you: a Job, a Space or any host the workers can reach; give `url` |
+| who runs the world | the controller, from `command` in `dir` | you: a Job, a Space or any host the workers can reach; give `url` (and the run's `resources.world.url`) |
 | port | chosen by flock (`{port}`, `$FLOCK_WORLD_PORT`), on 127.0.0.1 | yours |
-| secret | generated (or `token_env`) | `token_env`, set on the controller; the controller passes it to the workers as a job secret |
+| secret | generated (or `token_env`) | `token_env`, set on the controller; the world resource reads its own `token_env` on the worker |
 | lifetime | stops with the swarm or the run | yours |
 
 Starting the world as an HF Job from `command` (with the job's image and flavor, in the
@@ -463,9 +371,8 @@ Space is public, so the secret is its only protection.
 - Optional capabilities with routes of their own (`state`, `score`, `claims`, `rounds`,
   `events`, `render`, `checks`). Loop settings that need them (`loop.while.score_*`,
   `every: rounds`, `on: world.*`) are still refused at apply.
-- Per-service rate budgets: a world call is not rate-limited by flock beyond the 429 / 503
-  retries.
-- Batching and delivery guarantees for hooks.
+- Per-service rate budgets: the world resource caps one agent's calls in flight (8), nothing
+  more.
 
 ## Local clone uploads (workspace-upload-v1, -v2)
 
@@ -473,13 +380,13 @@ A world can advertise `workspace-upload-v1` and implement
 `call_workspace(name, args, agent, snapshot)`. A tool opts in with
 `x-flock-workspace` on its manifest entry:
 `{"arg": "<argument>", "default": "<value when absent>", "skip": ["<value>", ...], "skip_prefix": "<prefix>"}`
-(only `arg` is required). For a call to that tool, the worker captures the git clone
-named by that argument, rooted inside the caller's workdir, unless the value is in
+(only `arg` is required). For a call to that tool, the agent's `world.*` tool captures the
+git clone named by that argument, rooted inside the agent's workspace, unless the value is in
 `skip` or starts with `skip_prefix`. It forwards `{args: {...}, workspace: {base_sha, files}}` to
 the existing authenticated tool route; the file map contains base64 bytes. The
 upload is outside the model's tool arguments, so the model supplies neither a
-server path nor a base SHA. chatbot4 declares it on `open_pr` (`path`) and `run_bot`
-(`ref_or_path`; `main` and `pr:<number>` use no upload).
+server path nor a base SHA. For example, a tool that opens a pull request from the agent's
+clone declares it on its `path` argument.
 
 Only tracked and nonignored files are captured; missing tracked files represent
 deletions. Symlinks, paths outside the agent workspace, git metadata, more than
@@ -488,7 +395,7 @@ HEAD and origin/main; the world validates it against its own history. Commit
 local edits and fetch/rebase before refreshing a stale PR.
 
 **Patch uploads (workspace-upload-v2).** A world that also advertises
-`workspace-upload-v2` gets the same files as a patch instead: the worker hashes
+`workspace-upload-v2` gets the same files as a patch instead: the tool hashes
 them into a temporary index (`GIT_INDEX_FILE`, no clean filters or other
 commands from the clone's config) and sends
 `workspace: {base_sha, patch}`, where `patch` is the base64 of
@@ -501,33 +408,9 @@ stages the tree); it refuses symlinks, submodules, paths outside the tree or in
 `.git`, and more than 10,000 files or 128 MiB declared (`git apply` runs under
 `prlimit`: 128 MiB per file, 2 GiB of memory). A world that cannot use a patch
 but could use the full tree answers the error code `need_full` before doing
-anything; the worker then resends the call once as v1. `GET /metrics` counts
-`upload_v1_total` and `upload_v2_total`. chatbot4 advertises both, checks the PR
-budget before any apply, and answers `need_full` only from `run_bot` (whose v1
-path takes any base); `open_pr` refuses a base that is not on main either way.
+anything; the tool then resends the call once as v1. `GET /metrics` counts
+`upload_v1_total` and `upload_v2_total`.
 
 A tool's optional
-`x-flock-timeout_s` raises the worker's HTTP read timeout for its calls; chatbot4
-sets 330 seconds on every tool so a 300-second conversation can finish.
-
-The chatbot4 world preserves the seed input/output and module loader, runs the
-bot under stdlib/import and side-effect restrictions with resource limits, and
-requires a different agent's review of the exact PR head. It refuses stale bases
-instead of rebasing automatically; refreshing a PR always requires fresh review.
-`prs.jsonl` records PR events with both the main parent and PR head for merges.
-`eval-queue.jsonl` is an append-only hook for the separate held-out evaluator;
-this implementation does not start an evaluator.
-
-Run 4 uses one explicit `HF_TOKEN` for the experiment bucket and dataset. It is
-required by the PR backend and should grant access only to those resources. The
-controller and workers share its dataset-write access. Run4 requires separate
-user/PID/mount namespaces and private `/proc` for Pi and bot subprocesses, plus
-`PR_SET_DUMPABLE=0` on the worker and world. Pi sees only its own writable work
-and session directories and its live, read-only tool-pin directory. Bots also
-get a new network namespace and read-only filesystems. Runtimes are mounted
-read-only; host homes, sibling pins and world state are absent from the child
-root. Namespace capabilities are dropped and `no_new_privs` is set before exec.
-Setup errors abort instead of falling back to a plain process. The cluster dry
-run requires the real kernel isolation tests; these skip on hosts that prohibit
-unprivileged namespaces. The audit hook is an additional language restriction,
-not the process boundary. See [unshare](https://man7.org/linux/man-pages/man1/unshare.1.html).
+`x-flock-timeout_s` raises the tool's HTTP read timeout for its calls (for example
+330 seconds for a tool that may run for 300).

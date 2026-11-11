@@ -11,7 +11,7 @@ from flock.worker.events import Outbox, SessionLog, event_to_entry, read_session
 
 def test_session_file_round_trip(tmp_path):
     path = tmp_path / "_sessions" / "researcher-0001.jsonl"
-    log = SessionLog(path, swarm="sw", agent="researcher-0001", harness="codex", cwd="/work/agents/researcher-0001")
+    log = SessionLog(path, swarm="sw", agent="researcher-0001", harness="harbor", cwd="/work/agents/researcher-0001")
     sent = [
         log.custom("session_started", {"session_id": "abc", "resumed": False}),
         log.custom("turn_started", {}, turn_id="t-1"),
@@ -21,7 +21,7 @@ def test_session_file_round_trip(tmp_path):
     ]
     lines = [json.loads(x) for x in path.read_text().splitlines()]
     header = lines[0]
-    assert header["type"] == "session" and header["version"] == 3 and header["harness"] == "codex"
+    assert header["type"] == "session" and header["version"] == 3 and header["harness"] == "harbor"
     assert header["id"] == "sw/researcher-0001" and header["name"] == "researcher-0001"
     assert header["cwd"] == "/work/agents/researcher-0001"
     # parentId chain, 8-hex ids, custom entries for harness-neutral events
@@ -44,9 +44,9 @@ def test_session_file_round_trip(tmp_path):
 
 def test_session_log_reopens_after_restore(tmp_path):
     path = tmp_path / "a.jsonl"
-    a = SessionLog(path, swarm="sw", agent="a-0001", harness="claude", cwd="/w")
+    a = SessionLog(path, swarm="sw", agent="a-0001", harness="harbor", cwd="/w")
     first = a.custom("sync", {})
-    b = SessionLog(path, swarm="sw", agent="a-0001", harness="claude", cwd="/w")
+    b = SessionLog(path, swarm="sw", agent="a-0001", harness="harbor", cwd="/w")
     second = b.custom("sync", {})
     assert second.data["parentId"] == first.data["id"] and second.data["id"] != first.data["id"]
     assert sum(1 for x in path.read_text().splitlines() if '"type": "session"' in x) == 1

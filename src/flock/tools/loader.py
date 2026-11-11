@@ -1,4 +1,4 @@
-"""Tools folder -> tool definitions (docs/tools.md, "Contract").
+"""Tools folder -> tool definitions.
 
 Every `*.py` file at the top of the folder whose name does not start with `_` is a tool module.
 Every function defined in it (not imported) whose name does not start with `_` and that has a
@@ -29,7 +29,6 @@ from typing import Any
 from flock.tools import READONLY_ATTR, Context
 
 NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
-RESERVED = frozenset({"bash", "done"})  # the llm harness's own tools
 CTX_NAME = "ctx"
 DESCRIBE_TIMEOUT_S = 60.0
 
@@ -184,8 +183,6 @@ def tool_def(fn: Any, module: str) -> ToolDef:
     where = f"{module}.{name}"
     if not NAME_RE.match(name):
         raise ToolsError(f"{where}: tool names must match {NAME_RE.pattern}")
-    if name in RESERVED:
-        raise ToolsError(f"{where}: {name!r} is reserved (the llm harness's own tool); rename it")
     doc = inspect.getdoc(fn) or ""
     try:
         hints = typing.get_type_hints(fn)
@@ -329,3 +326,60 @@ def _main(argv: list[str]) -> int:
 
 if __name__ == "__main__":
     sys.exit(_main(sys.argv[1:]))
+
+
+# --------------------------------------------------------------------------- arguments
+
+_JSON_TYPES: dict[str, tuple[type, ...]] = {
+    "string": (str,), "integer": (int,), "number": (int, float), "boolean": (bool,),
+    "array": (list,), "object": (dict,),
+}
+
+
+def _types(schema: dict[str, Any]) -> list[str] | None:
+    t = schema.get("type")
+    if isinstance(t, str):
+        return [t]
+    return list(t) if isinstance(t, list) else None
+
+
+def _is(value: Any, t: str) -> bool:
+    if t == "null":
+        return value is None
+    if t not in _JSON_TYPES:
+        return True
+    return isinstance(value, _JSON_TYPES[t]) and not (t in ("integer", "number") and isinstance(value, bool))
+
+
+def _check(schema: dict[str, Any], value: Any, where: str) -> str | None:
+    """Type and enum checks; null only where the schema allows it (`X | None`), array items
+    included. A schema without `type` (`Any`) accepts anything."""
+    types = _types(schema)
+    if types is not None and not any(_is(value, t) for t in types):
+        want = " or ".join("null" if t == "null" else t for t in types)
+        got = "null" if value is None else f"{type(value).__name__} {json.dumps(value)[:60]}"
+        return f"{where} must be {want}, got {got}"
+    if "enum" in schema and value not in schema["enum"]:
+        return f"{where} must be one of {schema['enum']}, got {json.dumps(value)[:60]}"
+    if isinstance(value, list) and isinstance(schema.get("items"), dict):
+        for i, v in enumerate(value):
+            if err := _check(schema["items"], v, f"{where}[{i}]"):
+                return err
+    return None
+
+
+def check_args(params: dict[str, Any], args: Any) -> str | None:
+    """An error message for arguments that do not fit the tool's schema, else None."""
+    if not isinstance(args, dict):
+        return f"arguments must be a JSON object, got {type(args).__name__}"
+    props = params.get("properties") or {}
+    unknown = [k for k in args if k not in props]
+    if unknown:
+        return f"unknown argument(s) {', '.join(unknown)}; expected: {', '.join(props) or 'none'}"
+    missing = [k for k in params.get("required") or [] if k not in args]
+    if missing:
+        return f"missing required argument(s): {', '.join(missing)}"
+    for k, v in args.items():
+        if err := _check(props[k], v, k):
+            return err
+    return None

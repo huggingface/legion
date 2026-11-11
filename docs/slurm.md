@@ -5,8 +5,8 @@ too, which `flock launch` submits and `flock stop --release` cancels. The reconc
 placement, heartbeats, events and bucket sync are the same as for `hf-jobs`; only the backend
 that starts a worker differs (`controller/slurm.py`). Agent state, the controller's state and the
 run bundle stay in HF buckets. The shared disk holds code, the venv or image, the run directory
-(env files, host files, logs) and the world's own state when the world keeps it there: chatbot4
-uses `$CHATBOT_WS`, default `<world.dir>/ws`, so set a per-run `CHATBOT_WS` in run.env (runs from
+(env files, host files, logs) and the world's own state when the world keeps it there. A world
+whose state dir defaults to a path under `world.dir` needs a per-run one in run.env (runs from
 one checkout would share it).
 
 ## Deploying
@@ -16,19 +16,19 @@ command reads it. The steps and their order are the same on every backend (docs/
 "Lifecycle"):
 
 ```sh
-flock init $PWD/runs/hierarchy --from my-experiment --profile my-cluster.env --secrets secrets.env
+flock init $PWD/runs/demo --from my-experiment --profile my-cluster.env --secrets secrets.env
 #   logs/ hosts/        the jobs' logs and host files (controller.host, world.host)
 #   experiment/         a copy of the folder (links followed): what is launched
 #   slurm/              a copy of scripts/slurm: the job scripts `flock launch` submits
 #   cluster.env         a copy of the cluster profile (below)
 #   run.env (mode 600)  every ${VAR} the spec reads (commented: the spec's default),
 #                       the secrets it names, per-run FLOCK_TOKEN and FLOCK_WORLD_TOKEN
-$EDITOR runs/hierarchy/run.env              # fill what the checks report; rerun `flock init runs/hierarchy`
-export FLOCK_RUN_DIR=$PWD/runs/hierarchy    # or `flock --run runs/hierarchy ...` on each command
-flock launch runs/hierarchy/experiment      # sbatch the world and the controller, wait, create
-flock status hierarchy
-flock stop hierarchy --release              # drain, checkpoint, stop the world, cancel both jobs
-flock launch runs/hierarchy/experiment      # the jobs again: the controller restores, the swarm resumes
+$EDITOR runs/demo/run.env              # fill what the checks report; rerun `flock init runs/demo`
+export FLOCK_RUN_DIR=$PWD/runs/demo    # or `flock --run runs/demo ...` on each command
+flock launch runs/demo/experiment      # sbatch the world and the controller, wait, create
+flock status demo
+flock stop demo --release              # drain, checkpoint, stop the world, cancel both jobs
+flock launch runs/demo/experiment      # the jobs again: the controller restores, the swarm resumes
 ```
 
 The jobs are named `flock-world-<run>` and `flock-ctl-<run>` (one of each per run:
@@ -123,11 +123,11 @@ sbatch --parsable [-p <partition>] [-A <account>] -c <cpus> --mem=<mem> --time=<
 ```
 
 The env file holds `WORKER_ID WORKER_INCARNATION SWARM TYPE DEADLINE DRAIN_WINDOW BUCKET RUN
-FLOCK_URL WORK_ROOT FLOCK_LLM_HOME PYTHONUNBUFFERED`, the type's `env`, and when configured
+FLOCK_URL WORK_ROOT PYTHONUNBUFFERED`, the type's `env`, and when configured
 `FLOCK_CTL_HOST_FILE FLOCK_VENV FLOCK_SECRETS_FILE FLOCK_CONTAINER_IMAGE` (and, with
 `container_root`, `HOME HF_HOME TMPDIR`). A comment names the secrets the worker
 expects from the cluster's secrets file: `FLOCK_TOKEN HF_TOKEN` plus the launch's (provider
-key, board invite, `FLOCK_WORLD_TOKEN`). The worker script (the run's `slurm/worker.sbatch`;
+key, the type's `secrets`). The worker script (the run's `slurm/worker.sbatch`;
 the controller job sets `FLOCK_SLURM_WORKER_SCRIPT` to it) sources the secrets file, run.env and
 the env file and runs `flock-worker`, handing it those secrets in a private file (below).
 
@@ -146,7 +146,7 @@ private file and execs `flock-worker` with only its path:
   expansion, escapes or multi-line values.
 - Names: the worker's credentials, `FLOCK_TOKEN` and `HF_TOKEN`, plus the launch's provider
   key (e.g. `OPENAI_API_KEY`, the type's `api_key_env`), board invite (e.g.
-  `CHATBOT_BOARD_INVITE`), `FLOCK_WORLD_TOKEN`, and any name in a type's `secrets`.
+  `BOARD_INVITE`), `FLOCK_WORLD_TOKEN`, and any name in a type's `secrets`.
 - Precedence: a name in the file wins over the same name in the environment, and every name
   in the file is removed from the worker's `os.environ`, so processes it starts never inherit
   it. Names not in the file are still read from the environment (the old way keeps working).
@@ -157,9 +157,9 @@ private file and execs `flock-worker` with only its path:
 # worker-inner.sh
 umask 077
 secrets=$(mktemp "${TMPDIR:-/tmp}/flock-worker-secrets.XXXXXX")
-printf 'FLOCK_TOKEN=%s\nHF_TOKEN=%s\nOPENAI_API_KEY=%s\nFLOCK_WORLD_TOKEN=%s\nCHATBOT_BOARD_INVITE=%s\n' \
-  "$FLOCK_TOKEN" "$HF_TOKEN" "$OPENAI_API_KEY" "$FLOCK_WORLD_TOKEN" "$CHATBOT_BOARD_INVITE" > "$secrets"
-exec env -u FLOCK_TOKEN -u HF_TOKEN -u OPENAI_API_KEY -u FLOCK_WORLD_TOKEN -u CHATBOT_BOARD_INVITE \
+printf 'FLOCK_TOKEN=%s\nHF_TOKEN=%s\nOPENAI_API_KEY=%s\nFLOCK_WORLD_TOKEN=%s\nBOARD_INVITE=%s\n' \
+  "$FLOCK_TOKEN" "$HF_TOKEN" "$OPENAI_API_KEY" "$FLOCK_WORLD_TOKEN" "$BOARD_INVITE" > "$secrets"
+exec env -u FLOCK_TOKEN -u HF_TOKEN -u OPENAI_API_KEY -u FLOCK_WORLD_TOKEN -u BOARD_INVITE \
   FLOCK_WORKER_SECRETS_FILE="$secrets" FLOCK_WORKER_SECRETS_FILE_UNLINK=1 flock-worker
 ```
 
@@ -218,19 +218,14 @@ types:
     worker:
       drain_budget_s: 20        # FLOCK_DRAIN_BUDGET_S: the whole preemption handler
       sync_interval_s: 180      # SYNC_INTERVAL: periodic bucket push
-      comms_rate: 0.5           # FLOCK_COMMS_RATE: board requests/s per worker (0: off)
-      comms_burst: 5            # FLOCK_COMMS_BURST
-      comms_agent_rate: 0.1     # FLOCK_COMMS_AGENT_RATE: one agent's comms calls/s (0: off)
-      comms_agent_burst: 10     # FLOCK_COMMS_AGENT_BURST
-      comms_poll_cycle_s: null  # FLOCK_COMMS_POLL_CYCLE_S (see below)
       sync_exclude: [data/raw/] # FLOCK_SYNC_EXCLUDE: added to the default excludes
       restore_batch: 1000       # FLOCK_RESTORE_BATCH: files per download batch
       restore_threads: 4        # FLOCK_RESTORE_THREADS: one agent's batches in parallel
-      memory: {rotate: null, drain: null, preempt: null, spike_mb: null, recycle_gap_s: null}
-                                # FLOCK_MEM_ROTATE, _DRAIN, _PREEMPT, _SPIKE_MB, _RECYCLE_GAP_S
+      memory: {rotate: null, drain: null, preempt: null}
+                                # FLOCK_MEM_ROTATE, _DRAIN, _PREEMPT
 ```
 
-Poll cycle: `worker.comms_poll_cycle_s`, else the swarm's `comms.poll_cycle_s` when set, else `FLOCK_COMMS_POLL_CYCLE_S`, else 300. Each heartbeat carries `knobs_rev`,
+Each heartbeat carries `knobs_rev`,
 a hash of the settings in force, and `flock status --json` shows it (`knobs_rev` per worker), so workers running
 an older configuration stand out.
 
@@ -289,19 +284,23 @@ for the controller).
 15 s it reads its cgroup (the smallest `memory.max` up the tree; when none, Slurm's in-job
 `SLURM_MEM_PER_NODE`, then `FLOCK_MEMORY_LIMIT_MB`, both MB) and compares nonreclaimable memory (anon + shmem + slab_unreclaimable + kernel_stack +
 pagetables, not page cache) with the limit. Without a limit nothing below is armed. Each rung
-is logged once until memory falls below the first one again. `rotate`, `drain`, `preempt`,
-`spike_mb` and `recycle_gap_s` can also be set per type under `worker.memory` (spec, then the
-env variable, then the default):
+is logged once until memory falls below the first one again. `rotate`, `drain` and `preempt`
+can also be set per type under `worker.memory` (spec, then the env variable, then the default):
 
 | Nonreclaimable / limit | Worker |
 |---|---|
-| ≥ `FLOCK_MEM_ROTATE` (0.75) | `wants_rotation: true` in the heartbeat (`mem.eta_limit_s` next to it); recycles the agent with the largest Pi PSS at its next turn boundary (docs/pi.md "Memory"), at most one per `FLOCK_MEM_RECYCLE_GAP_S` (600) |
+| ≥ `FLOCK_MEM_ROTATE` (0.75) | `wants_rotation: true` in the heartbeat (`mem.eta_limit_s` next to it), for the controller's rotation (below) |
 | ≥ `FLOCK_MEM_DRAIN` (0.85) | drain: turns still running after `FLOCK_MEM_DRAIN_DEADLINE_S` (300) are interrupted (`drain_deadline`, resumed with `resume_prompt` after the restart), sync, exit 0: a planned restart |
 | ≥ `FLOCK_MEM_PREEMPT` (0.93), or a new `oom_kill` in `memory.events` | `preempt("memory")`, as on SIGUSR1: exit 75, relaunched at once |
 
-Spike guard: one agent's tool processes above `FLOCK_MEM_SPIKE_MB` (3072; 0 turns it off) are
-SIGKILLed, not Pi and not the other agents (`tool_tree_killed {agent, mb}`); no drain.
-`worker_lifetime` stays the backstop.
+The ladder acts on the whole worker. For Harbor agents that means: no single Trial is picked
+and restarted for memory (the worker cannot tell which one grows: a Trial's agent runs in its
+own container, so its memory is not in the worker's process tree). Relief is a drain or a
+preemption of the whole worker; every agent's Trial stops, its Pi sessions go to the bucket and
+the agents resume on the relaunched worker. On docker and podman a Trial's container memory
+counts against the worker's job only when the engine puts its containers inside the job's
+cgroup; on hf-sandbox it does not count at all. `worker_lifetime` stays the
+backstop.
 
 The controller rotates workers that ask for it: each pass, among workers whose heartbeat says
 `wants_rotation`, it sends a drain to the one with the smallest `eta_limit_s` while fewer than
@@ -310,8 +309,7 @@ restoring or draining, and writes `memory_rotation {worker, nonreclaim_mb, eta_l
 the swarm stream. A worker's own drain or preemption at 85% / 93% does not wait for this budget.
 
 `memory.oom.group` (logged at start): when it is 1 on the job's cgroup, one OOM kill ends every
-process in it, so `oom_score_adj` does not help; only this ladder and the
-tool limits (`tool_memory_mb`) do.
+process in it, so `oom_score_adj` does not help; only this ladder does.
 
 ## The world on a moving host
 
@@ -325,17 +323,42 @@ name, optional port) receives it.
 
 ## Containers (Enroot/Pyxis)
 
-Workers may run in a container (`srun --container-image`, when the profile or run.env names an
-image: `CONTAINER_IMAGE`, or `CONTAINER_IMAGE_<type>`); the controller (it needs `sbatch`) and
-the world stay on the host. In the container `/tmp` is a RAM tmpfs counted against the
-job's memory, so nothing goes there: with `container_root: /work` the env file sets
-`WORK_ROOT FLOCK_LLM_HOME HOME HF_HOME TMPDIR` to `/work/flock/<worker id>/{work,llm,home,hf,tmp}`.
-`worker.sbatch` overrides `WORK_ROOT FLOCK_LLM_HOME` in the container with worker-id-free paths
-(`/work/flock/agents/{work,llm}`): a Pi session resumes only from the cwd it was written from, so an agent's workdir must not change when the controller relaunches
-its slot under a new worker id. A worker with no usable HOME derives HOME, HF_HOME,
-XDG_CACHE_HOME, UV_CACHE_DIR and TMPDIR from the parent of `WORK_ROOT`; other processes use
-`FLOCK_HOMELESS_ROOT`. A world's bot runs get their own run dir as TMPDIR.
-`experiments/run3/slurm/Containerfile` builds the image.
+`container_root` and `container_image` (and `CONTAINER_IMAGE`) are ignored for workers
+(below). A worker with no usable HOME derives HOME, HF_HOME, XDG_CACHE_HOME, UV_CACHE_DIR and TMPDIR from the
+parent of `WORK_ROOT`; other processes use `FLOCK_HOMELESS_ROOT`.
+
+`harness: harbor` workers never run in a container: each agent is a Harbor Trial in rootless
+podman, which cannot run inside Enroot. Their env file carries `FLOCK_HARNESS=harbor` and node
+paths, and `worker.sbatch` runs `flock-worker` here as its child with the upstream podman setup:
+the job's own podman storage in `/tmp/flock-podman.*` (left to the job's own `/tmp`, e.g. a per-job
+tmpfs), `podman-compose` from the venv (a flock dependency, Python 3.12+), podman's
+health checks run by `python -m flock.harbor.podman_healthchecks` (compute nodes have no user
+systemd), and the upstream git credential helper for huggingface.co (private task repos), which
+reads `HF_TOKEN` from a 0600 file there. At exit the job's containers are stopped, within
+KillWait. With `--cgroup-manager cgroupfs` and no user systemd, conmon and the containers should
+stay in the job's cgroup (Slurm's `Contain` kills them, the memory ladder sees them): unverified
+on compute nodes so far.
+Every user of a node can read a process's command line (`ps`): a Trial's `compose exec` passes
+the agent's env (its inference key, resource tokens) and sensitive-looking names (`*_TOKEN`,
+`*_API_KEY`, `*SECRET*`, `*PASSWORD*`) by name only. A task's `[verifier.env]` value taken from
+a secret must have such a name, or it stays on the command line.
+The pinned task is trusted with the host's container engine: its compose file and its
+`[environment.env]` reach podman (or docker) as written, and flock only keeps secret values out
+of `ps`. Run a task you do not trust on `hf-sandbox`.
+
+A private task repo is pinned on the operator's machine too (`flock init` and `flock launch` run
+Harbor's plain `git`: `ls-remote`, then a shallow fetch to list the tasks), where no helper is set up. Export one in that shell first; it
+reads `HF_TOKEN` from the environment, so no token is on any command line (the empty value first
+drops other helpers for huggingface.co). `HF_TOKEN` must be *exported* in this shell: a value
+only present in the run's `run.env` is not seen by git:
+
+```sh
+export GIT_CONFIG_COUNT=2 \
+  GIT_CONFIG_KEY_0=credential.https://huggingface.co.helper GIT_CONFIG_VALUE_0= \
+  GIT_CONFIG_KEY_1=credential.https://huggingface.co.helper \
+  GIT_CONFIG_VALUE_1='!f() { test "$1" = get && printf "username=hf_user\npassword=%s\n" "$HF_TOKEN"; }; f'
+GIT_TERMINAL_PROMPT=0 git ls-remote <task repo URL> HEAD   # check: a sha, no prompt
+```
 
 ## Singletons on Spot
 

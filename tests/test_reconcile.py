@@ -32,7 +32,7 @@ from flock.models import (
     parse_duration,
 )
 
-from .conftest import TOKEN, make_spec
+from .conftest import HB, TOKEN, make_spec
 
 CMD = TypeAdapter(Command)
 W0, W1 = "demo-researcher-w0000", "demo-researcher-w0001"
@@ -460,36 +460,6 @@ def test_job_labels_from_settings_are_added_but_never_override(store, jobs, sett
     }
 
 
-def test_store_migrates_workers_table_without_incarnation(tmp_path):
-    import sqlite3
-
-    (tmp_path / "old").mkdir()
-    db = sqlite3.connect(tmp_path / "old" / "controller.db")
-    db.execute("CREATE TABLE workers (id TEXT PRIMARY KEY, swarm TEXT NOT NULL, type TEXT NOT NULL,"
-               " idx INTEGER NOT NULL, job_id TEXT, created_at REAL NOT NULL)")
-    db.commit()
-    db.close()
-    s = Store(tmp_path / "old")
-    s.insert_worker("w", "sw", "t", 0, 0)
-    s.update_worker("w", incarnation="abc")
-    assert s.get_worker("w")["incarnation"] == "abc"
-
-
-def test_store_migrates_swarms_to_generation_1(tmp_path):
-    import sqlite3
-
-    (tmp_path / "old").mkdir()
-    db = sqlite3.connect(tmp_path / "old" / "controller.db")
-    db.execute("CREATE TABLE swarms (name TEXT PRIMARY KEY, spec TEXT NOT NULL, "
-               "applied_at REAL NOT NULL, removing INTEGER NOT NULL DEFAULT 0)")
-    db.execute("INSERT INTO swarms VALUES ('demo', ?, 0, 0)", [make_spec().model_dump_json()])
-    db.commit()
-    db.close()
-    s = Store(tmp_path / "old")
-    assert s.generation("demo") == 1 and s.spec_history("demo") == []
-    assert s.record_spec(make_spec(), 5, {}, ["x: 1 -> 2"], new=False) == 2
-
-
 class _HubError(Exception):
     """Shaped like huggingface_hub's HfHubHTTPError: carries the response."""
 
@@ -562,7 +532,7 @@ def test_resume_prompt_goes_through_max_working_admission(store, jobs, clock, ti
         "swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/b",
         "providers": {"p": {"type": "openai_compat", "base_url": "http://fake/v1",
                             "api_key_env": "K", "self_hosted": True, "max_working": 1}},
-        "types": {"researcher": {"harness": "codex", "model": "p:m", "replicas": 1,
+        "types": {"researcher": {**HB, "model": "p:m", "replicas": 1,
                                  "resume_prompt": "go on"}}})
     store.put_swarm(spec, 0)
     tick()

@@ -20,7 +20,7 @@ from flock.controller.slurm import (
 )
 from flock.models import AgentHeartbeat, SwarmSpec, WorkerHeartbeat
 
-from .conftest import TOKEN
+from .conftest import FAKE_PROVIDERS, HB, TOKEN
 
 W0 = "demo-researcher-w0000"
 SECRET_VALUES = {"FLOCK_TOKEN": TOKEN, "ANTHROPIC_API_KEY": "sk-secret-anthropic",
@@ -32,17 +32,18 @@ def slurm_spec(tmp_path: Path, **compute) -> SwarmSpec:
         "kind": "slurm",
         "partition": "cpu",
         "account": "acct",
-        "worker_script": "/fsx/run3/slurm/worker.sbatch",
+        "worker_script": "/shared/demo/slurm/worker.sbatch",
         "log_dir": str(tmp_path / "logs"),
         "launch_dir": str(tmp_path / "launch"),
-        "host_file": "/fsx/run3/controller.host",
-        "venv": "/fsx/run3/venv",
-        "secrets_file": "/fsx/run3/secrets.env",
+        "host_file": "/shared/demo/controller.host",
+        "venv": "/shared/demo/venv",
+        "secrets_file": "/shared/demo/secrets.env",
         **compute,
     }
     return SwarmSpec.model_validate({
         "swarm": "demo", "bucket": "hf://buckets/ns/sh", "compute": block,
-        "types": {"researcher": {"harness": "claude", "model": "claude-opus-5-5", "replicas": 2,
+        "providers": FAKE_PROVIDERS,
+        "types": {"researcher": {**HB, "model": "fake:m", "replicas": 2,
                                  "agents_per_worker": 2, "secrets": ["ANTHROPIC_API_KEY"],
                                  "resume_prompt": "Your turn was cut; continue.",
                                  "env": {"MSGBOARD_URL": "https://example.invalid"}}},
@@ -333,8 +334,7 @@ def test_crash_log_tail_survives_a_controller_restart(tmp_path, slurm, store, cl
     w = store.get_worker(W0)
     assert w["log_path"] == str(tmp_path / "logs" / f"{W0}-{job}.out")
     env = read_env_file(next((tmp_path / "launch").glob(f"{W0}-*.env")))  # no container_root:
-    assert (env["WORK_ROOT"], env["FLOCK_LLM_HOME"]) == (  # node-local, fixed per slot
-        f"/tmp/flock/{W0}/work", f"/tmp/flock/{W0}/llm") and "HOME" not in env
+    assert env["WORK_ROOT"] == f"/tmp/flock/{W0}/work" and "HOME" not in env  # node-local
     (tmp_path / "logs" / f"{W0}-{job}.out").write_text("start\nImportError: no module x\n")
     slurm.set(job, "FAILED", "1:0")
     clock.advance(100)
@@ -361,19 +361,11 @@ def test_unknown_compute_kind_is_a_hard_error(tmp_path, caplog):
     b.store.close()
 
 
-def test_container_root_puts_every_path_under_it(tmp_path, slurm, store, clock):
-    """Workers in a container (RAM /tmp): the env file moves every agent/harness path under
-    container_root; per type too."""
-    spec = slurm_spec(tmp_path, container_root="/work")
-    store.put_swarm(spec, 0)
+def test_harbor_workers_run_on_the_node_and_say_so(tmp_path, slurm, store, clock):
+    """A harbor type's Trials run in podman, which cannot run inside Enroot: its env file names
+    the harness for worker.sbatch and keeps the node's paths, even with a container configured."""
+    store.put_swarm(slurm_spec(tmp_path, container_root="/work", container_image="/shared/img.sqsh"), 0)
     reconcile(store, SlurmJobsClient(env={}), clock(), settings())
-    (path,) = (tmp_path / "launch").glob(f"{W0}-*.env")
-    env = read_env_file(path)
-    base = f"/work/flock/{W0}"
-    assert {k: env[k] for k in ("WORK_ROOT", "FLOCK_LLM_HOME", "HOME", "HF_HOME", "TMPDIR")} == {
-        "WORK_ROOT": f"{base}/work", "FLOCK_LLM_HOME": f"{base}/llm", "HOME": f"{base}/home",
-        "HF_HOME": f"{base}/hf", "TMPDIR": f"{base}/tmp"}
-    assert not any(v.startswith("/tmp") for v in env.values())
-    cfg = resolve(slurm_spec(tmp_path, types={"researcher": {"container_root": "/c"}}).compute,
-                  "researcher", {})
-    assert cfg["container_root"] == "/c"
+    harbor = read_env_file(next((tmp_path / "launch").glob(f"{W0}-*.env")))
+    assert harbor["FLOCK_HARNESS"] == "harbor" and "FLOCK_CONTAINER_IMAGE" not in harbor
+    assert harbor["WORK_ROOT"] == f"/tmp/flock/{W0}/work" and "HOME" not in harbor

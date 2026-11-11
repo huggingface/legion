@@ -1,12 +1,11 @@
-"""AgentRuntime: one per assigned agent; process-per-burst (design.md section 4).
+"""AgentRuntime: one per assigned agent; design.md "Agent lifecycle".
 
 Phases of the harness process: none -> starting -> running -> (stopping) -> none.
 - A prompt with no process starts a burst; prompts arriving while it starts are buffered and
   forwarded in order once it is up; later prompts go straight to the running process.
 - The burst ends when the harness has been idle for `idle_grace`, when a turn exceeds its
   timeout (process killed, agent `stuck` until the next turn), on stop/unassign, on drain
-  once the in-flight turn ends, or on `recycle` at the next turn boundary (a fresh process
-  resumes the same session: memory relief, a new model endpoint).
+  once the in-flight turn ends.
 The worker never schedules or queues beyond the startup buffer.
 """
 
@@ -21,6 +20,7 @@ from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
 
@@ -35,31 +35,17 @@ from flock.models import (
     parse_duration,
     type_spec_rev,
 )
-from flock.registry import HARNESSES
 from flock.secrets_file import secret_env
-from flock.tools.toolset import PIN_ENV, Toolset, instructions_section, replace_section
-from flock.worker import comms as comms_mod
-from flock.worker.adapters.base import (
-    AdapterEvent,
-    HarnessAdapter,
-    ResumeError,
-    credential_env_names,
-    usage_sub,
-)
+from flock.worker.adapters.base import AdapterEvent, HarnessAdapter, ResumeError
 from flock.worker.events import Outbox, SessionLog, utcnow
 from flock.worker.loop import render
 from flock.worker.sync import WorkdirStats, reset_ephemeral
-from flock.world import hub as world_hub
 
 if TYPE_CHECKING:
-    from flock.worker.comms import CommsHub
-    from flock.worker.identity import Identities
     from flock.worker.sync import BucketSync
-    from flock.world.hub import WorldHub
 
 log = logging.getLogger(__name__)
 
-INSTRUCTIONS_FILE = {name: h.instructions_file for name, h in HARNESSES.items()}
 LOOP_ERROR_LIMIT = 3  # failed loop turns in a row end the worker-side loop
 LOOP_ERROR_BACKOFF = 2.0  # s before re-sending the loop prompt after a failed turn
 # Transient failures (turn timeout, model transport) do not count toward LOOP_ERROR_LIMIT at
@@ -69,6 +55,7 @@ LOOP_ERROR_BACKOFF = 2.0  # s before re-sending the loop prompt after a failed t
 LOOP_TRANSIENT_BACKOFF = 2.0  # s, first retry; doubles per consecutive transient failure
 LOOP_TRANSIENT_BACKOFF_CAP = 120.0  # s
 LOOP_TRANSIENT_LIMIT = 20  # consecutive transient retries before they count as errors
+VERIFY_WAIT = 300.0  # s drain and unassign give a harbor Trial's verifier, then cancel it
 
 
 def transient_backoff(n: int, rng: Callable[[], float] = random.random) -> float:
@@ -87,29 +74,15 @@ class AgentState(BaseModel):
     turn_seq: int = 0  # last turn number handed out (turn ids are t-<n>)
     turns: int = 0  # turns ended (completed, failed or interrupted)
     tokens: dict[str, TokenUsage] = Field(default_factory=dict)  # cumulative, by model
-    harness_cum: dict[str, TokenUsage] = Field(default_factory=dict)  # last cumulative snapshot
-    harness_estimate_usd: float | None = None
     loop_round: int = 0  # last loop round sent to this agent (docs/loop.md)
     loop_run: str | None = None  # the loop run (LoopStartCommand.run) loop_round counts in
     last_summary: str | None = None  # what the agent last passed to `done` (else its last reply)
-    # comms (docs/comms.md): posts made (max_posts), the last one's wall time (min_post_gap),
-    # and the threads the agent posted in (thread-reply wakes), so a relaunch keeps them
-    comms_cursor: int | None = None
-    comms_board: str | None = None
-    comms_created_channels: list[int] = Field(default_factory=list)
-    comms_posts: int = 0
-    comms_last_post: float | None = None
-    comms_threads: list[int] = Field(default_factory=list)
-    # board news (DMs, mentions, thread replies) not yet attached to a flock-tool result
-    comms_news: list[dict] = Field(default_factory=list)
 
 
-def restart_prompt(old_session: str | None, transcript: Path | None, session_log: Path, why: str) -> str:
-    where = f"{transcript} (harness transcript) and {session_log}" if transcript else str(session_log)
-    return (
-        f"Your previous session ({old_session}) could not be resumed: {why}. "
-        f"Its transcript is at {where}. Read it to recover your context, then continue your work."
-    )
+def restart_prompt(old_session: str | None, why: str) -> str:
+    """A Trial cannot read this worker's files: no transcript to point at."""
+    return (f"Your previous session ({old_session}) could not be resumed: {why}. "
+            "Its transcript is not available here; continue your work from the task.")
 
 
 class AgentRuntime:
@@ -124,12 +97,8 @@ class AgentRuntime:
         adapter: HarnessAdapter,
         outbox: Outbox,
         sync: BucketSync | None = None,
-        identities: Identities | None = None,
         working_count: Callable[[], int] | None = None,
         secret_source: Mapping[str, str] | None = None,
-        toolbox: Callable[[], Toolset] | None = None,
-        comms: CommsHub | None = None,
-        world: WorldHub | None = None,
     ) -> None:
         self.name, self.type_name, self.spec, self.swarm = name, type_name, spec, swarm
         # Live changes (docs/live.md): a newer type spec from the controller waits in
@@ -147,7 +116,6 @@ class AgentRuntime:
         self.adapter = adapter
         self.outbox = outbox
         self.sync = sync
-        self.identities = identities
         self._working_count = working_count
         self._secret_source = secret_source  # default: secret_env(), the secrets file over env
         self.log = SessionLog(self.sessions_dir / f"{name}.jsonl", swarm=swarm, agent=name,
@@ -163,13 +131,8 @@ class AgentRuntime:
         self.last_sync: datetime | None = None
         self.unsynced: str | None = None  # the last push's error (heartbeat `unsynced`)
         self.dirty = False
-        self._env_dropped_rev: str | None = None
         self.allow_starts = True
         self._stop_req: str | None = None
-        # recycle(): end the burst at the next turn boundary; the next prompt starts a fresh
-        # process on the same session. Not _stop_req: the burst's finally must restart.
-        self._recycle_pending: str | None = None
-        self.pss_mb: float | None = None  # the harness's PSS, set by the worker's memory loop
         self._exit_code: int | None = None  # the harness's exit status (`exited` event)
         self._burst: asyncio.Task | None = None
         self._ready = asyncio.Event()
@@ -185,17 +148,8 @@ class AgentRuntime:
         self._next_timeout: float | None = None
         self._turn_tokens: dict[str, TokenUsage] = {}
         self._warned_usage = False  # zero-usage warning logged for this agent
-        self._instructions_written = False
         self.parent: str | None = None  # the spawning agent (AssignCommand.parent)
         self.flock_env: dict[str, str] = {}  # FLOCK_AGENT, FLOCK_AGENT_TOKEN, ... (worker sets)
-        # Tools folder (docs/tools.md): the worker's current Toolset, read at each turn start.
-        # An adapter with a `toolbox` attribute (llm) takes its own snapshot per turn.
-        self.toolbox = toolbox
-        if toolbox is not None and getattr(adapter, "toolbox", False) is None:
-            adapter.toolbox = toolbox  # type: ignore[attr-defined]
-        self._turn_tools: str | None = None  # tools version of the turn in flight
-        self._tools_section: str | None = None  # last generated instructions section
-        self._pinned: Toolset | None = None  # pinned when a prompt was forwarded between turns
         # `every: turn_end` (docs/loop.md): set by loop_start, cleared by loop_stop / a limit
         self.loop: LoopStartCommand | None = None
         self._loop_errors = 0
@@ -206,57 +160,20 @@ class AgentRuntime:
         self._turn_summary: str | None = None  # `done`'s summary this turn
         self._turn_text: str | None = None  # last assistant text this turn
         self._loop_inflight: LoopMeta | None = None  # a loop prompt taken, its turn not started
-        self.comms = comms  # the worker's comms hub (docs/comms.md); None: no comms
-        self._comms_section: str | None = None  # last comms section written to the instructions
-        self.world = world  # the worker's world hub (docs/world.md); None: no world
-        self._world_section: str | None = None
 
     # ------------------------------------------------------------------ paths and state
     def purge(self) -> None:
-        """Delete the agent's files on this worker: its workdir, session log, state, pin and
-        the harness's own session dir (an ephemeral agent, after its final sync; docs/spawn.md)."""
+        """Delete the agent's files on this worker: its workdir, session log, state and the
+        harness's own session dir (an ephemeral agent, after its final sync; docs/spawn.md)."""
         shutil.rmtree(self.workdir, ignore_errors=True)
         if isinstance(sd := getattr(self.adapter, "session_dir", None), Path):
             shutil.rmtree(sd, ignore_errors=True)
-        for p in (*self.sessions_dir.glob(f"{self.name}.*"), self.pin_path):
+        for p in self.sessions_dir.glob(f"{self.name}.*"):
             p.unlink(missing_ok=True)
 
     @property
     def state_path(self) -> Path:
         return self.sessions_dir / f"{self.name}.state.json"
-
-    @property
-    def pin_path(self) -> Path:
-        """The Toolset `flock-tool` uses (FLOCK_TOOLS_PIN), rewritten at each turn start."""
-        from flock.isolation import enabled
-
-        if enabled():
-            return self.work_root / "_tools_pins" / self.name / "pin.json"
-        return self.work_root / "_tools_pins" / f"{self.name}.json"
-
-    def _pin_tools(self) -> Toolset | None:
-        """The current Toolset, written to the pin file `flock-tool` reads. The harness has the
-        pin's path from its start (PIN_ENV), so a version, an enable or a disable reaches a
-        running harness at the next turn boundary: with no tools the pin holds an empty
-        toolset (written once a pin exists, or when the worker gateway is open: the `flock`
-        CLI reaches the controller through it, docs/spawn.md)."""
-        if self.toolbox is None:
-            return None
-        ts = self.toolbox()
-        if ts.version is not None or ts.tools or ts.gateway or self.pin_path.exists():
-            deny = credential_env_names(self.spec)  # the key under every name the harness has it
-            if self.comms is not None:  # and the board's credentials (docs/comms.md)
-                deny += self.comms.deny_env()
-            if self.world is not None:  # and the world's secret (docs/world.md)
-                deny += self.world.deny_env()
-            try:
-                ts.write_pin(self.pin_path, agent=self.name, workdir=self.workdir, env_deny=deny)
-            except OSError as e:
-                log.warning("%s: cannot write the tools pin: %s", self.name, e)
-        self._write_tools_section(ts)
-        self._write_comms_section()
-        self._write_world_section()
-        return ts
 
     @property
     def idle_grace(self) -> float:
@@ -290,15 +207,6 @@ class AgentRuntime:
     def emit(self, kind: str, data: dict[str, Any] | None = None) -> None:
         self._emit(self.log.custom(kind, data, turn_id=self.turn_id))
 
-    def _report_env_dropped(self) -> None:
-        """Names (never values) the harness isolation dropped; once per spec revision."""
-        names = getattr(self.adapter, "env_dropped_names", None)
-        rev = type_spec_rev(self.spec)
-        if names and rev != self._env_dropped_rev:
-            self._env_dropped_rev = rev
-            log.warning("%s: isolation dropped env names %s", self.name, ", ".join(names))
-            self.emit("env_dropped", {"names": names})
-
     # ------------------------------------------------------------------ live changes (docs/live.md)
     def set_live(self, spec: TypeSpec) -> None:
         """A changed type spec from the controller. Held until the agent's next turn boundary;
@@ -306,24 +214,11 @@ class AgentRuntime:
         self._next_spec = spec
 
     def _apply_live(self) -> None:
-        """At a turn boundary: take the pending type spec. A changed system prompt
-        rewrites CLAUDE.md / AGENTS.md (the llm harness rebuilds its system message from it at
-        the turn start); an agent that already had a turn gets a one-line note in its next
-        prompt for each kind of change."""
-        spec, self._next_spec = self._next_spec, None
-        before = (self.spec.system_prompt, self.spec.system_prompt_file)
-        self.spec = spec or self.spec
+        """At a turn boundary: take the pending type spec."""
+        self.spec, self._next_spec = self._next_spec or self.spec, None
         self.rev = type_spec_rev(self.spec)
-        if (self.spec.system_prompt, self.spec.system_prompt_file) != before:
-            if self._instructions_written:
-                self._instructions_written = False
-                self._tools_section = self._comms_section = None  # sections are rewritten
-                self._write_instructions()
-            harness = self.spec.harness.value
-            self._note("your system prompt changed" if harness == "llm" else
-                       f"your instructions in {INSTRUCTIONS_FILE[harness]} changed; re-read them")
-        if (update := getattr(self.adapter, "update_spec", None)) and update(self.spec):
-            self.recycle("endpoint")  # the new models.json needs a fresh process
+        if update := getattr(self.adapter, "update_spec", None):
+            update(self.spec)
 
     def _note(self, what: str) -> None:
         if self.state.turn_seq > 0:  # an agent that never had a turn starts on the new setup
@@ -383,15 +278,10 @@ class AgentRuntime:
         self._last_activity = self._now()
         if self.turn_id is None:
             if not self.awaiting:
-                # a turn boundary: the prompt starts a turn, so take the live changes and pin
-                # the tools it will run with. While awaiting, an earlier prompt's turn may already
-                # run in the harness (its turn_started not seen yet): this prompt joins it and
-                # must not repin it.
+                # a turn boundary: the prompt starts a turn, so take the live changes. While
+                # awaiting, an earlier prompt's turn may already run in the harness (its
+                # turn_started not seen yet): this prompt joins it.
                 self._apply_live()
-                if self._recycle_pending:  # the fresh process takes it (_watch ends this one)
-                    self.buffer.append(text)
-                    return
-                self._pinned = self._pin_tools()
                 text = self._with_notes(text)
             self.awaiting = True
         try:
@@ -406,95 +296,14 @@ class AgentRuntime:
             self.emit("prompt_deferred", {"text": text, "reason": reason, **self._loop_untaken()})
         self.buffer.clear()
 
-    def _prepare_workdir(self, tools: Toolset | None = None) -> None:
-        self._write_instructions()
-        if tools is not None:
-            self._write_tools_section(tools)
-        self._write_comms_section()
-        self._write_world_section()
-
-    def _write_world_section(self) -> None:
-        """The World section (name, version, tools, a "world changed" note) of CLAUDE.md /
-        AGENTS.md, rewritten when it changes (docs/world.md)."""
-        if self.world is None or not self.workdir.is_dir():
-            return
-        section = self.world.section(self.name)
-        if section != (self._world_section or ""):
-            target = self.workdir / INSTRUCTIONS_FILE[self.spec.harness.value]
-            text = target.read_text() if target.is_file() else ""
-            target.write_text(replace_section(text, section, world_hub.SECTION_START,
-                                              world_hub.SECTION_END))
-        self._world_section = section
-
-    def _write_comms_section(self) -> None:
-        """The comms section (board identity, rules, protocol files) of CLAUDE.md / AGENTS.md,
-        rewritten when it changes; the llm harness reads AGENTS.md into its system message."""
-        if self.comms is None or not self.workdir.is_dir():
-            return
-        section = self.comms.section(self.name)
-        if section != (self._comms_section or ""):
-            target = self.workdir / INSTRUCTIONS_FILE[self.spec.harness.value]
-            text = target.read_text() if target.is_file() else ""
-            target.write_text(replace_section(text, section, comms_mod.SECTION_START,
-                                              comms_mod.SECTION_END))
-            if self._comms_section is not None:  # docs/live.md: rules or protocols changed
-                self._note(f"the Team board section of {target.name} changed; re-read it")
-        self._comms_section = section
-
-    def _write_tools_section(self, tools: Toolset) -> None:
-        """The generated Tools section of CLAUDE.md / AGENTS.md (CLI harnesses; llm gets function
-        tools instead), rewritten when the toolset changes."""
-        if self.spec.harness.value == "llm" or not self.workdir.is_dir():
-            return
-        section = instructions_section(tools)
-        if section != (self._tools_section or ""):
-            target = self.workdir / INSTRUCTIONS_FILE[self.spec.harness.value]
-            text = target.read_text() if target.is_file() else ""
-            target.write_text(replace_section(text, section))
-            if self._tools_section is not None:  # docs/live.md: a running harness reads it again
-                self._note(f"your tools changed; re-read the Tools section of {target.name}")
-        self._tools_section = section
-
-    def _write_instructions(self) -> None:
-        self.workdir.mkdir(parents=True, exist_ok=True)
-        if self._instructions_written:
-            return
-        target = self.workdir / INSTRUCTIONS_FILE[self.spec.harness.value]
-        if self.spec.system_prompt is not None:
-            target.write_text(self.spec.system_prompt)
-            self._instructions_written = True
-            self._tools_section = None  # the base file was replaced: its section is gone
-            return
-        if not self.spec.system_prompt_file:
-            return
-        src = Path(self.spec.system_prompt_file)
-        candidates = [src] if src.is_absolute() else [
-            Path(os.environ.get("FLOCK_PROMPTS_DIR", ".")) / src, Path.cwd() / src]
-        for c in candidates:
-            if c.is_file():
-                target.write_text(c.read_text())
-                self._instructions_written = True
-                self._tools_section = None  # the base file was replaced: its section is gone
-                return
-        log.warning("%s: system_prompt_file %s not found", self.name, src)
-
     async def harness_env(self) -> dict[str, str]:
-        """What this agent's harness process gets beyond the adapter's allowlist: the type's
-        declared secrets, `spec.env`, the msgboard identity, and a provider-backed model's key
-        under its `api_key_env` name (read from the worker's environment, where the job puts
-        it). Nothing else from the worker: FLOCK_TOKEN and the rest stay here."""
+        """What the adapter is started with: the type's declared secrets, `spec.env`, and a
+        provider-backed model's key under its `api_key_env` name (read from the worker's
+        environment, where the job puts it). Nothing else from the worker: FLOCK_TOKEN and the
+        rest stay here."""
         source = self._secret_source if self._secret_source is not None else secret_env()
         env = {k: source[k] for k in self.spec.secrets if k in source}
         env.update(self.spec.env)
-        if self.identities is not None:
-            env.update(await self.identities.env_for(self.name, self.spec))
-        if self.comms is not None:  # the board invite stays in the worker: it joins any name
-            for k in self.comms.deny_env():
-                if k != "MSGBOARD_TOKEN":
-                    env.pop(k, None)
-        if self.world is not None:  # the world's secret stays in the worker
-            for k in self.world.deny_env():
-                env.pop(k, None)
         r = self.spec.resolved_model
         if r is not None:
             key = source.get(r.provider.api_key_env)
@@ -518,18 +327,10 @@ class AgentRuntime:
                 log.warning("%s: %d live harness processes exceed max_working_per_worker=%d",
                             self.name, self._working_count(), self.spec.max_working_per_worker)
             self._apply_live()  # the harness starts on the newest type spec
-            if self.comms is not None:  # join the board at the first prompt, not at assign
-                await self.comms.on_prompt(self.name, self.spec.harness.value)
-            if self.world is not None:  # open the gateway for flock-tool; agent_start hook
-                await self.world.on_prompt(self.name, self.spec.harness.value, self.comms)
-            self._write_instructions()  # before the tools section is generated into it
-            tools = self._pin_tools()
-            self._prepare_workdir(tools)
+            self.workdir.mkdir(parents=True, exist_ok=True)
             env = await self.harness_env()
             old = self.state.session_id
             env.update(self.flock_env)
-            if tools is not None:  # always: tools enabled mid-burst must reach this process
-                env[PIN_ENV] = str(self.pin_path)
             first: list[str] = []
             data: dict[str, Any] = {"harness": self.spec.harness.value, "model": self.spec.model}
             if self.spec.resolved_model is not None:
@@ -538,17 +339,14 @@ class AgentRuntime:
                 sid = await self.adapter.start(self.workdir, old, self.spec, env=env)
                 kind, self.resumed = ("session_resumed", True) if old else ("session_started", False)
             except ResumeError as e:
-                transcript = next((p for p in self.adapter.session_files(old) if old and old in p.name), None)
                 sid = await self.adapter.start(self.workdir, None, self.spec, env=env)
                 kind, self.resumed = "session_restarted", False
-                self.state.harness_cum = {}
-                first.append(restart_prompt(old, transcript, self.log.path, str(e)))
+                first.append(restart_prompt(old, str(e)))
                 data.update(previous_session_id=old, reason=str(e))
             self.state.session_id = sid
             self.start_rev = self.rev
-            self._recycle_pending, self._exit_code = None, None
+            self._exit_code = None
             self.save_state()
-            self._report_env_dropped()
             self.emit(kind, {**data, "session_id": sid, "resumed": self.resumed,
                              "parent": self.parent})
             self.phase = "running"
@@ -607,10 +405,6 @@ class AgentRuntime:
                 self._interrupt("timeout")
                 self.stuck = True
                 return
-            if not busy and self._recycle_pending:
-                self.emit("harness_recycled", {"reason": self._recycle_pending, "pss_mb": self.pss_mb})
-                self._recycle_pending = None
-                return
             if not busy and now - self._last_activity >= self.idle_grace:
                 return
 
@@ -638,17 +432,11 @@ class AgentRuntime:
                 extra = {}
                 if self._usage_missing(ev.status):
                     extra["usage_missing"] = True
-                if self._turn_tools is not None:
-                    extra["tools_version"] = self._turn_tools
                 extra.update(self._pid_fields())
                 self.emit("turn_ended", {"status": ev.status, "error": ev.error, "tokens": tokens,
                                          "tool_calls": self._turn_tool_calls,
                                          **extra,
                                          **{k2: v for k2, v in ev.data.items() if k2 != "tokens"}})
-                if self.world is not None:  # the `turn` hook (docs/world.md)
-                    self.world.on_turn(self.name, self.turn_id,
-                                       {"status": ev.status or "completed",
-                                        "tool_calls": self._turn_tool_calls})
                 summary = self._turn_summary or self._turn_text
                 if self._turn_summary is None and ev.status not in (None, "completed"):
                     summary = self._unfinished_summary(ev.data)  # not a stale or half-way text
@@ -694,15 +482,6 @@ class AgentRuntime:
         self._turn_timeout = self._next_timeout or parse_duration(self.spec.turn_timeout).total_seconds()
         self._next_timeout = None
         self._turn_tokens = {}
-        data = dict(data)
-        if self.toolbox is not None and "tools_version" not in data:
-            # CLI harnesses: what the prompt pinned (else pin now); flock-tool uses it to turn end
-            ts, self._pinned = self._pinned or self._pin_tools(), None
-            if ts is not None and ts.version is not None:
-                data["tools_version"] = ts.version
-            if ts is not None and ts.error:
-                data["tools_error"] = ts.error
-        self._turn_tools = data.get("tools_version")
         self._turn_tool_calls, self._turn_summary, self._turn_text = 0, None, None
         self._turn_call_names = []
         self._loop_inflight = None
@@ -718,8 +497,6 @@ class AgentRuntime:
         self._turn_pids = []
         self.state.turns += 1
         self.turn_id = None
-        self._turn_tools = None
-        self._pinned = None
         self.awaiting = False
         self.idle_since = utcnow()
         self._last_activity = self._now()
@@ -727,9 +504,8 @@ class AgentRuntime:
 
     def _interrupt(self, reason: str) -> None:
         if self.turn_id is not None:
-            extra = {"tools_version": self._turn_tools} if self._turn_tools is not None else {}
             tokens = {m: u.model_dump() for m, u in self._turn_tokens.items()}  # as turn_ended
-            self.emit("turn_interrupted", {"reason": reason, "tokens": tokens, **extra})
+            self.emit("turn_interrupted", {"reason": reason, "tokens": tokens})
             self._end_turn()
             self._after_turn("interrupted", reason)
         self.awaiting = False
@@ -738,14 +514,6 @@ class AgentRuntime:
         model = ev.model or self.spec.model
         usage = ev.usage
         assert usage is not None
-        if ev.cost_usd is not None:
-            self.state.harness_estimate_usd = ev.cost_usd
-        if ev.cumulative:
-            prev = self.state.harness_cum.get(model)
-            self.state.harness_cum[model] = usage
-            if ev.baseline:
-                return
-            usage = usage_sub(usage, prev)
         self.state.tokens[model] = self.state.tokens.get(model, TokenUsage()) + usage
         self._turn_tokens[model] = self._turn_tokens.get(model, TokenUsage()) + usage
 
@@ -881,14 +649,6 @@ class AgentRuntime:
     def live(self) -> bool:
         return self.phase != "none"
 
-    def recycle(self, reason: str) -> bool:
-        """Restart the harness process at the next turn boundary, resuming the same session
-        (`harness_recycled`). Only a running process; False when there is none to recycle."""
-        if self.phase != "running" or self._recycle_pending:
-            return False
-        self._recycle_pending = reason
-        return True
-
     async def stop(self, reason: str = "stop") -> None:
         """Kill the harness process if any (interrupting a turn); the agent stays assigned."""
         self._stop_req = reason
@@ -920,13 +680,27 @@ class AgentRuntime:
             finally:
                 self._stop_req = None
         self._defer_buffer("draining")
+        await self.close(VERIFY_WAIT)
         await self.sync_now("drain")
         return cut
 
     async def unassign(self) -> None:
         self.allow_starts = False
         await self.stop("unassign")
+        await self.close(VERIFY_WAIT)
         await self.sync_now("unassign")
+
+    async def close(self, timeout: float | None = None) -> None:
+        """End what outlives a burst (harbor: the Trial, whose verifier then runs; after
+        `timeout` s, at once for 0, it is cancelled and Harbor stops its environment
+        unverified)."""
+        if (close := getattr(self.adapter, "close", None)) is None:
+            return
+        try:
+            await close(timeout=timeout)
+        except Exception as e:  # noqa: BLE001 - the sync after it must still run
+            log.warning("%s: close failed: %s", self.name, e)
+            self.emit("error", {"error": f"close failed: {type(e).__name__}: {e}"})
 
     async def sync_now(self, reason: str) -> None:
         """Push the agent to the bucket; every push path (periodic, drain, preempt, unassign)
@@ -961,21 +735,15 @@ class AgentRuntime:
             session_id=self.state.session_id,
             resumed=self.resumed,
             tokens=dict(self.state.tokens),
-            harness_estimate_usd=self.state.harness_estimate_usd,
             turns=self.state.turns,
             last_sync=self.last_sync,
-            msgboard_principal=self.identities.principal(self.name) if self.identities else None,
             rev=self.rev,
             start_rev=self.start_rev,
             endpoint=self.endpoint(),
+            trial=status() if (status := getattr(self.adapter, "trial_status", None)) else None,
         )
 
     def endpoint(self) -> str | None:
-        """`host:port` of the model server this agent is pinned to (`base_urls`, by
-        `pick_endpoint`): the one its last turn used, else the one it will use."""
-        from flock.worker.adapters.llm import endpoint_host, pick_endpoint
-
-        r = self.spec.resolved_model
-        urls = r.provider.endpoints if r is not None else []
-        return endpoint_host(getattr(self.adapter, "_endpoint", None)
-                             or pick_endpoint(self.name, urls))
+        """`host:port` of the model server the agent's Trial calls (the provider's `base_url`)."""
+        url = self.spec.resolved_model.provider.base_url if self.spec.resolved_model else None
+        return (urlsplit(url).netloc or url) if url else None

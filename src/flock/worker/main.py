@@ -19,8 +19,8 @@ planned restart, no crash backoff) and the new job restores every agent from the
 
 Memory relief ladder (docs/slurm.md "Memory"), every MEMORY_SAMPLE s on the cgroup's
 nonreclaimable memory against its limit (`MemThresholds`, FLOCK_MEM_*): `wants_rotation` in the
-heartbeat and a recycle of the largest harness, then a drain bounded by a deadline (exit 0),
-then `preempt("memory")` (exit 75). A tool tree above the spike size is SIGKILLed on its own.
+heartbeat, then a drain bounded by a deadline (exit 0), then `preempt("memory")` (exit 75). It
+acts on the whole worker: no per-agent reading picks a Trial to restart.
 """
 
 from __future__ import annotations
@@ -52,7 +52,6 @@ from flock.models import (
     AssignCommand,
     Command,
     CommandBatch,
-    CommsSpec,
     DrainCommand,
     EventBatch,
     LoopStartCommand,
@@ -65,30 +64,18 @@ from flock.models import (
     WorkerHeartbeat,
     WorkerKnobs,
     WorkerMem,
-    comms_tools,
     parse_duration,
     type_spec_rev,
-    world_tools,
 )
 from flock.registry import HARNESSES, load
 from flock.secrets_file import load as load_secrets
 from flock.secrets_file import secret_env
-from flock.tools.runner import Result
-from flock.tools.toolset import Toolset
 from flock.worker import sync as sync_mod
 from flock.worker.adapters.base import HarnessAdapter
 from flock.worker.agents import AgentRuntime
-from flock.worker.cgroup import (
-    TMPFS_TYPES,
-    CgroupMem,
-    MemThresholds,
-    agent_memory,
-    fs_type,
-    harness_and_tools,
-)
-from flock.worker.comms import CommsHub
+from flock.worker.cgroup import TMPFS_TYPES, CgroupMem, MemThresholds, fs_type
 from flock.worker.events import Outbox, parse_iso, utcnow
-from flock.worker.identity import Identities
+from flock.worker.harbor import HarborHost
 from flock.worker.sync import (
     BucketStats,
     BucketSync,
@@ -99,7 +86,6 @@ from flock.worker.sync import (
     workdir_excludes,
 )
 from flock.worker.tools import ToolsManager, tools_root
-from flock.world.hub import WorldHub
 from flock.world.protocol import fill_host
 
 log = logging.getLogger("flock.worker")
@@ -150,17 +136,6 @@ class WorkerConfig:
     # start and again when the controller stops answering (it may have moved host)
     url_template: str | None = None
     host_file: str | None = None
-    # FLOCK_COMMS_POLL_CYCLE_S: overrides the spec's comms.poll_cycle_s (extended board
-    # polling: each agent's feed about once per this many seconds; spec default 300)
-    comms_poll_cycle_s: float | None = None
-    # FLOCK_COMMS_RATE / FLOCK_COMMS_BURST: the worker's board request budget (token bucket
-    # shared by the poller and every comms tool call); 0 turns it off
-    comms_rate: float = 0.5
-    comms_burst: float = 5.0
-    # FLOCK_COMMS_AGENT_RATE / _BURST: one agent's comms tool calls per second beyond which
-    # calls are refused locally (default 6/min, burst 10); 0 turns it off
-    comms_agent_rate: float = 0.1
-    comms_agent_burst: float = 10.0
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> WorkerConfig:
@@ -188,12 +163,6 @@ class WorkerConfig:
             incarnation=env.get("WORKER_INCARNATION") or None,
             parent_pid=int(env["FLOCK_LOCAL_PARENT_PID"]) if env.get("FLOCK_LOCAL_PARENT_PID")
             else None,
-            comms_poll_cycle_s=float(env["FLOCK_COMMS_POLL_CYCLE_S"])
-            if env.get("FLOCK_COMMS_POLL_CYCLE_S") else None,
-            comms_rate=float(env.get("FLOCK_COMMS_RATE") or 0.5),
-            comms_burst=float(env.get("FLOCK_COMMS_BURST") or 5.0),
-            comms_agent_rate=float(env.get("FLOCK_COMMS_AGENT_RATE") or 0.1),
-            comms_agent_burst=float(env.get("FLOCK_COMMS_AGENT_BURST") or 10.0),
         )
 
 
@@ -315,8 +284,7 @@ class ControllerClient:
         return CommandBatch.model_validate(r.json() if r.content else {"commands": []})
 
     async def heartbeat(self, hb: WorkerHeartbeat, *, budget: float = 20.0) -> dict:
-        """The controller's answer: {"ok": true} plus, for a swarm with a tools folder,
-        {"tools": {"version", "select"}} (docs/tools.md)."""
+        """The controller's answer: {"ok": true}, and a changed type spec (docs/live.md)."""
         r = await self._send("POST", f"/workers/{hb.worker}/heartbeat", budget=budget,
                              content=hb.model_dump_json(), params=self.params,
                              headers={"content-type": "application/json"})
@@ -338,7 +306,7 @@ class ControllerClient:
 
     async def forward(self, method: str, path: str, token: str, *, params: dict | None = None,
                       body: object = None, budget: float = 60.0) -> httpx.Response:
-        """An agent's own call (the gateway's `controller` route): sent with the agent's token
+        """An agent's own call (controller_call): sent with the agent's token
         instead of the worker's, retried and re-resolved like every route here; the answer is
         returned whatever its status. Only a GET is retried after the request may have reached
         the controller, so a prompt is never delivered twice.
@@ -356,7 +324,7 @@ class ControllerClient:
 
 
 _SEG = r"[A-Za-z0-9][A-Za-z0-9_.-]*"
-# What an agent's `flock` CLI may call through the gateway: the routes an agent token may use
+# What an agent may call through its worker (controller_call): the routes an agent token may use
 # (flock.controller.spawn.agent_may, which still checks the subtree on the controller).
 AGENT_ROUTES = tuple((m, re.compile(p)) for m, p in (
     ("GET", r"/whoami"),
@@ -368,6 +336,15 @@ AGENT_ROUTES = tuple((m, re.compile(p)) for m, p in (
     ("DELETE", rf"/agents/{_SEG}"),
     ("GET", rf"/swarms/{_SEG}/agents"),
 ))
+
+
+@dataclass
+class Result:
+    """A controller_call's answer: `output` is `{status, body}` or `{error}` as JSON."""
+
+    output: str
+    error: bool
+    duration_s: float = 0.0
 
 
 def agent_route_allowed(method: str, path: str) -> bool:
@@ -419,38 +396,23 @@ def limit_malloc_arenas(env: Mapping[str, str] = os.environ, arenas: int = ARENA
 
 def knobs_rev(cfg: WorkerConfig, mem: Mapping[str, float] | None = None) -> str:
     """A short hash of the settings this worker runs with (shown next to `spec_rev`)."""
-    knobs = [cfg.drain_budget, cfg.sync_interval, cfg.comms_poll_cycle_s, cfg.comms_rate,
-             cfg.comms_burst, cfg.comms_agent_rate, cfg.comms_agent_burst, workdir_excludes(),
-             restore_batch(), restore_threads(), sorted((mem or {}).items())]
+    knobs = [cfg.drain_budget, cfg.sync_interval, workdir_excludes(), restore_batch(),
+             restore_threads(), sorted((mem or {}).items())]
     return hashlib.sha256(json.dumps(knobs).encode()).hexdigest()[:12]
 
 
 # `worker.memory` keys of the type spec -> the env names the memory watchdog reads
 MEM_KNOB_ENV = {"rotate": "FLOCK_MEM_ROTATE", "drain": "FLOCK_MEM_DRAIN",
-                "preempt": "FLOCK_MEM_PREEMPT", "spike_mb": "FLOCK_MEM_SPIKE_MB",
-                "recycle_gap_s": "FLOCK_MEM_RECYCLE_GAP_S"}
+                "preempt": "FLOCK_MEM_PREEMPT"}
 
 
-def default_adapter_factory(cfg: WorkerConfig) -> Callable[[str, TypeSpec], HarnessAdapter]:
+def default_adapter_factory(cfg: WorkerConfig, harbor: HarborHost | None = None
+                            ) -> Callable[[str, TypeSpec], HarnessAdapter]:
     def make(name: str, spec: TypeSpec) -> HarnessAdapter:
-        return load(HARNESSES[spec.harness].adapter)(cfg.work_root / name, name, spec)
+        kw = {"host": harbor} if spec.harness.value == "harbor" else {}
+        return load(HARNESSES[spec.harness].adapter)(cfg.work_root / name, name, spec, **kw)
 
     return make
-
-
-def _harness_pid(rt: AgentRuntime) -> int | None:
-    """The process the agent's adapter started, if it is running."""
-    proc = getattr(rt.adapter, "_proc", None)
-    return proc.pid if proc is not None and proc.returncode is None else None
-
-
-def _kill_tools(rt: AgentRuntime) -> int:
-    """SIGKILL the agent's tool processes, not its harness (the spike guard)."""
-    from flock.worker.adapters.pi import _descendants, _kill_all
-
-    if (pid := _harness_pid(rt)) is None:
-        return 0
-    return _kill_all(harness_and_tools(pid, _descendants)[1])
 
 
 STALE_STATUSES = (404, 409)
@@ -472,33 +434,19 @@ class Worker:
         *,
         adapter_factory: Callable[[str, TypeSpec], HarnessAdapter] | None = None,
         sync: BucketSync | None = None,
-        identities: Identities | None = None,
         tools: ToolsManager | None = None,
-        comms: CommsHub | None = None,
-        world: WorldHub | None = None,
         cgroup: CgroupMem | None = None,
     ) -> None:
         self.cfg = cfg
         self.client = client
-        self.tools = tools or ToolsManager(tools_root(cfg.work_root), swarm=cfg.swarm,
-                                           type_name=cfg.type, fetch=self._fetch_tools)
-        self.adapter_factory = adapter_factory or default_adapter_factory(cfg)
+        self.tools = tools or ToolsManager(tools_root(cfg.work_root), fetch=self._fetch_tools)
+        # harness harbor: what its agents' Trials share on this worker (flock.worker.harbor)
+        self.harbor = HarborHost(cfg.work_root / "_harbor" / "_worker", emit=self._resource_event,
+                                 folders=self.tools.folder, controller=self.controller_call)
+        self.adapter_factory = adapter_factory or default_adapter_factory(cfg, self.harbor)
         self.sync = sync
-        self.identities = identities or Identities()
         self.outbox = Outbox()
         self.agents: dict[str, AgentRuntime] = {}
-        # comms (docs/comms.md): one hub per worker, one board poller for all its agents
-        self.comms = comms or CommsHub(swarm=cfg.swarm, identities=self.identities,
-                                       runtime=self.agents.get,
-                                       poll_cycle_env=cfg.comms_poll_cycle_s,
-                                       rate=cfg.comms_rate, burst=cfg.comms_burst,
-                                       agent_rate=cfg.comms_agent_rate,
-                                       agent_burst=cfg.comms_agent_burst)
-        # the swarm's world (docs/world.md): its tools, reached through the same gateway
-        self.world = world or WorldHub(swarm=cfg.swarm, type_name=cfg.type,
-                                       runtime=self.agents.get)
-        self.comms.routes["world"] = self.world.call
-        self.comms.routes["controller"] = self.controller_call
         self.draining = False
         self.drain_window = cfg.drain_window
         self._drained = asyncio.Event()
@@ -522,7 +470,6 @@ class Worker:
         self.wants_rotation = False  # heartbeat: the controller may drain us (rotation budget)
         self._rung = 0  # highest ladder rung logged in this episode (0: below `rotate`)
         self._oom_kills: int | None = None
-        self._last_recycle = float("-inf")  # loop time of the last memory recycle
         self._env_cfg = dataclasses.replace(cfg)  # env/defaults, under the spec's `worker:`
         self.mem_knobs: dict[str, float] = {}  # FLOCK_MEM_* name -> the spec's value
         self.knobs_rev = knobs_rev(cfg)
@@ -530,19 +477,11 @@ class Worker:
     def apply_knobs(self, knobs: WorkerKnobs | None) -> None:
         """The type's `worker:` block (assign and live spec): each value set wins over the
         worker's env, which wins over the default. Takes effect at once (sync and drain read
-        `cfg` when they run; the comms budgets and sync excludes are updated here)."""
+        `cfg` when they run; the sync excludes are updated here)."""
         k, env, cfg = knobs or WorkerKnobs(), self._env_cfg, self.cfg
         pick = (lambda v, e: e if v is None else v)
         cfg.drain_budget = pick(k.drain_budget_s, env.drain_budget)
         cfg.sync_interval = pick(k.sync_interval_s, env.sync_interval)
-        cfg.comms_rate = pick(k.comms_rate, env.comms_rate)
-        cfg.comms_burst = pick(k.comms_burst, env.comms_burst)
-        cfg.comms_agent_rate = pick(k.comms_agent_rate, env.comms_agent_rate)
-        cfg.comms_agent_burst = pick(k.comms_agent_burst, env.comms_agent_burst)
-        cfg.comms_poll_cycle_s = pick(k.comms_poll_cycle_s, env.comms_poll_cycle_s)
-        self.comms.set_rate(cfg.comms_rate, cfg.comms_burst, cfg.comms_agent_rate,
-                            cfg.comms_agent_burst)
-        self.comms.poll_cycle_s = k.comms_poll_cycle_s  # env stays below comms.poll_cycle_s
         sync_mod.SPEC_KNOBS = {n: v for n in ("sync_exclude", "restore_batch", "restore_threads")
                                if (v := getattr(k, n)) is not None}  # one rebind: no empty window
         self.mem_knobs = {MEM_KNOB_ENV[n]: v for n, v in
@@ -566,10 +505,10 @@ class Worker:
         return await self.client.tools_bundle(self.cfg.swarm, version)
 
     async def controller_call(self, agent: str, entry: str, args: dict) -> Result:
-        """`controller:request {method, path, params?, json?}` from the agent's `flock` CLI
-        through the gateway (docs/spawn.md): an allowlisted route, sent with the agent's own
-        token by this worker's client, which follows the controller when it moves. The result
-        is `{status, body}`; a call that still fails after retries emits
+        """`controller:request {method, path, params?, json?}` from the agent's `spawn.*` tools
+        (the Harbor spawn resource, docs/spawn.md): an allowlisted route, sent with the agent's
+        own token by this worker's client, which follows the controller when it moves. The
+        result is `{status, body}`; a call that still fails after retries emits
         `controller_call_failed {path, error}` on the agent's stream."""
         t0 = time.monotonic()
         method, path = str(args.get("method") or "").upper(), str(args.get("path") or "")
@@ -580,7 +519,7 @@ class Worker:
             return Result(json.dumps({"error": error}), True, time.monotonic() - t0)
 
         if entry != "controller:request" or not agent_route_allowed(method, path):
-            return fail(f"controller: {method} {path} is not allowed through the gateway")
+            return fail(f"controller: {method} {path} is not allowed for an agent")
         if rt is None or not token:
             return fail("controller: this agent has no flock token on this worker")
         params, body = args.get("params"), args.get("json")
@@ -601,28 +540,11 @@ class Worker:
         return Result(json.dumps({"status": r.status_code, "body": out}), r.status_code >= 400,
                       time.monotonic() - t0)
 
-    def _toolbox(self, agent: str) -> Callable[[], Toolset]:
-        """What a turn of `agent` may call: the folder tools of the current version plus the
-        agent's built-in comms and world tools."""
-
-        def toolset() -> Toolset:
-            ts = self.world.toolset_for(
-                agent, self.comms.toolset_for(agent, self.tools.current()), self.comms)
-            if ts.gateway is None and self.comms.address is not None:  # `flock` CLI calls
-                ts = dataclasses.replace(ts, gateway=self.comms.address,
-                                         gateway_key=self.comms.key(agent))
-            return ts
-
-        return toolset
-
-    def _world_credential(self) -> None:
-        """The world now belongs to another secret than the one this worker was launched with
-        (a re-apply changed its endpoint or secret): drain, so the controller relaunches the
-        worker with the new one. Until then the hub refuses calls under the new configuration;
-        turns pinned to the old one finish against the old world (docs/world.md)."""
-        if self.world.needs_restart() and not self.draining:
-            log.warning("world credential changed; draining to be relaunched with the new one")
-            self._spawn(self.drain("world credential changed"))
+    def _resource_event(self, agent: str, event: dict) -> None:
+        """A harbor resource's event for one of this worker's agents (a board mention): the
+        agent's `resource` event, which the controller turns into `<resource>.<kind>` wakes."""
+        if (rt := self.agents.get(agent)) is not None:
+            rt.emit("resource", event)
 
     def working_count(self) -> int:
         return sum(1 for a in self.agents.values() if a.live)
@@ -632,14 +554,10 @@ class Worker:
         if isinstance(cmd, AssignCommand):
             if pending := self._unassigning.get(cmd.agent):  # re-assign right after unassign
                 await asyncio.shield(pending)
-            self.comms.configure(cmd.comms, comms_tools(cmd.spec, cmd.comms))
             self.apply_knobs(cmd.spec.worker)
-            self.world.configure(cmd.world, world_tools(cmd.spec, cmd.world))
-            self._world_credential()
             if cmd.agent in self.agents:
                 self.agents[cmd.agent].set_live(spec=cmd.spec)  # at its next turn boundary
                 self._set_lineage(self.agents[cmd.agent], cmd)
-                self.tools.want(cmd.tools_version, cmd.spec.folder_tools)
                 return
             if self.draining:
                 log.warning("assign %s ignored while draining", cmd.agent)
@@ -647,9 +565,7 @@ class Worker:
             rt = AgentRuntime(cmd.agent, cmd.type, cmd.spec, swarm=self.cfg.swarm,
                               work_root=self.cfg.work_root,
                               adapter=self.adapter_factory(cmd.agent, cmd.spec), outbox=self.outbox,
-                              sync=self.sync, identities=self.identities,
-                              working_count=self.working_count, toolbox=self._toolbox(cmd.agent),
-                              comms=self.comms, world=self.world)
+                              sync=self.sync, working_count=self.working_count)
             self._set_lineage(rt, cmd)
             self.agents[cmd.agent] = rt
             self.spec_rev = type_spec_rev(cmd.spec)
@@ -688,8 +604,8 @@ class Worker:
             "FLOCK_AGENT": cmd.agent,
             "FLOCK_PARENT": cmd.parent or "",
             "FLOCK_AGENT_TOKEN": cmd.agent_token or "",
-            # Masks the worker's token in the environment the adapters still inherit; the
-            # harness env allow-list (PR #2) makes this redundant.
+            # Masks the worker's token in the environment the adapters inherit (the harness env
+            # allow-list also drops it).
             "FLOCK_TOKEN": "",
         }
 
@@ -703,8 +619,6 @@ class Worker:
         self._wave = (start, n + 1, snap)
         self._restoring += 1
         try:
-            # the swarm's tools version is on disk before the agent's first turn (docs/tools.md)
-            await self.tools.ensure(cmd.tools_version, cmd.spec.folder_tools)
             await rt.setup(restore=cmd.restore, resume_prompt=cmd.resume_prompt)
         finally:
             self._restoring -= 1
@@ -721,8 +635,6 @@ class Worker:
             if rt.spec.ephemeral:  # docs/spawn.md "Ephemeral types": nothing stays behind
                 rt.purge()
         finally:
-            self.comms.forget(rt.name)
-            self.world.on_done(rt.name, "unassigned")
             self.agents.pop(rt.name, None)
             self._unassigning.pop(rt.name, None)
 
@@ -765,7 +677,7 @@ class Worker:
                                interrupted=sorted(self._interrupted),
                                agents=[a.heartbeat() for a in self.agents.values()],
                                mem=self.mem, restore=self.restore_progress(),
-                               tools=dict(self.world.counters) or None, knobs_rev=self.knobs_rev,
+                               knobs_rev=self.knobs_rev,
                                wants_rotation=self.wants_rotation,
                                unsynced={a.name: a.unsynced for a in self.agents.values()
                                          if a.unsynced})
@@ -787,11 +699,6 @@ class Worker:
             resp = await self.client.heartbeat(self.heartbeat_payload(),
                                                budget=max(1.0, self.cfg.heartbeat_interval * 2 / 3))
             if isinstance(resp, dict) and not self.draining:
-                tools = resp.get("tools") if isinstance(resp.get("tools"), dict) else {}
-                self.tools.want(tools.get("version"), tools.get("select"))
-                self._comms_from(resp.get("comms"))
-                self.world.configure_raw(resp.get("world"))
-                self._world_credential()
                 self._live_from(resp)
             return True
         except httpx.HTTPError as e:
@@ -799,22 +706,6 @@ class Worker:
             if _stale(e) and not self.stale:
                 self._spawn(self.abandon(f"heartbeat: {e}"))
             return False
-
-    def _comms_from(self, raw: object) -> None:
-        """The swarm's comms block from a heartbeat response: rules and protocols changed by a
-        re-apply reach this worker here (docs/comms.md, "Live settings")."""
-        if not isinstance(raw, dict):
-            if self.comms.spec is not None:
-                self.comms.configure(None, [])
-            return
-        raw = dict(raw)
-        tools = raw.pop("tools", None)
-        try:
-            spec = CommsSpec.model_validate(raw)
-        except ValueError as e:
-            log.warning("heartbeat: unreadable comms block: %s", e)
-            return
-        self.comms.configure(spec, tools if isinstance(tools, list) else [])
 
     def _live_from(self, resp: dict) -> None:
         """A changed type spec (docs/live.md): every agent takes it at its next turn boundary."""
@@ -885,8 +776,7 @@ class Worker:
         """What the worker holds that can grow, for the periodic memory line."""
         return {"outbox_events": len(self.outbox), "outbox_bytes": self.outbox.bytes,
                 "outbox_dropped": self.outbox.dropped, "agents": len(self.agents),
-                "live": self.working_count(), "tasks": len(asyncio.all_tasks()),
-                "comms_cache": len(self.comms._cache) if hasattr(self.comms, "_cache") else None}
+                "live": self.working_count(), "tasks": len(asyncio.all_tasks())}
 
     def memory_start(self) -> None:
         """Once: where the memory numbers come from, and a warning for a work root in RAM."""
@@ -898,37 +788,15 @@ class Worker:
         log.info("memory: memory.oom.group=%s", cg.oom_group())
         if cg.oom_group() == "1":
             log.warning("memory.oom.group is 1: one OOM kill ends every process in the job; "
-                        "only the relief ladder and the tool limits help")
+                        "only the relief ladder helps")
         if (kind := fs_type(self.cfg.work_root)) in TMPFS_TYPES:
             log.warning("work root %s is on %s: every workdir file counts as memory",
                         self.cfg.work_root, kind)
 
-    def agent_memory(self, tmp: bool = True) -> list[tuple[AgentRuntime, dict]]:
-        """Per agent: harness and tool PSS, tmpfs root, tmp dir (`tmp`), workdir files
-        (blocking: /proc and directory walks; run in a thread)."""
-        from flock.worker.adapters.pi import _descendants, process_tree
-
-        tree = process_tree()  # one /proc walk for every agent
-
-        def descendants(pid: int) -> list[tuple[int, str]]:
-            return _descendants(pid, tree)
-
-        out = []
-        for rt in list(self.agents.values()):
-            if not rt.setup_done:  # its session log may still be downloading
-                continue
-            pid = _harness_pid(rt)
-            home = getattr(rt.adapter, "home", None)
-            data = agent_memory(pid, descendants, Path(home) / "tmp" if home and tmp else None)
-            data["workdir_files"] = rt.workdir_files
-            out.append((rt, data))
-        return out
-
     async def memory_loop(self) -> None:
         """Every MEMORY_SAMPLE s: sample the cgroup for the heartbeat. Every MEMORY_INTERVAL
         (FLOCK_MEMORY_LOG_S, 0 turns it off): trim the C heap, log the RSS before and after
-        with the cgroup sample and the sizes of the worker's bounded queues, then the
-        per-agent lines, so a growing worker shows what grows."""
+        with the cgroup sample and the sizes of the worker's bounded queues."""
         interval = float(os.environ.get("FLOCK_MEMORY_LOG_S") or MEMORY_INTERVAL)
         loop = asyncio.get_running_loop()
         self.memory_start()
@@ -946,35 +814,16 @@ class Worker:
                         log.info("memory: rss %.0f MiB (%.0f MiB before heap trim); cgroup %s; %s",
                                  after, before, self.mem.model_dump(exclude_none=True),
                                  self.memory_report())
-                    for rt, data in await asyncio.to_thread(self.agent_memory):
-                        log.info("mem agent=%s %s", rt.name,
-                                 " ".join(f"{k}={v}" for k, v in data.items()))
-                        # not rt.emit: that marks the agent dirty, and an idle agent would sync
-                        self.outbox.add(rt.log.custom("agent_memory", data))
             except Exception:  # one bad reading must not end the loop
                 log.exception("memory sample failed")
                 self.mem = None  # no stale reading in later heartbeats
             await asyncio.sleep(MEMORY_SAMPLE)
 
     async def relieve(self) -> None:
-        """One step of the memory relief ladder on the last sample (see the module doc), and
-        the spike guard. Each rung is logged once per episode (until memory falls below
-        `rotate`). `worker_lifetime` stays the backstop."""
+        """One step of the memory relief ladder on the last sample (see the module doc). Each
+        rung is logged once per episode (until memory falls below `rotate`). `worker_lifetime`
+        stays the backstop."""
         th, mem = MemThresholds.read(self.mem_knob), self.mem
-        nonreclaim = mem.nonreclaim_mb if mem is not None else None
-        limit = mem.limit_mb if mem is not None and self.cgroup.armed else None
-        # the per-agent /proc walk only when something can act on it
-        scan = (limit and nonreclaim is not None and nonreclaim / limit >= th.rotate) or (
-            th.spike_mb > 0 and nonreclaim is not None and nonreclaim >= th.spike_mb)
-        if scan and any(rt.live for rt in self.agents.values()):
-            for rt, data in await asyncio.to_thread(self.agent_memory, False):
-                rt.pss_mb = data.get("pi_pss_mb")
-                tools = data.get("tools_pss_mb") or 0
-                if th.spike_mb > 0 and tools > th.spike_mb:
-                    n = await asyncio.to_thread(_kill_tools, rt)
-                    log.warning("memory: %s's tools use %.0f MB (> %.0f): killed %d process(es)",
-                                rt.name, tools, th.spike_mb, n)
-                    rt.emit("tool_tree_killed", {"agent": rt.name, "mb": tools})
         if not self.cgroup.armed or mem is None or not mem.limit_mb or mem.nonreclaim_mb is None:
             return
         frac = mem.nonreclaim_mb / mem.limit_mb
@@ -984,7 +833,7 @@ class Worker:
         rung = (3 if oom or frac >= th.preempt else 2 if frac >= th.drain
                 else 1 if frac >= th.rotate else 0)
         if rung > self._rung:
-            what = ("", "rotation wanted, recycling the largest harness",
+            what = ("", "rotation wanted",
                     f"draining (turns cut after {th.drain_deadline_s:.0f} s)",
                     "oom_kill: preempting" if oom else "preempting")[rung]
             log.warning("memory: nonreclaim %.0f of %.0f MB (%.0f%%): %s", mem.nonreclaim_mb,
@@ -995,12 +844,6 @@ class Worker:
             self._spawn(self.preempt("memory"))
         elif rung == 2 and not self.draining:
             self._spawn(self.drain("memory", deadline=th.drain_deadline_s))
-        elif rung == 1 and not self.draining:
-            now = asyncio.get_running_loop().time()
-            running = [rt for rt in self.agents.values() if rt.phase == "running"]
-            if (running and now - self._last_recycle >= th.recycle_gap_s
-                    and max(running, key=lambda rt: rt.pss_mb or 0).recycle("memory")):
-                self._last_recycle = now
 
     async def deadline_loop(self) -> None:
         while True:
@@ -1029,9 +872,16 @@ class Worker:
         self._terminating = self.draining = True
         for rt in self.agents.values():
             rt.allow_starts = False
-        await asyncio.gather(*(rt.stop("terminated") for rt in list(self.agents.values())),
-                             return_exceptions=True)
+        await self._stop_all("terminated")
         self._drained.set()
+
+    async def _stop_all(self, reason: str) -> None:
+        """Stop every agent and cancel what outlives it (harbor Trials, unverified, also one
+        still starting: stop waits for its start), all in parallel: no container or sandbox
+        outlives this worker."""
+        agents = list(self.agents.values())
+        await asyncio.gather(*(rt.stop(reason) for rt in agents),
+                             *(rt.close(0) for rt in agents), return_exceptions=True)
 
     async def preempt(self, reason: str) -> None:
         """The machine goes away in seconds (docs/slurm.md): everything below fits in
@@ -1064,8 +914,13 @@ class Worker:
         async def one(rt: AgentRuntime) -> None:
             if rt.turn_id is not None or rt.awaiting:
                 self._interrupted.add(rt.name)
+            # the Trial must not outlive the machine: cancelled now, unverified (also one still
+            # starting: stop waits for its start); Harbor pulls its sessions as it stops it
+            closing = asyncio.ensure_future(rt.close(0))
             await rt.stop("preempted")
+            await asyncio.wait({closing}, timeout=max(0.5, (t0 + budget - loop.time()) / 2))
             await rt.sync_now("preempt")
+            await closing
 
         snap = self.sync.stats.snapshot() if self.sync else {}
         try:
@@ -1134,8 +989,7 @@ class Worker:
         for rt in self.agents.values():
             rt.sync = None
             rt.allow_starts = False
-        await asyncio.gather(*(rt.stop("abandoned") for rt in list(self.agents.values())),
-                             return_exceptions=True)
+        await self._stop_all("abandoned")
         self._drained.set()
 
     async def run(self) -> int:
@@ -1168,11 +1022,12 @@ class Worker:
             except TimeoutError:
                 log.warning("preempt: events/heartbeat cut at the budget")
         else:
+            # before `drained`: that heartbeat lets the controller cancel the job at once.
+            # Not in a preemption's budget: the job ends anyway
+            await self.harbor.close()
             # the loops are stopped: the heartbeat after the events flush is the last one
             self.drained = self._drain_done
             await self._final_reports()
-        await self.comms.aclose()
-        await self.world.aclose()
         await self.client.aclose()
         log.info("drained; exiting%s", " (preempted)" if self.preempted else "")
         return PREEMPT_EXIT if self.preempted else 0
@@ -1201,7 +1056,7 @@ def run_and_exit(coro, *, exit: Callable[[int], object] = os._exit) -> None:
     sent its last heartbeat, so nothing in the process is needed any more. asyncio.run would
     then cancel leftover tasks and join the default executor, and the interpreter would join
     non-daemon threads; any of them blocking (a hung bucket or SDK call) keeps the job RUNNING
-    after a drain (1k run, check 5). Log what is still alive, then os._exit."""
+    after a drain. Log what is still alive, then os._exit."""
     loop = asyncio.new_event_loop()
     code = loop.run_until_complete(coro)
     pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
@@ -1218,14 +1073,11 @@ def run_and_exit(coro, *, exit: Callable[[int], object] = os._exit) -> None:
 
 
 def main() -> None:
-    from flock.isolation import enabled, protect_supervisor
-
-    if enabled():
-        protect_supervisor()
     limit_malloc_arenas()  # before any thread starts
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"),
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     quiet_libraries()
+    log.info("flock-worker on Python %s (%s)", sys.version.split()[0], sys.executable)
     # FLOCK_WORKER_SECRETS_FILE: credentials from a 0600 file, not the exec env (docs/slurm.md)
     if names := load_secrets():
         log.info("secrets: %d read from FLOCK_WORKER_SECRETS_FILE (%s)", len(names),

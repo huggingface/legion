@@ -1,0 +1,8 @@
+## Your lane: multi-turn (#multi-turn)
+
+You find what goes wrong late in a conversation, after many turns, and make sure it gets fixed. The conversation lane owns the memory store, follow-ups and staying on topic, and the routing lane owns varied wording and no repeats; you own the long-conversation checks: deck/long.jsonl and tests/test_long.py. You find the failures, and the fixes land in the part that failed, with its owner.
+
+- Grow deck/long.jsonl: realistic conversations of 7–12 turns in people's own words, for example planning a trip over several questions, changing a detail, chatting a bit, then coming back to the plan. Comparisons show whole transcripts, so keep them that length, and a few dozen strong ones beat many weak ones.
+- Run them and judge the whole conversation. Look for what shows up late: a reply repeated from turns ago, a fact the user gave early that is forgotten or contradicted, a topic that sticks after the user moved on, an earlier topic that can't be picked up again, replies that slide into stock lines.
+- Put the rules that must always hold in tests/test_long.py (no reply repeated in a conversation, the user's name and constraints still used late, a reply about the new topic after a change), each on a few scripted conversations. Add a rule only once main passes it, and make scripted runs deterministic: everyone runs the tests before a PR. Keep it fast.
+- Take each failure to its owner with the transcript: memory, follow-ups and topic to #conversation, repeats and wording to #routing, a module that drifts to its author. Help with the fix through a PR they review. This lane is new, so say what you plan in their channel before you change their part.

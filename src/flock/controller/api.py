@@ -71,11 +71,9 @@ from flock.models import (
     WorkerHeartbeat,
     WorkerState,
     WorkerStatus,
-    comms_tools,
     loop_refusals,
     type_spec_rev,
     worker_type_spec,
-    world_tools,
 )
 from flock.tools.bundle import MAX_BUNDLE_BYTES, read_manifest, version_of
 from flock.tools.loader import ToolsError
@@ -85,9 +83,6 @@ from flock.world.host import resolve as world_resolve
 from flock.world.protocol import ADMIN_TOKEN_ENV, TOKEN_HEADER
 
 log = logging.getLogger(__name__)
-# Worker events the comms wake hook receives, by reason (docs/comms.md, "Wake events").
-COMMS_WAKE_EVENTS = {"comms_mention": "mention", "comms_thread_reply": "thread",
-                    "comms_dm": "dm", "comms_channel_message": "channel"}
 
 MAX_WAIT = 30.0
 ADMIT_GRACE = 10.0  # s, a heartbeat this soon after an admission may predate the prompt
@@ -254,7 +249,7 @@ def agent_status(
         name=a["name"],
         swarm=a["swarm"],
         type=a["type"],
-        harness=ts.harness if ts else Harness.claude,
+        harness=ts.harness if ts else Harness.harbor,  # its type left the spec: a placeholder
         model=ts.model if ts else "unknown",
         provider=ts.provider_name if ts else None,
         labels=ts.labels if ts else {},
@@ -267,7 +262,6 @@ def agent_status(
         pending=pending,
         tokens=agent_tokens(a),
         cost_usd=a["cost"],
-        harness_estimate_usd=a["harness_estimate_usd"],
         turns=a["turns"],
         created_at=_dt(a["created_at"]),
         last_heartbeat=_dt(a["last_heartbeat"]),
@@ -665,10 +659,10 @@ def create_app(
     this controller's jobs client launches workers one way (docs/local.md).
     `loop_interval`: seconds between loop ticks (controller/loop.py) while the app runs;
     default FLOCK_LOOP_INTERVAL or 1; 0 turns the ticker off (tests drive `app.state.loops`).
-    `comms_transport` lets tests fake the message board (docs/comms.md). Every `comms_mention`
-    (reason "mention") and `comms_thread_reply` (reason "thread") event a worker posts goes to
-    the loop's wake queue as `wake(agent, "comms.<reason>")` (honoured when the type's
-    `loop.on` lists it) and then to `on_comms(agent, reason, data)`, an optional observer.
+    `comms_transport` lets tests fake the message board (docs/comms.md). A harbor resource's
+    `resource` event {resource, kind, data} a worker posts goes to the loop's wake queue as
+    `wake(agent, "<resource>.<kind>")` (a board mention: `message_board.mention`; honoured when
+    the type's `loop.on` lists it) and then to `on_comms(agent, kind, data)`, an optional observer.
     `worlds` starts the `command` worlds of `compute: local` specs (docs/world.md; default: a
     WorldHost logging to the controller's output); they stop with the app or `remove`.
     `world_transport` lets tests fake a `url` world.
@@ -715,13 +709,16 @@ def create_app(
 
     def comms_event(agent: str, ev: Event) -> None:
         data = ev.data.get("data", ev.data) if isinstance(ev.data, dict) else {}
-        reason = COMMS_WAKE_EVENTS[ev.type]
+        # {resource, kind, data} from a harbor resource's watch
+        source, reason, data = data.get("resource"), data.get("kind"), data.get("data")
+        if not (isinstance(source, str) and isinstance(reason, str) and isinstance(data, dict)):
+            return
         try:  # `loop.notices`: named in the agent's next round prompt
             loops.notice(agent, reason, data)
         except Exception:
             log.exception("comms notice failed for %s", agent)
         try:
-            woke = loops.wake(agent, f"comms.{reason}")
+            woke = loops.wake(agent, f"{source}.{reason}")
             log.debug("comms %s for %s (wake %s): %s", reason, agent, woke, data)
             if on_comms is not None:
                 on_comms(agent, reason, {"agent": agent, **data})
@@ -899,13 +896,22 @@ def create_app(
         check_tools(swarm, spec)
         if refused := loop_refusals(spec):
             raise HTTPException(400, "; ".join(refused))
+        if (prev and prev["spec"].naming != spec.naming and store.list_agents(swarm)
+                and any(ts.harbor for ts in spec.types.values())):  # docs/spawn.md "Names"
+            raise HTTPException(400, f"naming: the run names its agents `{prev['spec'].naming}`, "
+                                     f"the spec `{spec.naming}`: names never change in a run")
         for type_name, ts in spec.types.items():  # docs/live.md: what a live change cannot do
             old = prev["spec"].types.get(type_name) if prev else None
-            if old is not None and old.harness != ts.harness and store.list_agents(swarm, type_name):
-                raise HTTPException(400, f"types.{type_name}.harness: a running type's harness "
-                                         f"cannot change ({old.harness.value} -> "
-                                         f"{ts.harness.value}); remove the type first or use a "
-                                         "new type name")
+            # a harbor worker prepares the task, tools and resources once and each agent keeps
+            # its Trial inputs: only the roster (agent counts) may change live
+            fixed = old is not None and old.harbor and ts.harbor and [
+                k for k in type(ts.harbor).model_fields if k != "roster"
+                and getattr(old.harbor, k) != getattr(ts.harbor, k)]
+            if fixed and store.list_agents(swarm, type_name):
+                raise HTTPException(400, f"types.{type_name}.harbor ({', '.join(fixed)}): a "
+                                         "running Harbor type's task, tools, resources, settings "
+                                         "and instructions are fixed at launch; revert the "
+                                         "change, or use a new type name")
         try:  # channel name -> id once, kickoff once (docs/comms.md)
             comms_resolve(spec, prev["spec"] if prev else None, secret_source,
                           transport=comms_transport, dry_run=dry_run)
@@ -983,7 +989,7 @@ def create_app(
             if selecting:
                 raise HTTPException(400, f"types {', '.join(selecting)} select tools but the spec "
                                          "has no tools_version: apply it with `flock launch`, "
-                                         "which uploads the tools folder (docs/tools.md)")
+                                         "which uploads the tools folder")
             return
         b = store.get_tool_bundle(swarm, spec.tools_version, body=False)
         if b is None:
@@ -1217,7 +1223,7 @@ def create_app(
                 ack.skipped_state += 1
                 continue
             if pending.get(a["name"]):
-                ack.skipped_pending += 1  # run 1k: 645 calls stacked 73,394 prompts
+                ack.skipped_pending += 1  # repeated calls must never stack prompts
                 continue
             cmd = build(a) if build else PromptCommand(
                 agent=a["name"], prompt_id=uuid.uuid4().hex, text=req.text,
@@ -1295,8 +1301,8 @@ def create_app(
         return worker_status(w, names, clock().timestamp(), store.liveness(w["swarm"]))
 
     def stale(w: Row, incarnation: str | None) -> bool:
-        """The caller is not the slot's current job. Workers that send no incarnation (older
-        versions) are trusted, as before."""
+        """The caller is not the slot's current job. Workers that send no incarnation are
+        trusted."""
         return incarnation is not None and w["incarnation"] != incarnation
 
     def caps(spec: SwarmSpec, type_name: str) -> list[tuple[frozenset[str], int]]:
@@ -1388,7 +1394,7 @@ def create_app(
         return taken, window, owner
 
     def admit(w: Row, prompts: list[Row]) -> list[Row]:
-        """Provider `max_working` at prompt admission (design.md section 5). A prompt for an
+        """Provider `max_working` at prompt admission (design.md 'Providers'). A prompt for an
         agent in a turn always goes out (it joins that turn). A prompt that would start a turn
         needs a free slot, and free slots go to pending prompts in FIFO order of creation
         across all workers of the provider (`admission_view`), not to whichever worker polls
@@ -1547,22 +1553,6 @@ def create_app(
             reap_ephemeral(hb)
         out: dict[str, Any] = {"ok": True}
         spec = sw["spec"] if sw else None
-        if spec is not None and spec.tools_version is not None and w is not None:
-            # the swarm's current tools (docs/tools.md): a re-apply reaches running workers here
-            ts = spec.types.get(w["type"])
-            out["tools"] = {"version": spec.tools_version, "select": ts.folder_tools if ts else None}
-        if spec is not None and spec.comms is not None and w is not None:
-            # comms rules and protocols are live (docs/comms.md): a re-apply reaches workers here
-            ts = spec.types.get(w["type"])
-            out["comms"] = {**spec.comms.model_dump(mode="json", exclude={"kickoff"}),
-                            "tools": comms_tools(ts, spec.comms) if ts else []}
-        if spec is not None and spec.world is not None and w is not None:
-            # the world's manifest, re-fetched at every apply (docs/world.md)
-            ts = spec.types.get(w["type"])
-            out["world"] = {**spec.world.model_dump(mode="json", exclude={"down_pause_s"}),
-                            "tools": world_tools(ts, spec.world) if ts else []}
-            if (down := health.down_since.get(w["swarm"])) is not None:
-                out["world"]["down_since"] = _dt(down).isoformat()  # the hub refuses at once
         ts = spec.types.get(w["type"]) if spec is not None and w is not None else None
         if ts is not None:
             # docs/live.md: a changed type spec (prompts, limits, ...) reaches the worker here; it applies them at each agent's next turn boundary
@@ -1588,7 +1578,7 @@ def create_app(
             a = store.get_agent(agent)
             store.append_events(a["swarm"] if a else w["swarm"], agent, evs)
             for ev in evs:
-                if ev.type in COMMS_WAKE_EVENTS:
+                if ev.type == "resource":
                     comms_event(agent, ev)
             if a is not None and a["worker"] == worker_id:
                 released |= turn_seen(a, evs, now)
@@ -1598,7 +1588,7 @@ def create_app(
                     health.on_events(a, evs, now)
                 except Exception:  # counters never break event ingestion
                     log.exception("health counters failed for %s", agent)
-        if released and pools:  # slots freed now, not at the next heartbeat (run-1k finding 1)
+        if released and pools:  # slots freed now, not at the next heartbeat
             wake_window(w["swarm"], pools)
         return {"ok": True, "accepted": len(batch.events)}
 

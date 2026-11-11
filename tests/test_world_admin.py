@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import time
 
 import httpx
@@ -17,7 +16,7 @@ from flock.world.__main__ import world_app
 from flock.world.host import derived_token, world_admin_token
 from flock.world.server import create_app
 
-from .conftest import TOKEN, wire
+from .conftest import FAKE_PROVIDERS, HB, TOKEN, wire
 
 SECRET = "world-secret"
 ADMIN_SECRET = "admin-secret-value"
@@ -225,45 +224,10 @@ def test_knob_types_are_checked():
         World().knob("x", int, 9, max=4)  # the default itself is out of range
 
 
-async def test_hub_treats_a_parked_503_as_a_world_holdoff(monkeypatch, tmp_path):
-    from .test_world import _holdoff_hub
-
-    now, seen, captured, parked = [100.0], [], [], [True]
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.append(request.url.path)
-        if parked[0]:
-            return httpx.Response(503, headers={"Retry-After": "120"}, json={
-                "ok": False, "parked": True, "error": "OSError: restore failed", "attempt": 3,
-                "next_retry_s": 120})
-        return httpx.Response(200, json={"ok": True, "text": "fine"})
-
-    monkeypatch.setattr("flock.world.hub.capture", lambda workdir, path: captured.append(path) or {})
-    ws = {"arg": "ref", "default": "main"}
-    hub = _holdoff_hub(handler, [
-        {"name": "up", "parameters": {"type": "object", "properties": {"ref": {"type": "string"}}},
-         "x-flock-workspace": ws},
-        {"name": "peek", "annotations": {"readOnlyHint": True}}], lambda: now[0],
-        runtime=lambda name: type("Rt", (), {"workdir": tmp_path})())
-    r = await hub.call("x", "world:peek", {})  # read-only: not retried against a parked world
-    assert json.loads(r.output) == {"error": "world w unavailable (OSError: restore failed); work "
-                                    "locally", "code": "parked", "retry_after_s": 120}
-    assert len(seen) == 1
-    now[0] += 30
-    for name, args in (("up", {"ref": "b"}), ("peek", {})):  # held: no request, no upload
-        body = json.loads((await hub.call("x", f"world:{name}", args)).output)
-        assert body["local"] and body["code"] == "parked" and "work locally" in body["error"]
-    assert len(seen) == 1 and captured == []
-    now[0] += 91
-    parked[0] = False
-    assert not (await hub.call("x", "world:up", {"ref": "b"})).error and len(seen) == 2
-    await hub.aclose()
-
-
 def test_world_admin_token_is_never_the_world_secret():
     def spec(world):
         return SwarmSpec.model_validate({"swarm": "sw", "compute": "local", "world": world,
-                                         "types": {"dev": {"harness": "claude", "model": "m"}}})
+                                         "providers": FAKE_PROVIDERS, "types": {"dev": {**HB, "model": "fake:m"}}})
     local = spec({"command": ["python", "w.py"]})
     assert world_admin_token(local, TOKEN, {}) == derived_token(TOKEN, "flock-world-admin:sw")
     assert world_admin_token(local, TOKEN, {}) != derived_token(TOKEN, "sw")  # the world secret
@@ -287,7 +251,7 @@ def _swarm(world_client, store, clock):
                          loop_interval=0, world_transport=_forward(world_client))
     spec = SwarmSpec.model_validate({
         "swarm": "sw", "compute": "local", "world": {"url": "http://w.invalid", "token_env": "WORLD_SECRET"},
-        "types": {"dev": {"harness": "claude", "model": "m", "replicas": 1}}})
+        "providers": FAKE_PROVIDERS, "types": {"dev": {**HB, "model": "fake:m", "replicas": 1}}})
     return app, spec.model_dump(mode="json")
 
 

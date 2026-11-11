@@ -1,7 +1,6 @@
 """flock.registry: every harness and compute entry is complete and its code imports."""
 
 import inspect
-from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -14,11 +13,9 @@ from flock.registry import COMPUTE, HARNESSES, load
 @pytest.mark.parametrize("name", HARNESSES)
 def test_harness_entry_is_complete(name):
     h = HARNESSES[name]
-    assert list(inspect.signature(load(h.adapter)).parameters) == ["workdir", "name", "spec"]
-    assert h.instructions_file.endswith(".md")
+    # harbor's also takes the worker's `host` (flock.worker.harbor)
+    assert list(inspect.signature(load(h.adapter)).parameters)[:3] == ["workdir", "name", "spec"]
     assert Harness(name) == name
-    if h.version:  # Dockerfile.worker is edited by hand
-        assert f"@{h.version}" in (Path(__file__).parents[1] / "Dockerfile.worker").read_text()
 
 
 @pytest.mark.parametrize("kind", COMPUTE)
@@ -28,7 +25,8 @@ def test_compute_entry_is_complete(kind):
 
 
 def test_unknown_names_keep_their_errors():
-    with pytest.raises(ValidationError, match="Input should be 'claude', 'codex', 'pi' or 'llm'"):
+    with pytest.raises(ValidationError,
+                       match="Input should be 'harbor'"):
         TypeSpec.model_validate({"harness": "nope"})
     with pytest.raises(ValidationError, match="Input should be 'hf-jobs', 'local' or 'slurm'"):
         ComputeSpec(kind="nope")

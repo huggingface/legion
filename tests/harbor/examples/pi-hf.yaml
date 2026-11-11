@@ -1,0 +1,17 @@
+name: pi-hf-team
+model: huggingface/moonshotai/Kimi-K2.5
+task:
+  repo: https://huggingface.co/datasets/harborframework/terminal-bench-2.1
+  dataset: terminal-bench-2.1@2.1.0
+  selector: regex-log
+  revision: 3e235dff6880252a587fa479c09bcb1e16edf2eb
+team_file: ../prompts/team.md
+resources:
+  message_board:  # a local board; its tools are selected automatically
+agents:
+  count: 2
+environment:
+  backend: docker
+limits:
+  run_timeout_seconds: 900
+  agent_max_turns: 30

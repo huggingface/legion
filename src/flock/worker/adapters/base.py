@@ -8,7 +8,8 @@ An adapter owns at most one live harness process at a time (one burst). It is re
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Iterable, Mapping
+import re
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
@@ -24,10 +25,7 @@ class AdapterEvent:
 
     - turn_started: the harness began a turn (data may carry the harness's own turn id).
     - message: `message` is a pi-format AgentMessage (role user/assistant/toolResult).
-    - usage: `usage` tokens for `model`. `cumulative` means a running total for the whole
-      session (the runtime subtracts the previous snapshot); `baseline` means a snapshot that
-      predates this burst and must only reset the reference point, never be counted.
-      `cost_usd` is the harness's own cumulative estimate, if any.
+    - usage: `usage` tokens for `model`, used since the last usage event.
     - turn_ended: `status` is completed | error | interrupted | ...
     - error: `error` text; the process may still be alive.
     - exited: the process is gone; no more events this burst.
@@ -37,55 +35,23 @@ class AdapterEvent:
     message: dict[str, Any] | None = None
     model: str | None = None
     usage: TokenUsage | None = None
-    cumulative: bool = False
-    baseline: bool = False
-    cost_usd: float | None = None
     status: str | None = None
     error: str | None = None
     data: dict[str, Any] = field(default_factory=dict)
     raw: Any = None
 
 
-# What a harness process inherits from the worker's own environment. Everything else (FLOCK_TOKEN,
-# job secrets, the incarnation) stays in the worker; the harness gets only these plus what the
-# worker passes explicitly (spec.env, the type's declared secrets, identity, the provider key).
-BASE_ENV = frozenset({
-    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LANGUAGE", "TZ", "TMPDIR",
-    "IS_SANDBOX",  # Claude's bypassPermissions as root
-    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
-    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
-})
-BASE_ENV_PREFIXES = ("LC_", "XDG_")
+HTTP_TRANSIENT = re.compile(r"(?:^\s*|\bhttp\s+|\bstatus(?: code)?\s*[:=]?\s*)(?:429|502|503)\b",
+                            re.IGNORECASE)
 
 
-def minimal_env(
-    parent: Mapping[str, str], explicit: Mapping[str, str], keep: Iterable[str] = ()
-) -> dict[str, str]:
-    """The harness environment: allowlisted names from `parent` (BASE_ENV, LC_*, XDG_*, plus
-    `keep`, e.g. the harness's config-dir variable), then `explicit` on top."""
-    names = BASE_ENV | set(keep)
-    env = {k: v for k, v in parent.items() if k in names or k.startswith(BASE_ENV_PREFIXES)}
-    env.update(explicit)
-    return env
-
-
-# Where the Claude adapter puts a provider-backed type's key (claude_env): x-api-key / bearer.
-CLAUDE_KEY_ALIASES = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
-
-
-def credential_env_names(spec: TypeSpec) -> list[str]:
-    """Every environment variable through which a harness process holds its provider key: the
-    provider's `api_key_env` plus the names an adapter copies it to (Claude: ANTHROPIC_API_KEY or
-    ANTHROPIC_AUTH_TOKEN; Codex, Pi and llm read `api_key_env` itself). Tool calls
-    (`flock-tool`, docs/tools.md) get none of them. Empty for a harness-native model, whose keys
-    are ordinary declared `secrets`."""
-    r = spec.resolved_model
-    if r is None:
-        return []
-    names = [r.provider.api_key_env]
-    if spec.harness.value == "claude":
-        names += CLAUDE_KEY_ALIASES
-    return sorted(set(names))
+def transient_error(message: str) -> bool:
+    """A model transport failure (HTTP 429/502/503, a timeout, a dropped connection): a turn
+    that ends on one is `reason: model_transport`, which the worker-side loop retries with
+    backoff instead of counting it as a failed turn."""
+    return bool(HTTP_TRANSIENT.search(message)) or any(x in message.lower() for x in (
+        "timeout", "timed out", "fetch failed", "econnreset", "connection reset",
+        "connection refused", "socket", "abort"))
 
 
 class ResumeError(RuntimeError):
@@ -106,9 +72,8 @@ class HarnessAdapter(Protocol):
         env: dict[str, str] | None = None,
     ) -> str:
         """Start a process. Resume `session_id` (raise ResumeError if impossible) or create a
-        new session. Returns the session id in use. `env` is everything the worker passes on
-        (spec.env, declared secrets, identity, the provider key under `api_key_env`); the
-        process gets that plus `minimal_env`'s allowlist, never the worker's whole environment."""
+        new session. Returns the session id in use. `env` is what the worker passes on
+        (spec.env, declared secrets, the provider key under `api_key_env`)."""
         ...
 
     async def send(self, text: str) -> None: ...
@@ -125,7 +90,7 @@ class HarnessAdapter(Protocol):
 
 
 class EventQueue:
-    """Small helper both adapters use: a queue whose iterator ends after `exited`."""
+    """A queue whose iterator ends after `exited`."""
 
     def __init__(self) -> None:
         self._q: asyncio.Queue[AdapterEvent] = asyncio.Queue()
@@ -141,23 +106,11 @@ class EventQueue:
                 return
 
 
-def usage_sub(a: TokenUsage, b: TokenUsage | None) -> TokenUsage:
-    """a - b, clamped at zero per field (cumulative counters never go backwards)."""
-    if b is None:
-        return a
-    return TokenUsage(**{k: max(0, getattr(a, k) - getattr(b, k)) for k in TokenUsage.model_fields})
-
-
-def pi_usage(u: TokenUsage) -> dict[str, Any]:
-    """TokenUsage as a pi `usage` object (cost left at zero; the controller prices tokens)."""
-    d: dict[str, Any] = {
-        "input": u.input,
-        "output": u.output,
-        "cacheRead": u.cache_read,
-        "cacheWrite": u.cache_write,
-        "totalTokens": u.input + u.output + u.cache_read + u.cache_write,
-        "cost": {"input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.0},
-    }
-    if u.reasoning:
-        d["reasoning"] = u.reasoning
-    return d
+def pi_tokens(u: dict[str, Any] | None) -> TokenUsage:
+    """A pi `usage` object as TokenUsage (`input` excludes cached tokens; `reasoning` is
+    already inside `output`)."""
+    u = u or {}
+    return TokenUsage(input=int(u.get("input") or 0), output=int(u.get("output") or 0),
+                      cache_read=int(u.get("cacheRead") or 0),
+                      cache_write=int(u.get("cacheWrite") or 0),
+                      reasoning=int(u.get("reasoning") or 0))

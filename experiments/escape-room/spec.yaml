@@ -1,0 +1,22 @@
+# Four agents solve one AgentEscapeBench room (difficulty 20) in local Docker, sharing a board.
+# What it needs, cost and how to launch: README.md.
+name: ${RUN_NAME:-escape-room-1}
+model: huggingface/Qwen/Qwen3.8-27B:deepinfra
+inference:
+  reasoning_effort: low
+task:
+  repo: https://huggingface.co/datasets/HuggingFaceSwarms/AgentEscapeBench-harbor
+  selector: agentescape-20-skeleton-0052d9e8
+  revision: eeccfb09a986db1670b56673b22ebea4d473d2a8
+team_file: prompts/team.md
+resources:
+  message_board:  # a local board; its tools are selected automatically
+agents:
+  count: 4
+environment:
+  backend: docker
+workers: {agents_per_worker: 4}  # one worker: a local board is per worker
+loop: {prompt: Work on the task., while: {max_rounds: 1}}  # one start prompt per agent
+limits:
+  run_timeout_seconds: 3600
+  agent_max_turns: 200

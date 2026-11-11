@@ -1,0 +1,113 @@
+# A swarm in ten lanes builds a Python chatbot through pull requests, on HF Jobs: each agent a
+# dedicated hf-sandbox Trial of the task pybot-agent. The shared world (the PR tools) and a board
+# are resources, reached over HTTP through the world.* and message_board.* tools. What it needs,
+# cost and how to launch: README.md. `flock init` writes every ${VAR} below into run.env.
+name: ${RUN_NAME:-pybot-1}
+namespace: ${NAMESPACE:-HuggingFaceSwarms}     # bills the workers and the sandboxes
+bucket: ${BUCKET}                              # the run's checkpoint bucket, hf://buckets/<ns>/<name>
+compute: hf-jobs
+harness: pi
+model: huggingface/deepseek-ai/DeepSeek-V4.1-Flash-1017:novita
+# [input, output, cached] USD per 1M tokens (router novita, input/output as on 2026-11-06):
+# re-read the router's /v1/models before a run, Harbor reports no cost for router models
+pricing: [0.30, 1.20, 0.30]
+inference:
+  # HF Inference Providers. For a large run, point base_url at your own OpenAI-compatible server
+  # (e.g. vLLM serving the same model), its key in api_key_env, and set pricing to [0, 0, 0].
+  base_url: https://router.huggingface.co/v1
+  api_key_env: HF_INFERENCE_TOKEN             # inference only: never the workers' HF_TOKEN or one that can write PYBOT_REPO
+  api_format: openai_chat_completions
+  reasoning_effort: high
+task:
+  repo: https://huggingface.co/datasets/HuggingFaceSwarms/pybot   # tasks/pybot-agent
+  selector: pybot-agent
+  revision: '${PYBOT_TASK_REVISION}'          # the task dataset's commit SHA
+team_file: prompts/system.md
+resources:
+  message_board:
+    url: '${BOARD_URL}'                       # a dedicated, public board Space (sandboxes hold no HF token)
+    token_env: MSGBOARD_OPERATOR_TOKEN        # its operator token (the worker's, never an agent's)
+    # created at start if missing; the poller watches only these (a mention elsewhere wakes no one)
+    channels: [general, answers, quality, conversation, intent, uncertainty, understanding,
+               routing, multi-turn, steward, safety]
+    wake: [mention, thread, channel]          # no DMs: everything is public
+    rules:                                    # not enforced on hf-sandbox (no rule proxy: run.json warns)
+      min_post_gap: 10s
+      max_len: 1200
+      threads: per_topic
+      no_group_mentions: true
+      max_channels_per_agent: 3               # the lane channel, a team channel, one more
+      max_channels: 40                        # general, 10 lanes and the teams' channels
+  world:
+    url: '${WORLD_URL}'                       # the world job's public URL
+    token_env: PYBOT_WORLD_TOKEN              # = the world's FLOCK_WORLD_TOKEN; one world per run,
+                                              # a new secret each run (same secret + name = same agent)
+    transport: http                           # no mounts on hf-sandbox: each agent's own token
+tools:
+  - message_board.post
+  - message_board.read
+  - message_board.search
+  - message_board.channels
+  - message_board.create_channel
+  - message_board.join_channel
+  - message_board_extra.*                     # react, doc, edit_doc
+  - world.*                                   # every lane, world_status included
+agents:
+  # One agent per lane. The 1,000-agent run: set each count below, use your own inference
+  # server (inference.base_url) and a bigger world (README.md).
+  #   lane           count  agents_per_worker
+  #   answers          252  12
+  #   quality          132  12
+  #   conversation     120  12
+  #   intent           120   6
+  #   uncertainty      108   6
+  #   understanding     72  12
+  #   routing           72  12
+  #   multi-turn        60   6
+  #   steward           40  10
+  #   safety            24  12
+  roles:
+    answers: {count: 1, role_file: prompts/lanes/answers.md}
+    quality: {count: 1, role_file: prompts/lanes/quality.md}
+    conversation: {count: 1, role_file: prompts/lanes/conversation.md}
+    intent: {count: 1, role_file: prompts/lanes/intent.md, workers: {agents_per_worker: 6}}
+    uncertainty: {count: 1, role_file: prompts/lanes/uncertainty.md, workers: {agents_per_worker: 6}}
+    understanding: {count: 1, role_file: prompts/lanes/understanding.md}
+    routing: {count: 1, role_file: prompts/lanes/routing.md}
+    multi-turn: {count: 1, role_file: prompts/lanes/multi-turn.md, workers: {agents_per_worker: 6}}
+    steward:
+      count: 1
+      role_file: prompts/lanes/steward.md
+      name_prefix: steward-                   # steward-teal-heron: recognizable on the board and in PRs
+      workers: {agents_per_worker: 10}
+      loop:                                   # a round every 15 min; wakes on mentions and threads only
+        prompt_file: prompts/round.md
+        every: 15m
+        notices: true
+        on: [message_board.mention, message_board.thread]
+        while: {until: 48h, max_rounds: 10000}
+        final: {prompt_file: prompts/final.md, reserve_usd: 0.3}
+        resume_prompt: 'Your previous turn was interrupted. Read your notes, check your clone and PRs, and continue.'
+    safety: {count: 1, role_file: prompts/lanes/safety.md}
+environment:
+  backend: hf-sandbox
+  flavor: cpu-basic                           # each sandbox's; its idle timeout is turn_timeout + 60 s
+workers:
+  agents_per_worker: 12
+  flavor: cpu-basic
+  turn_timeout: 2h
+  worker_lifetime: 54h
+  env: {PYBOT_REPO: '${PYBOT_REPO}'}          # the task's [environment.env] reads it from the worker
+loop:
+  prompt_file: prompts/round.md
+  every: turn_end
+  notices: true
+  on: [message_board.mention, message_board.thread, message_board.channel]
+  while: {until: 48h, max_rounds: 10000}
+  final: {prompt_file: prompts/final.md, reserve_usd: 3}
+  resume_prompt: 'Your previous turn was interrupted. Read your notes, check your clone and PRs, and continue.'
+limits:
+  run_timeout_seconds: 176400                 # 48 h plus 1 h
+  agent_max_turns: 150                        # per round
+  budget_usd: 80                              # the whole run; raise it for more agents or hours
+  trial_hours: 21                             # plus turn_timeout must stay under hf-sandbox's 24 h

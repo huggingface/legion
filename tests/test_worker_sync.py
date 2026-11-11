@@ -13,7 +13,7 @@ from .worker_fakes import MemoryStore, runtime, until
 
 
 def test_parse_bucket():
-    assert parse_bucket("hf://buckets/cmpatino/flock") == ("cmpatino/flock", "")
+    assert parse_bucket("hf://buckets/ns/flock") == ("ns/flock", "")
     assert parse_bucket("hf://buckets/ns/b/runs/x/") == ("ns/b", "runs/x/")
 
 
@@ -325,7 +325,7 @@ async def test_flock_part_files_are_never_pushed_and_restore_cleans_them(tmp_pat
     await rt.sync_now("test")
     assert not any(k.endswith(".flock-part") for k in store.files)
     assert "sw/researcher/researcher-0001/workdir/f.txt" in store.files
-    # a remote .flock-part (pushed by an older worker) is not deleted by the mirror either
+    # a .flock-part already in the bucket is not deleted by the mirror either
     store.files["sw/researcher/researcher-0001/workdir/old.flock-part"] = b""
     await rt.sync.push(rt)
     assert "sw/researcher/researcher-0001/workdir/old.flock-part" in store.files
@@ -798,7 +798,7 @@ async def test_restore_after_a_crash_while_making_a_base_equals_the_source(
     rt = await _agent(tmp_path / "a", store)
     _fill(rt.workdir)
     wd = rt.workdir
-    if first:  # a run-4 bucket: the plain per-file mirror, no base yet
+    if first:  # the plain per-file mirror, no base yet
         await rt.sync.push(rt)
     else:
         await rt.sync.push(rt, rebase=True)
@@ -828,7 +828,7 @@ async def test_restore_after_a_crash_while_making_a_base_equals_the_source(
     assert not [k for k in store.files if k.startswith(PRE + "workdir/")]
 
 
-async def test_run4_bucket_restores_as_before_then_gets_a_base_and_can_go_back(tmp_path, umask022):
+async def test_plain_mirror_bucket_restores_then_gets_a_base_and_can_go_back(tmp_path, umask022):
     from flock.worker.sync import BASE_JSON, BASE_TAR
 
     store = MemoryStore()

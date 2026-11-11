@@ -7,8 +7,8 @@ there passes `FLOCK_WORKER_SECRETS_FILE=<path>` instead: an env-format file, mod
 group or other bits), read once at start. Its values take precedence over the environment, and
 every name it defines is removed from `os.environ`, so child processes that inherit the
 environment never see it. `secret_env()` is the view the worker reads secrets through: the
-file's values over the live `os.environ`. Without the variable nothing changes: secrets come
-from the environment as before. (`FLOCK_SECRETS_FILE` is the cluster's shell-sourced file and
+file's values over the live `os.environ`. Without the variable secrets come from the
+environment. (`FLOCK_SECRETS_FILE` is the cluster's shell-sourced file and
 is never read by flock.)
 
 Format: one `NAME=value` per line; blank lines and lines starting with `#` are ignored; an
@@ -22,7 +22,8 @@ import os
 import re
 import stat
 from collections import ChainMap
-from collections.abc import Mapping, MutableMapping
+from collections.abc import Iterator, Mapping, MutableMapping
+from contextlib import contextmanager
 from pathlib import Path
 
 SECRETS_FILE_ENV = "FLOCK_WORKER_SECRETS_FILE"
@@ -90,3 +91,17 @@ def load(env: MutableMapping[str, str] = os.environ) -> list[str]:
 def secret_env() -> Mapping[str, str]:
     """The file's secrets over the live process environment."""
     return ChainMap(_secrets, os.environ)  # type: ignore[arg-type]
+
+
+@contextmanager
+def exposed() -> Iterator[None]:
+    """The file's secrets in `os.environ` for the code inside, which reads them there (the upstream
+    build_trial_config and resource plugins), then removed again. Synchronous code only: an
+    await inside would let another task's subprocess inherit them."""
+    added = [name for name in _secrets if name not in os.environ]
+    os.environ.update({name: _secrets[name] for name in added})
+    try:
+        yield
+    finally:
+        for name in added:
+            os.environ.pop(name, None)

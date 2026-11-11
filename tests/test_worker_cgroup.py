@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from flock.worker.cgroup import MB, CgroupMem, fs_type
 
 
@@ -100,34 +102,12 @@ def test_fs_type_longest_mount():
     assert fs_type(Path("/opt"), mounts) == "overlay"
 
 
-def test_agent_memory_of_a_live_process_tree(tmp_path):
-    import os
-    import subprocess
-    import sys
-
-    from flock.worker.adapters.pi import _descendants
-    from flock.worker.cgroup import agent_memory
-
-    (tmp_path / "tmp").mkdir()
-    (tmp_path / "tmp" / "f").write_bytes(b"x" * MB)
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-    try:
-        m = agent_memory(os.getpid(), _descendants, tmp_path / "tmp")
-    finally:
-        child.kill()
-        child.wait()
-    assert m["pi_pss_mb"] > 0 and m["tmp_mb"] == 1.0 and m["tmpfs_root_mb"] is not None
-    assert m["tools_pss_mb"] > 0 and m["tools_by_comm"]
-    assert agent_memory(None, _descendants, tmp_path / "tmp") == {"tmp_mb": 1.0}
-
-
 def test_oom_score_adj_is_raised_for_the_sandbox(tmp_path):
     """isolation._enter raises the sandbox's OOM score (run in a child: never raise ours; 1000,
     since lowering a score that is already higher needs privilege)."""
     import subprocess
     import sys
 
-    import pytest
 
     code = ("from pathlib import Path; from flock.isolation import set_oom_score_adj as s; "
             "print(s(1000), Path('/proc/self/oom_score_adj').read_text().strip())")

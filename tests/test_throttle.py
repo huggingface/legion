@@ -1,4 +1,4 @@
-"""Worker and controller under HTTP 429 from the Space edge (pixel run 1k finding 2): the
+"""Worker and controller under HTTP 429 from the Space edge: the
 client retries with backoff honouring Retry-After, caps requests in flight, delivers events
 once, and the controller does not declare a worker dead while any of its requests get in."""
 

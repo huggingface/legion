@@ -1,4 +1,4 @@
-"""Runtime tools folder (docs/tools.md): plain Python functions next to the spec become agent tools.
+"""Runtime tools folder: plain Python functions next to the spec become agent tools.
 
 What a tool module imports from here: `Context` (the optional run-context argument, never shown
 to the model), `ToolError` (raise it to hand the model a clean error message) and `readonly`
@@ -11,10 +11,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TypeVar
 
 READONLY_ATTR = "__flock_readonly__"
-F = TypeVar("F")
 
 
 @dataclass
@@ -40,16 +38,16 @@ class Context:
     env: dict[str, str] = field(default_factory=dict)
 
 
-Ctx = Context  # the design note's spelling
+Ctx = Context
 
 
 class ToolError(Exception):
     """Raise from a tool to return `{"error": message}` to the model (no exception type prefix)."""
 
 
-def readonly(fn: F) -> F:
+def readonly[F](fn: F) -> F:
     """Mark a tool as read-only (`readonly: true` in the manifest): it changes no state.
-    Informational: nothing in flock acts on it since loop `while.idle_rounds` was removed."""
+    Informational: nothing in flock acts on it."""
     setattr(fn, READONLY_ATTR, True)
     return fn
 

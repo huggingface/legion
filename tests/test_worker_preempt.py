@@ -25,7 +25,7 @@ from flock.worker.main import PREEMPT_EXIT, ControllerClient, Worker, WorkerConf
 from .test_worker_main import WID, FakeController
 from .worker_fakes import MemoryStore, RecordingSync, ScriptedAdapter, spec, until
 
-N_AGENTS = 25  # agents_per_worker in run 3
+N_AGENTS = 25  # agents per worker
 UPLOAD_S = 0.25  # per blocking bucket call: 25 agents x 2 calls = 12.5 s if run one by one
 
 
@@ -148,17 +148,17 @@ async def test_sigusr1_preempts_within_budget_and_restart_restores(tmp_path):
 
 
 async def test_preempt_is_bounded_by_the_budget(tmp_path):
-    store = SlowStore(delay=3.0)  # a bucket that hangs past the budget and the bound below
+    store = SlowStore(delay=2.5)  # a bucket that hangs past the budget and the bound below
     ctrl = FakeController()
     ctrl.batches = [[AssignCommand(agent=n, type="researcher", spec=spec(idle_grace="10s"),
                                    restore=False) for n in names(3)]]
-    worker, _adapters, _ = make(tmp_path, ctrl, store, budget=1.5)
+    worker, _adapters, _ = make(tmp_path, ctrl, store, budget=0.5)
     run = asyncio.create_task(worker.run())
     await until(lambda: len(worker.agents) == 3, timeout=5)
     t0 = time.monotonic()
     os.kill(os.getpid(), signal.SIGTERM)  # outside compute local, SIGTERM preempts too
     assert await asyncio.wait_for(run, 10) == PREEMPT_EXIT
-    assert time.monotonic() - t0 < 2.5
+    assert time.monotonic() - t0 < 2.0  # the budget, then at least 1 s for the last reports
 
 
 def test_budget_from_env_and_host_file(tmp_path):
@@ -202,21 +202,19 @@ async def test_client_follows_a_moved_controller(tmp_path):
     await client.aclose()
 
 
-def test_worker_startup_and_folder_tool_without_home(tmp_path, monkeypatch):
+def test_worker_startup_without_home(tmp_path, monkeypatch):
     """A container with no usable HOME and a RAM /tmp: HOME, caches and TMPDIR go next to the
-    work root (/work/agents -> /work/home, /work/hf, /work/tmp), adapters never write under
-    HOME, nothing defaults to /tmp, and a folder tool (python -I subprocess) still runs."""
+    work root (/work/agents -> /work/home, /work/hf, /work/tmp), nothing is written under HOME
+    and nothing defaults to /tmp."""
     import tempfile
 
     from flock.home import home
-    from flock.tools.loader import load_dir
-    from flock.tools.runner import run_tool
 
     ro_home = tmp_path / "ro-home"
     ro_home.mkdir()
     ro_home.chmod(0o500)
     monkeypatch.setenv("HOME", str(ro_home))
-    for var in ("HF_HOME", "XDG_CACHE_HOME", "UV_CACHE_DIR", "FLOCK_LLM_HOME", "TMPDIR"):
+    for var in ("HF_HOME", "XDG_CACHE_HOME", "UV_CACHE_DIR", "TMPDIR"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(tempfile, "tempdir", None)  # restored after the test
     root = tmp_path / "work"  # what /work is in the container
@@ -256,22 +254,8 @@ def test_worker_startup_and_folder_tool_without_home(tmp_path, monkeypatch):
             assert os.environ[var] == str(root / sub), var
         assert tempfile.gettempdir() == str(root / "tmp")
         assert home() == root / "home"
-        from flock.worker.adapters.llm import llm_home
-
-        assert str(llm_home()).startswith(str(root))
         monkeypatch.delenv("HOME")  # no HOME at all: still under the work root
         assert home() == root / "home"
-
-        folder = tmp_path / "tools"
-        folder.mkdir()
-        (folder / "t.py").write_text('import tempfile\n\n\ndef where() -> str:\n'
-                                     '    """Where temp files go."""\n'
-                                     "    return tempfile.gettempdir()\n")
-        m = load_dir(folder)
-        env = {"PATH": os.environ["PATH"], "TMPDIR": os.environ["TMPDIR"]}  # the allow-list
-        r = asyncio.run(run_tool(m.get("where"), {}, tools_dir=folder, workdir=root / "wd",
-                                 env=env))
-        assert (r.output, r.error) == (str(root / "tmp"), False)
         assert list(ro_home.iterdir()) == []
         assert made == []  # nothing of ours under /tmp
     finally:
@@ -327,9 +311,6 @@ async def _ladder_worker(tmp_path, n=2):
         await worker.dispatch(PromptCommand(agent=name, prompt_id=name, text="work"))
     await until(lambda: all(rt.turn_id for rt in worker.agents.values()) and len(worker.agents) == n)
     worker.mem_knobs["FLOCK_MEM_DRAIN_DEADLINE_S"] = 0.2  # after the assigns' apply_knobs
-    pss = {name: 100.0 * (i + 1) for i, name in enumerate(names(n))}  # the last is the largest
-    worker.agent_memory = lambda tmp=True: [(rt, {"pi_pss_mb": pss[rt.name]})
-                                            for rt in worker.agents.values()]
     return worker, leaf
 
 
@@ -341,18 +322,14 @@ async def _step(worker, leaf, mb, **kw):
     await worker.relieve()
 
 
-async def test_memory_ladder_recycles_then_drains_then_preempts(tmp_path, caplog):
+async def test_memory_ladder_wants_rotation_then_drains_then_preempts(tmp_path, caplog):
     worker, leaf = await _ladder_worker(tmp_path)
-    big, small = worker.agents["researcher-0001"], worker.agents["researcher-0000"]
     await _step(worker, leaf, 5000)  # 50%: nothing
-    assert not worker.wants_rotation and not big._recycle_pending
+    assert not worker.wants_rotation
 
-    await _step(worker, leaf, 7600)  # >= 75%: rotation wanted, the largest harness recycled
-    assert worker.heartbeat_payload().wants_rotation
-    assert big._recycle_pending == "memory" and not small._recycle_pending
-    big._recycle_pending = None
-    await _step(worker, leaf, 7700)  # one recycle per FLOCK_MEM_RECYCLE_GAP_S
-    assert not big._recycle_pending and not small._recycle_pending
+    await _step(worker, leaf, 7600)  # >= 75%: rotation wanted; every agent keeps its Trial
+    assert worker.heartbeat_payload().wants_rotation and not worker.draining
+    assert all(rt.turn_id for rt in worker.agents.values())
 
     await _step(worker, leaf, 8600)  # >= 85%: a drain whose deadline cuts the running turns
     await asyncio.wait_for(worker._drained.wait(), 5)
@@ -375,29 +352,14 @@ async def test_oom_kill_delta_preempts(tmp_path):
     await until(lambda: worker.preempted)
 
 
-async def test_spike_guard_kills_the_tool_tree_only(tmp_path, monkeypatch):
-    worker, leaf = await _ladder_worker(tmp_path, n=1)
-    rt = worker.agents["researcher-0000"]
-    worker.agent_memory = lambda tmp=True: [(rt, {"pi_pss_mb": 300.0, "tools_pss_mb": 3500.0})]
-    killed = []
-    monkeypatch.setattr(wmain, "_kill_tools", lambda r: killed.append(r.name) or 4)
-    await _step(worker, leaf, 2000)  # below rotate and below spike_mb: no per-agent scan
-    assert killed == [] and rt.pss_mb is None
-    await _step(worker, leaf, 3500)  # the worker as a whole holds more than one spike
-    assert killed == ["researcher-0000"] and rt.pss_mb == 300.0
-    ev = [e.data["data"] for e in worker.outbox.take() if e.type == "tool_tree_killed"]
-    assert ev == [{"agent": "researcher-0000", "mb": 3500.0}]
-    assert not worker.draining and rt.turn_id  # the turn goes on
-
-
 def test_mem_thresholds_spec_over_env_over_default(tmp_path, monkeypatch):
     from flock.worker.cgroup import MemThresholds
 
     worker, _, _ = make(tmp_path, FakeController(), MemoryStore())
     assert MemThresholds.read(worker.mem_knob) == MemThresholds()
-    for k, v in {"FLOCK_MEM_ROTATE": "0.6", "FLOCK_MEM_SPIKE_MB": "0",
-                 "FLOCK_MEM_DRAIN_DEADLINE_S": "x", "FLOCK_MEM_DRAIN": "0.8"}.items():
+    for k, v in {"FLOCK_MEM_ROTATE": "0.6", "FLOCK_MEM_DRAIN_DEADLINE_S": "x",
+                 "FLOCK_MEM_DRAIN": "0.8"}.items():
         monkeypatch.setenv(k, v)
     worker.mem_knobs["FLOCK_MEM_DRAIN"] = 0.9  # the spec's worker.memory.drain
     th = MemThresholds.read(worker.mem_knob)
-    assert (th.rotate, th.spike_mb, th.drain_deadline_s, th.drain) == (0.6, 0, 300, 0.9)
+    assert (th.rotate, th.drain_deadline_s, th.drain) == (0.6, 300, 0.9)

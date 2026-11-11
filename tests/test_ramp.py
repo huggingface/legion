@@ -1,5 +1,5 @@
 """`types.T.replicas_ramp` on the controller: phases, stagger, the paused clock, a lowered max
-and the vLLM load guard (`hold_if`, was experiments/run4/load_guard.py)."""
+and the vLLM load guard (`hold_if`)."""
 from __future__ import annotations
 
 import pytest
@@ -26,9 +26,9 @@ def events(store, kind):
 
 
 def test_phases_follow_on_and_the_old_form_is_one_phase():
-    run4 = RampSpec(start=20, max=300, phases=[{"every": "5m", "add": 20, "until": 100},
+    ramp = RampSpec(start=20, max=300, phases=[{"every": "5m", "add": 20, "until": 100},
                                                {"every": "10m", "add": 20}])
-    s = [(t, n) for t, n, _ in run4.schedule()]
+    s = [(t, n) for t, n, _ in ramp.schedule()]
     assert s[:6] == [(0, 20), (300, 40), (600, 60), (900, 80), (1200, 100), (1800, 120)]
     assert s[-1] == (7200, 300)
     old = RampSpec(start=10, add=10, every="10m", max=50)  # stored before phases existed
@@ -39,7 +39,7 @@ def test_phases_follow_on_and_the_old_form_is_one_phase():
                 {"start": 1, "max": 5, "add": 1, "every": "1m", "stagger": "soon"}):
         with pytest.raises(ValidationError):
             RampSpec.model_validate(bad)
-    for bad in (0, -1, "bad", float("nan"), float("inf")):  # load_guard: finite and positive
+    for bad in (0, -1, "bad", float("nan"), float("inf")):  # finite and positive
         with pytest.raises(ValidationError):
             RampHold(request_s=bad)
 
@@ -66,7 +66,7 @@ def test_stagger_adds_one_agent_at_a_time(store, clock, tick):
     assert seen == [1, 1, 2, 2, 3, 3]
     [step] = events(store, "ramp_step")
     assert step["data"]["replicas"] == 3 and step["data"]["stagger_s"] == 10
-    clock.advance(600)  # later phases: stagger 0 unless they set one (waves.yaml semantics)
+    clock.advance(600)  # later phases: stagger 0 unless they set one
     tick()
     assert replicas(store) == 5
 

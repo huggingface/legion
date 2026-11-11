@@ -14,16 +14,18 @@ from flock.models import (
     root_depth,
 )
 
+from .conftest import FAKE_PROVIDERS, HB
+
 
 def spec(spawn=None, limits=None, types=None) -> SwarmSpec:
-    base = {"harness": "codex", "model": "gpt-5.5-codex"}
+    base = {**HB, "model": "fake:m"}
     types = types or {
-        "leader": {"harness": "claude", "model": "claude-opus-5-5", "replicas": 1,
+        "leader": {**HB, "model": "fake:lead", "replicas": 1,
                    "workers": {"initial": 1, "max_extra": 0}},
         "analyst": {"replicas": 0, "workers": {"initial": 1, "max_extra": 3}},
         "helper": {"replicas": 0, "workers": {"initial": 0, "max_extra": 2}},
     }
-    body = {"swarm": "s", "namespace": "ns", "bucket": "hf://buckets/ns/b",
+    body = {"swarm": "s", "namespace": "ns", "bucket": "hf://buckets/ns/b", "providers": FAKE_PROVIDERS,
             "types": {k: {**base, **v} for k, v in types.items()}}
     if spawn is not None:
         body["spawn"] = spawn
@@ -116,16 +118,6 @@ def test_workers_non_negative(workers):
         spec(types={"a": {"workers": workers}})
 
 
-def test_example_spec_loads():
-    from pathlib import Path
-
-    from flock.cli import load_spec
-
-    s = load_spec(str(Path(__file__).parent.parent / "examples" / "spawn.yaml"))
-    assert s.spawn["leader"].cap_for("analyst") == 4 and s.limits.alive == 20
-    assert "flock-agent spawn" in s.types["leader"].system_prompt
-
-
 def test_replicas_must_fit_declared_workers():
     """Review P2 (spawn_worker_cap.py): declared workers are a cap, replicas included."""
     over = {"replicas": 3, "agents_per_worker": 1, "workers": {"initial": 1, "max_extra": 0}}
@@ -137,11 +129,3 @@ def test_replicas_must_fit_declared_workers():
     spec(types={"analyst": {"replicas": 3, "agents_per_worker": 1}})  # no workers: v1
 
 
-def test_walkthrough_spec_loads():
-    from pathlib import Path
-
-    from flock.cli import load_spec
-
-    s = load_spec(str(Path(__file__).parent.parent / "examples" / "first-spawn.yaml"))
-    assert s.spawn["leader"].cap_for("analyst") == 5
-    assert all("HF_TOKEN" in t.secrets for t in s.types.values())

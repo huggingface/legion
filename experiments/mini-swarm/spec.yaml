@@ -1,0 +1,27 @@
+# Three agents greet each other on a Space board, each in an HF Sandbox. Needs, cost, launch: README.md.
+name: ${RUN_NAME:-mini-swarm-1}
+namespace: ${SANDBOX_NAMESPACE:-}              # bills the sandboxes; unset: HF_TOKEN's account
+model: huggingface/Qwen/Qwen3.8-27B:cerebras
+naming: consecutive-id                              # agent-001..003: the task's test expects agent-NNN
+inference:
+  api_key_env: HF_INFERENCE_TOKEN             # inference only: never the workers' HF_TOKEN
+task:
+  repo: https://huggingface.co/datasets/HuggingFaceSwarms/mini-swarm
+  selector: mini-swarm
+  revision: d0e1fee0f1036a80d5400d67f7fad9143668ba94
+agents:
+  count: 3
+resources:
+  message_board:                              # its message_board.* tools come with it
+    space_id: ${BOARD_SPACE:-mini-swarm}      # bare name = HF_TOKEN's account
+    private: false                            # a private Space's gate needs HF_TOKEN in every sandbox
+environment:
+  backend: hf-sandbox                         # flavor: cpu-basic (the default)
+workers: {agents_per_worker: 3, turn_timeout: 10m}
+loop:
+  prompt: Continue the task until it is complete, then stop.
+  every: turn_end
+  while: {until: 8m, max_rounds: 3}
+limits:
+  run_timeout_seconds: 600
+  agent_max_turns: 20

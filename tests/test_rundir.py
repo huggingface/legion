@@ -16,14 +16,17 @@ from flock.models import PreflightReport, PreflightResult
 from flock.ops import read_spec
 from flock.specrender import read_env_file
 
+from .conftest import FAKE_PROVIDERS, HB
+
 runner = CliRunner()
 SPEC = {
     "swarm": "${SWARM:-demo}",
     "namespace": "ns",
     "bucket": "hf://buckets/ns/sh",
-    "world": {"url": "http://${WORLD_HOST}:7860", "token_env": "CHATBOT_WORLD_TOKEN"},
+    "world": {"url": "http://${WORLD_HOST}:7860", "token_env": "PYBOT_WORLD_TOKEN"},
+    "providers": FAKE_PROVIDERS,
     "types": {"researcher": {
-        "harness": "claude", "model": "claude-opus-5-5", "replicas": 2, "agents_per_worker": 2,
+        **HB, "model": "fake:m", "replicas": 2, "agents_per_worker": 2,
         "secrets": ["ANTHROPIC_API_KEY"], "system_prompt_file": "prompts/system.md",
         "env": {"MSGBOARD_URL": "${BOARD_URL:-https://board.invalid}"}}},
 }
@@ -48,6 +51,17 @@ def _by_name(rep):
     return {c.name: c for c in rep.checks}
 
 
+def test_init_warns_of_links_that_point_outside_the_folder(tmp_path):
+    """Copied as the files they point to (a prompt shared with another experiment, say)."""
+    src = _folder(tmp_path)
+    (tmp_path / "shared.md").write_text("Shared.\n")
+    (src / "prompts" / "shared.md").symlink_to(tmp_path / "shared.md")
+    rep = rundir.init(tmp_path / "run", src, env={})
+    links = _by_name(rep)["links"]
+    assert links.warn and links.lines == [f"prompts/shared.md -> {tmp_path / 'shared.md'}"]
+    assert (tmp_path / "run" / "experiment" / "prompts" / "shared.md").read_text() == "Shared.\n"
+
+
 def test_init_creates_everything_then_changes_nothing(tmp_path):
     src, run = _folder(tmp_path), tmp_path / "runs" / "r1"
     rep = rundir.init(run, src, env={})
@@ -58,14 +72,14 @@ def test_init_creates_everything_then_changes_nothing(tmp_path):
     assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
     values = read_env_file(env_file)
     assert len(values["FLOCK_TOKEN"]) > 30 and values["FLOCK_WORLD_TOKEN"] != values["FLOCK_TOKEN"]
-    assert values["CHATBOT_WORLD_TOKEN"] == values["FLOCK_WORLD_TOKEN"]  # world.token_env
+    assert values["PYBOT_WORLD_TOKEN"] == values["FLOCK_WORLD_TOKEN"]  # world.token_env
     text = env_file.read_text()
     assert "# swarm (default: demo)\n#SWARM=demo\n" in text  # a default stays the spec's
     assert "#ANTHROPIC_API_KEY=" in text and "#HF_TOKEN=" in text  # secrets named, unset
     checks = _by_name(rep)
     assert checks["tokens"].ok and checks["spec"].ok and checks["worker slots"].ok
     assert checks["bucket"].ok is None and "no HF token" in checks["bucket"].detail
-    assert checks["providers"].ok is None and checks["board"].ok is None
+    assert checks["providers"].ok and checks["board"].ok is None
     assert checks["world"].ok is None and checks["venv"].ok and not rep.failed
 
     before = env_file.read_text()
@@ -148,10 +162,10 @@ def test_slots_count_ramp_max_and_spawned_children(tmp_path):
 
 
 def test_tokens_must_match(tmp_path):
-    data = {"world": {"token_env": "CHATBOT_WORLD_TOKEN"}}
-    ok = {"FLOCK_TOKEN": "a", "FLOCK_WORLD_TOKEN": "w", "CHATBOT_WORLD_TOKEN": "w"}
+    data = {"world": {"token_env": "PYBOT_WORLD_TOKEN"}}
+    ok = {"FLOCK_TOKEN": "a", "FLOCK_WORLD_TOKEN": "w", "PYBOT_WORLD_TOKEN": "w"}
     assert rundir.check_tokens(data, ok).ok
-    assert not rundir.check_tokens(data, {**ok, "CHATBOT_WORLD_TOKEN": "x"}).ok
+    assert not rundir.check_tokens(data, {**ok, "PYBOT_WORLD_TOKEN": "x"}).ok
     assert "FLOCK_TOKEN" in rundir.check_tokens(data, {**ok, "FLOCK_TOKEN": ""}).detail
 
 
@@ -280,7 +294,7 @@ def test_world_conformance_when_up(tmp_path, monkeypatch):
     for failed in (False, True):
         monkeypatch.setattr("flock.world.doctor.doctor",
                             lambda url, token, f=failed: (calls.append((url, token)) or ["manifest ok"], f))
-        c = rundir.check_world(spec, {"CHATBOT_WORLD_TOKEN": "w"}, run)
+        c = rundir.check_world(spec, {"PYBOT_WORLD_TOKEN": "w"}, run)
         assert c.ok is (not failed) and c.lines == ["manifest ok"]
     assert calls[:2] == ["http://node7:7860/healthz", ("http://node7:7860", "w")]
 
@@ -420,6 +434,15 @@ def test_spec_keys_never_show_a_secret_from_cluster_env():
     assert rundir.spec_keys(data)["SLURM_PARTITION"] == ("", "a (default: )")
 
 
+def test_spec_keys_name_a_harbor_specs_inference_and_resource_tokens():
+    data = {"inference": {"api_key_env": "HF_INFERENCE_TOKEN"},
+            "resources": {"world": {"token_env": "PYBOT_WORLD_TOKEN"}, "board": {}}}
+    assert rundir.spec_keys(data) == {
+        "HF_TOKEN": (None, "secret: bucket sync and the Hub"),
+        "HF_INFERENCE_TOKEN": (None, "secret: inference.api_key_env"),
+        "PYBOT_WORLD_TOKEN": (None, "secret: resources.world.token_env")}
+
+
 def test_cluster_env_is_0644_whatever_the_umask_and_the_doctor_checks_it_like_the_jobs(
         tmp_path, monkeypatch):
     src, run = _folder(tmp_path, SLURM_SPEC), tmp_path / "r"
@@ -500,3 +523,18 @@ def test_container_mounts_follow_every_symlink_hop(tmp_path):
     assert rundir.check_mounts({"VENV": str(venv), "CONTAINER_MOUNTS": str(uv.parent)}).ok
 
 
+
+
+def test_check_task_wants_commits(tmp_path):
+    from types import SimpleNamespace as NS
+
+    def spec(reg, task):
+        t = {"registry_commit": reg, "task": {"git_commit_id": task}}
+        return NS(types={"a": NS(harbor=NS(task=t))})
+
+    sha = "a" * 40
+    assert rundir.check_task(_spec(tmp_path)).ok is True
+    ok = rundir.check_task(spec(sha, sha))
+    assert ok.ok is True and "pinned" in ok.detail
+    bad = rundir.check_task(spec(sha, "main"))
+    assert bad.ok is False and "task.git_commit_id" in bad.detail

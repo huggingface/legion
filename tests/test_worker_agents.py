@@ -92,9 +92,8 @@ async def test_heartbeat_payload(tmp_path):
     hb = rt.heartbeat()
     assert hb.name == "researcher-0001" and hb.state == "idle" and hb.idle_since is not None
     assert hb.session_id == "s-1" and hb.resumed is False and hb.turns == 2
-    # cumulative usage from the harness is differenced per turn, reported cumulative by model
+    # per-turn usage from the harness, reported cumulative by model
     assert hb.tokens == {"m-1": TokenUsage(input=20, output=10, cache_read=200)}
-    assert hb.harness_estimate_usd == 0.01
     ended = [e for e in rt.outbox._q if e.type == "turn_ended"]
     assert ended[1].data["data"]["tokens"]["m-1"]["input"] == 10
     # size budget: about 100-200 bytes per agent
@@ -209,41 +208,6 @@ async def test_drain_finishes_inflight_turn(tmp_path):
     assert sync.pushed == ["researcher-0001"] and rt.phase == "none"
     await rt.prompt("too late")
     assert adapter.starts == [None] and "prompt_deferred" in event_types(rt)
-
-
-async def test_msgboard_env_injected(tmp_path):
-    class FakeIds:
-        async def env_for(self, agent, spec):
-            return {"MSGBOARD_URL": "https://mb", "MSGBOARD_TOKEN": "tok"}
-
-        def principal(self, agent):
-            return agent
-
-    rt, adapter = runtime(tmp_path, env={"FOO": "1"})
-    rt.identities = FakeIds()
-    await rt.setup(restore=False)
-    await rt.prompt("hi")
-    await until(lambda: adapter.sent == ["hi"])
-    assert adapter.envs[0] == {"FOO": "1", "MSGBOARD_URL": "https://mb", "MSGBOARD_TOKEN": "tok"}
-    assert rt.heartbeat().msgboard_principal == "researcher-0001"
-
-
-async def test_system_prompt_written(tmp_path):
-    prompt = tmp_path / "researcher.md"
-    prompt.write_text("You are a researcher.")
-    rt, adapter = runtime(tmp_path, system_prompt_file=str(prompt))
-    await rt.setup(restore=False)
-    await rt.prompt("hi")
-    await until(lambda: adapter.sent == ["hi"])
-    assert (rt.workdir / "CLAUDE.md").read_text() == "You are a researcher."
-
-
-async def test_inline_system_prompt_wins_over_file(tmp_path):
-    rt, adapter = runtime(tmp_path, system_prompt="Keep notes.md.", system_prompt_file="missing.md")
-    await rt.setup(restore=False)
-    await rt.prompt("hi")
-    await until(lambda: adapter.sent == ["hi"])
-    assert (rt.workdir / "CLAUDE.md").read_text() == "Keep notes.md."
 
 
 async def test_drain_and_unassign_during_restore_do_not_push(tmp_path):

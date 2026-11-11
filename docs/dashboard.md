@@ -7,12 +7,12 @@ viewer reads.
 
 ```yaml
 dashboard:
-  registry: hf://buckets/HuggingFaceSwarms/swarmchat-runs   # one registry bucket per task family
-  id: levels-v11                      # the row's id; default: the swarm name
-  name: Levels (v11)                  # default: the swarm name
-  title: Levels
+  registry: hf://buckets/<ns>/runs   # one registry bucket per task family
+  id: my-run                          # the row's id; default: the swarm name
+  name: My run                        # default: the swarm name
+  title: My run
   setup: Leads spawn managers, managers spawn workers.
-  viewer: https://huggingfaceswarms-flock-viewer-v8.hf.space   # required (only named, never called)
+  viewer: https://<ns>-<viewer>.hf.space   # required (only named, never called)
   # optional, written as given: viewer_public, dataset, code_repo, spec_url
 ```
 

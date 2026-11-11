@@ -1,13 +1,12 @@
 """Shared contracts between controller, worker and CLI.
 
-This file is the contract. Everything in docs/design.md section 5 ("Contracts")
+This file is the contract. Everything in docs/design.md "Contracts"
 is expressed here. Change it deliberately and update the design doc.
 """
 
 from __future__ import annotations
 
 import hashlib
-import logging
 import re
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
@@ -25,7 +24,7 @@ from flock.world.protocol import WorldManifest
 
 class _SpecLoader(yaml.SafeLoader):
     """SafeLoader with YAML 1.2 booleans: only true/false. YAML 1.1 (PyYAML's default) also
-    reads on/off/yes/no as booleans, so the documented `on: [comms.mention]` key became `True`.
+    reads on/off/yes/no as booleans, so an `on:` key became `True`.
     Dropping them in the loader protects every key and value of a spec, not just `loop.on`."""
 
 
@@ -105,16 +104,15 @@ class TypeHealth(StrEnum):
 
 AGENT_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*-\d{4,}$")
 TYPE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
-# Provider names prefix model strings ("hf:Qwen/...") and become Codex `model_providers.<name>`
-# keys, so no dots and no colons. A model string whose prefix does not look like this
-# (e.g. Bedrock's "anthropic.claude-...-v1:0") is a harness-native id, not a provider reference.
+# Provider names prefix model strings ("hf:Qwen/..."), so no dots and no colons. A model string
+# whose prefix does not look like this names no provider.
 PROVIDER_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 TOOLS_VERSION_RE = re.compile(r"^[0-9a-f]{16}$")
 SELF_HOSTED_PRICING = [0.0, 0.0, 0.0]
 
 Reasoning = Literal["off", "low", "medium", "high"]
-# `reasoning` -> OpenAI `reasoning.effort` / Codex `model_reasoning_effort`.
+# `reasoning` -> OpenAI `reasoning.effort`.
 REASONING_EFFORT = {"off": "none", "low": "low", "medium": "medium", "high": "high"}
 
 
@@ -125,7 +123,7 @@ def _pricing_row(v: list[float], where: str) -> list[float]:
 
 
 class ProviderSpec(BaseModel):
-    """Where a model is served (design.md section 5, 'Providers'). Field names follow swarmlab's
+    """Where a model is served (design.md 'Providers'). Field names follow swarmlab's
     provider params so a `providers:` block moves between the two projects.
 
     `api_key_env` names a secret / env var; the value is never in the spec. The controller
@@ -134,10 +132,8 @@ class ProviderSpec(BaseModel):
 
     type: Literal["openai_compat", "anthropic"]
     base_url: str | None = None  # openai_compat: required, ends in /v1; anthropic: API root
-    # Several servers of one model (openai_compat, the `llm` harness): each agent is pinned to one
-    # by a stable hash of its name (rendezvous hashing) and keeps it while it stays listed, so
-    # its prefix cache stays warm. `base_url` is the one-element form; with `base_urls` it
-    # defaults to the first. Pi also hashes by agent; other harnesses use `base_url`.
+    # Several servers of one model (openai_compat): preflight probes each and health scrapes each
+    # one's metrics; agents call `base_url`, which defaults to the first.
     base_urls: list[str] | None = None
     api_key_env: str
     self_hosted: bool = False  # price defaults to [0, 0, 0]; real cost is the GPU job's time
@@ -147,9 +143,8 @@ class ProviderSpec(BaseModel):
     pricing: dict[str, list[float]] = Field(default_factory=dict)  # model id ("*" = any) -> row
     timeout_s: float | None = None  # passthrough to the harness / preflight
     max_retries: int | None = None  # passthrough to the harness
-    # How the key is sent. `anthropic` providers: "x-api-key" (default, Claude Code's
-    # ANTHROPIC_API_KEY) or "bearer" (`Authorization: Bearer`, Claude Code's ANTHROPIC_AUTH_TOKEN),
-    # for gateways and proxies that only take a bearer token. `openai_compat` is always bearer.
+    # How the key is sent. `anthropic` providers: "x-api-key" (default) or "bearer"
+    # (`Authorization: Bearer`), for gateways and proxies that only take a bearer token. `openai_compat` is always bearer.
     auth: Literal["x-api-key", "bearer"] | None = None
     # Scrape `<server root>/metrics` (vLLM Prometheus text) of each base URL into the swarm's
     # health snapshots: num_requests_waiting / running, KV cache usage (docs/health.md).
@@ -191,7 +186,7 @@ class ProviderSpec(BaseModel):
             if len(set(urls)) != len(urls):
                 raise ValueError("base_urls must not repeat a URL")
             if self.type != "openai_compat":
-                raise ValueError("base_urls is for openai_compat providers (the llm harness)")
+                raise ValueError("base_urls is for openai_compat providers")
             self.base_urls = urls
             if self.base_url is None:
                 self.base_url = urls[0]
@@ -214,8 +209,8 @@ class ModelSpec(BaseModel):
 
     model: str  # "<provider>:<model id>"
     reasoning: Reasoning | None = None
-    # Raw request-body fields (swarmlab's `extra`). Sent by the `llm` harness only: Codex,
-    # Claude Code and Pi cannot add body fields, so for them it is kept for spec portability.
+    # Raw request-body fields (swarmlab's `extra`). Not sent (Harbor's Pi cannot); kept for
+    # spec portability, with a warning at launch.
     extra: dict[str, Any] | None = None
     pricing: list[float] | None = None  # overrides the provider's pricing for this alias
 
@@ -274,44 +269,7 @@ def comms_name(entry: str) -> str:
     return entry.split(":", 1)[1]
 
 
-# --------------------------------------------------------------------------- removed keys
-
-log = logging.getLogger(__name__)
-
-# Keys deleted from an extra=forbid spec model, by class name: dropped, with one warning (per
-# key, per process) when it holds a value, instead of refused, so a spec stored before the deletion still loads on
-# resume. Any other unknown key is still refused. e.g. {"LoopSpec": {"stagger"}}
-REMOVED: dict[str, set[str]] = {
-    "LoopSpec": {"first", "context", "stagger", "stop_when"},
-    "LoopWhile": {"idle_rounds", "score"},
-    "LoopFinal": {"add_tools"},
-}
-_warned: set[tuple[str, str]] = set()
-
-
-def _is_set(v: Any) -> bool:
-    """A removed key worth a warning: a stored spec's dump carries every default (`first: null`,
-    `stop_when: {all_agents_done: false}`), which says nothing."""
-    return any(_is_set(x) for x in v.values()) if isinstance(v, dict) else bool(v)
-
-
-class _Removable(BaseModel):
-    """Base of the extra=forbid spec models: drops the class's REMOVED keys before validation."""
-
-    @model_validator(mode="before")
-    @classmethod
-    def _drop_removed(cls, data: Any) -> Any:
-        gone = REMOVED.get(cls.__name__, set()) & set(data) if isinstance(data, dict) else None
-        if not gone:
-            return data
-        for k in sorted(gone):
-            if _is_set(data[k]) and (cls.__name__, k) not in _warned:
-                _warned.add((cls.__name__, k))
-                log.warning("spec: %s.%s was removed from flock; ignoring it", cls.__name__, k)
-        return {k: v for k, v in data.items() if k not in gone}
-
-
-class CommsRules(_Removable):
+class CommsRules(BaseModel):
     """Enforced by the worker before it calls the board; a refused post is a tool result
     ("refused: ..."), never a board request. Live: a re-apply reaches workers by heartbeat."""
 
@@ -344,7 +302,7 @@ class CommsRules(_Removable):
         return parse_duration(self.min_post_gap).total_seconds() if self.min_post_gap else 0.0
 
 
-class CommsSpec(_Removable):
+class CommsSpec(BaseModel):
     """Swarm-level `comms:` (docs/comms.md). `url`, `invite_env` and `channel` are resolved
     once by the controller at apply (channel name -> `channel_id`); `kickoff_file` and
     `protocols` are files next to the spec that `flock launch` inlines (`kickoff`,
@@ -355,7 +313,7 @@ class CommsSpec(_Removable):
     kind: Literal["msgboard"] = "msgboard"
     extended: bool = False  # multi-channel tools and serialized per-identity activity polling
     # extended: each agent identity's feed is polled about once per this many seconds; the
-    # worker's poll interval is max(2 s, poll_cycle_s / its agents). 60 is the run-4 draft.
+    # worker's poll interval is max(2 s, poll_cycle_s / its agents).
     poll_cycle_s: float | None = Field(default=None, ge=10, le=3600)  # unset: 300
     url: str
     # `space`: `flock init` duplicates `template` into a private per-run Space (`space`, default
@@ -415,15 +373,14 @@ class CommsSpec(_Removable):
     def _channel(cls, v: str) -> str:
         v = v.strip().lstrip("#")
         if not COMMS_NAME_RE.match(v):
-            raise ValueError(f"channel {v!r}: use the channel's name, e.g. prj-eliza-v1")
+            raise ValueError(f"channel {v!r}: use the channel's name, e.g. general")
         return v
 
     @field_validator("search")
     @classmethod
     def _search(cls, v: str | None) -> str | None:
         if v == "index":
-            raise ValueError("search: index (a per-worker FTS5 index) is not built yet; use "
-                             "search: board (docs/comms.md, cut 2)")
+            raise ValueError("search: index is not supported; use search: board (docs/comms.md)")
         return v
 
     @field_validator("wake")
@@ -455,7 +412,7 @@ def comms_tools(ts: TypeSpec, comms: CommsSpec | None) -> list[str]:
             if t != "comms:search" or comms.search]
 
 
-class DashboardSpec(_Removable):
+class DashboardSpec(BaseModel):
     """Swarm-level `dashboard:` (docs/dashboard.md): `flock init` writes the run's flock-overview
     row to `<registry>/runs/<id>.json` (id: default the swarm). The other row keys are derived from the spec."""
 
@@ -483,7 +440,7 @@ class DashboardSpec(_Removable):
 # --------------------------------------------------------------------------- world (docs/world.md)
 
 
-class WorldSpec(_Removable):
+class WorldSpec(BaseModel):
     """Swarm-level `world:` (docs/world.md): an HTTP service speaking World API v1 whose tools
     the agents get. `command` (run in `dir`) is started by the controller as a child process
     with `compute: local`; `url` names a world already running (required with `compute:
@@ -512,13 +469,6 @@ class WorldSpec(_Removable):
     # use it; resumed when it is back (docs/health.md). None: FLOCK_WORLD_DOWN_PAUSE_S or 1800;
     # 0: never. Controller only (not sent to workers).
     down_pause_s: float | None = Field(default=None, ge=0)
-
-    @model_serializer(mode="wrap")
-    def _dump(self, handler):  # unset: dumps exactly as before the key existed (older workers)
-        out = handler(self)
-        if isinstance(out, dict) and out.get("down_pause_s", 0) is None:
-            out.pop("down_pause_s")
-        return out
 
     @field_validator("command", mode="before")
     @classmethod
@@ -569,8 +519,8 @@ def world_tools(ts: TypeSpec, world: WorldSpec | None) -> list[str]:
     return world.manifest.names() if world.manifest is not None else []
 
 
-class WorkdirSpec(_Removable):
-    """Workdir size feedback and throwaway dirs (docs/pi.md "Workdir"). Sizes count what the
+class WorkdirSpec(BaseModel):
+    """Workdir size feedback and throwaway dirs (docs/design.md "Workdir"). Sizes count what the
     bucket mirror keeps (sync excludes and `ephemeral` left out). Above `soft_*` the agent gets
     a note naming its largest dirs (at most hourly); above `max_*` (default 5x soft) a
     `workdir_over_quota` event too. Nothing is ever refused: the workdir still syncs."""
@@ -601,7 +551,7 @@ class WorkdirSpec(_Removable):
         return out
 
 
-class MemoryKnobs(_Removable):
+class MemoryKnobs(BaseModel):
     """Worker memory thresholds, passed through as the FLOCK_MEM_* settings (worker.main)."""
 
     model_config = {"extra": "forbid"}
@@ -609,11 +559,9 @@ class MemoryKnobs(_Removable):
     rotate: float | None = None
     drain: float | None = None
     preempt: float | None = None
-    spike_mb: float | None = Field(default=None, gt=0)
-    recycle_gap_s: float | None = Field(default=None, ge=0)
 
 
-class WorkerKnobs(_Removable):
+class WorkerKnobs(BaseModel):
     """A type's worker settings, applied live (heartbeats) by its workers. Each one unset
     falls back to the worker's env variable, then to the built-in default (docs/slurm.md)."""
 
@@ -621,11 +569,6 @@ class WorkerKnobs(_Removable):
 
     drain_budget_s: float | None = Field(default=None, gt=0)  # FLOCK_DRAIN_BUDGET_S
     sync_interval_s: float | None = Field(default=None, ge=10)  # SYNC_INTERVAL
-    comms_rate: float | None = Field(default=None, ge=0)  # FLOCK_COMMS_RATE (0: off)
-    comms_burst: float | None = Field(default=None, ge=1)  # FLOCK_COMMS_BURST
-    comms_agent_rate: float | None = Field(default=None, ge=0)  # FLOCK_COMMS_AGENT_RATE
-    comms_agent_burst: float | None = Field(default=None, ge=1)  # FLOCK_COMMS_AGENT_BURST
-    comms_poll_cycle_s: float | None = Field(default=None, ge=10, le=3600)  # FLOCK_COMMS_POLL_CYCLE_S
     sync_exclude: list[str] | None = None  # FLOCK_SYNC_EXCLUDE (added to the defaults)
     restore_batch: int | None = Field(default=None, ge=1)  # FLOCK_RESTORE_BATCH
     restore_threads: int | None = Field(default=None, ge=1, le=32)  # FLOCK_RESTORE_THREADS
@@ -644,10 +587,10 @@ def _positive_duration(v: str) -> str:
     return v
 
 
-class RampPhase(_Removable):
+class RampPhase(BaseModel):
     """One phase of `replicas_ramp.phases`: `add` every `every` until `until` (default: the
     ramp's `max`). The next phase starts where this one reached `until`. `stagger`: the
-    agents of each of its raises join this far apart (waves.yaml's per-wave `stagger_s`)."""
+    agents of each of its raises join this far apart."""
 
     model_config = {"extra": "forbid"}
 
@@ -660,9 +603,8 @@ class RampPhase(_Removable):
     _stagger = field_validator("stagger")(_duration)
 
 
-class RampHold(_Removable):
-    """`replicas_ramp.hold_if` (was experiments/run4/load_guard.py): a step that takes the
-    swarm's replicas above `above` waits while any vLLM server of a `metrics: true` provider
+class RampHold(BaseModel):
+    """`replicas_ramp.hold_if`: a step that takes the swarm's replicas above `above` waits while any vLLM server of a `metrics: true` provider
     had `waiting` or more requests queued in every sample of the last 2 minutes, or takes
     more than `request_s` per request (running / completions per second), or its metrics
     are missing, short or reset."""
@@ -674,11 +616,11 @@ class RampHold(_Removable):
     above: int = Field(default=100, ge=0)
 
 
-class RampSpec(_Removable):
+class RampSpec(BaseModel):
     """`types.T.replicas_ramp` (docs/live.md "Ramp"): the controller raises the type's
     replicas to `start`, then by `add` every `every` (or through `phases`), up to `max`. It
     never lowers them: a lowered `max` only caps later raises. `stagger`: the `start` raise
-    adds one agent at a time this far apart (waves.yaml's wave-1 `stagger_s`, default 10 s)."""
+    adds one agent at a time this far apart (default 10 s)."""
 
     model_config = {"extra": "forbid"}
 
@@ -719,16 +661,47 @@ class RampSpec(_Removable):
         return out
 
 
+class HarborSpec(BaseModel):
+    """A `harness: harbor` type's Trial inputs, written by the compile step
+    (`flock.harbor.spec.compile_spec`), never by hand: each agent is one long-lived Harbor Trial
+    on the upstream Harbor task path. The worker composes the agent's instructions from `team`,
+    `role_text`, `roster` and the tools with the upstream `build_agent_instructions`."""
+
+    model_config = {"extra": "forbid"}
+
+    task: dict[str, Any]  # ResolvedTask.manifest(): registry commit, dataset, the pinned task
+    # a partial flock.harbor Spec (model, inference, task, environment, limits, tools_dir,
+    # tools, resources_dir) for the upstream build_trial_config and the worker's HarborHost
+    config: dict[str, Any]
+    team: str = ""  # the team_file's text
+    role: str | None = None  # the role named in the instructions (None: agents.count)
+    role_text: str = ""  # the role_file's text
+    # every replica's name -> role: with `naming: consecutive-id`, consecutive names compiled
+    # from the counts; with words empty here, and filled by the controller in each assign
+    roster: dict[str, str | None] = Field(default_factory=dict)
+    tools: dict[str, Any] = Field(default_factory=dict)  # the tool bundle's manifest
+    tools_sha256: str | None = None
+    resources: dict[str, dict[str, Any]] = Field(default_factory=dict)  # resource options
+    # the content hash of the run's tools and resources folders, packed by `flock launch` and
+    # uploaded as the swarm's tools bundle of that version: a worker fetches and unpacks it in
+    # its own run dir (None: config's tools_dir and resources_dir, read where they are)
+    folders: str | None = None
+
+    def names(self) -> list[str]:
+        """This type's replica names by slot, with `naming: consecutive-id` (its roster's)."""
+        return [a for a, r in self.roster.items() if r == self.role]
+
+
 class TypeSpec(BaseModel):
     """One agent type inside a swarm. See design.md 'Spec'."""
 
     harness: Harness
-    # Resolution order (design.md section 5): an alias under `models:`, else "<provider>:<id>"
-    # with the prefix under `providers:`, else a harness-native id (v1 behaviour).
+    # Resolution order (design.md 'Providers'): an alias under `models:`, else "<provider>:<id>"
+    # with the prefix under `providers:`; SwarmSpec refuses a model that names no provider.
     model: str
     reasoning: Reasoning | None = None  # overrides the alias's reasoning
     image: str | None = None  # None -> default worker image
-    system_prompt_file: str | None = None  # written into the workdir as CLAUDE.md / AGENTS.md
+    system_prompt_file: str | None = None  # written into the workdir as AGENTS.md
     # The file's contents, inlined by `flock launch` (the controller and workers cannot
     # read the caller's files). Wins over system_prompt_file on the worker.
     system_prompt: str | None = None
@@ -740,14 +713,15 @@ class TypeSpec(BaseModel):
     secrets: list[str] = Field(default_factory=list)  # names of secrets the job receives
     labels: dict[str, str] = Field(default_factory=dict)
     replicas: int = 0
-    agents_per_worker: int = 50  # measured default, experiments/packing
-    max_working_per_worker: int = 20  # measured default, experiments/packing
+    # measured defaults
+    agents_per_worker: int = 50
+    max_working_per_worker: int = 20
     # Agents of this type in a turn at once, swarm-wide, admitted like a provider's
     # `max_working` (both apply). Controller only.
     max_working: int | None = Field(default=None, ge=1)
     replicas_ramp: RampSpec | None = None  # controller only (docs/live.md "Ramp")
     # Worker slots for this type, declared only (docs/spawn.md). Required for a type that
-    # `spawn:` lets others create; None keeps v1's placement.
+    # `spawn:` lets others create; None: unbounded.
     workers: WorkersSpec | None = None
     # Spawned agents of this type live for one session (docs/spawn.md "Ephemeral types"): the
     # controller removes one once a heartbeat reports it idle after a turn with nothing pending
@@ -764,31 +738,11 @@ class TypeSpec(BaseModel):
     turn_timeout: str = "30m"
     max_turns: int | None = None  # per prompt, passed to the harness
     max_budget_usd: float | None = None  # per prompt, passed to the harness
-    # harness llm only: transcript size (estimated tokens) that triggers compaction; None: 32k
-    context_tokens: int | None = None
-    # harness llm only: chat-completions `tool_choice` on every call: auto (default) | required |
-    # none | bash (force that tool). A forcing value makes each prompt one action.
-    tool_choice: Literal["auto", "required", "none", "bash"] | None = None
-    # harness llm only: offer a `done` tool that ends the turn; None: on when tool_choice is
-    # required. With it a forced turn runs several steps; without it, one action per prompt.
-    done_tool: bool | None = None
-    # harness llm only: false takes the `bash` tool away (the agent keeps its folder and comms
-    # tools); None: on.
-    bash: bool | None = None
-    # harness llm only: starting chars/token for the size estimate (calibrated online from the
-    # server's prompt_tokens); None: 2.5. And the cap on stored tool output; None: 8000 chars.
-    chars_per_token: float | None = None
-    tool_output_chars: int | None = None
     persist_workdir: bool = True
     workdir: WorkdirSpec | None = None  # None: WorkdirSpec() defaults
     worker: WorkerKnobs | None = None  # None: the worker's env, then built-in defaults
     resume_prompt: str | None = None
-    # Memory (docs/pi.md "Memory"): RLIMIT_DATA (MB) on every tool command of a Pi agent
-    # (through BASH_ENV); Pi's V8 heap cap (MB, NODE_OPTIONS=--max-old-space-size). None: off.
-    tool_memory_mb: int | None = None
-    node_heap_mb: int | None = None
-    msgboard_invite: str | None = None  # name of the secret holding the invite code
-    # Tools from the swarm's tools folder (docs/tools.md): a list of function names, or "all".
+    # Tools from the swarm's tools folder: a list of function names, or "all".
     # `flock launch` refuses a name the folder does not define. None: no folder tools.
     tools: list[str] | Literal["all"] | None = None
     # Re-prompt this type's agents on a cadence, then a final round (docs/loop.md). None: off.
@@ -799,8 +753,10 @@ class TypeSpec(BaseModel):
     # World tools (docs/world.md): every tool of the swarm's `world:` unless `tools` lists
     # `world:<name>` entries (then only those); false: none.
     world: bool | None = None
+    # harness harbor only (and required there): written by the compile step
+    harbor: HarborSpec | None = None
     # Written by SwarmSpec validation (apply time), never by hand: anything given here is
-    # replaced. None means a harness-native model.
+    # replaced. None until the type is validated inside a SwarmSpec.
     resolved_model: ResolvedModel | None = None
 
     @property
@@ -863,36 +819,13 @@ class TypeSpec(BaseModel):
             raise ValueError("must be >= 0")
         return v
 
-    @field_validator("chars_per_token")
-    @classmethod
-    def _cpt(cls, v: float | None) -> float | None:
-        if v is not None and not 0.5 <= v <= 8:
-            raise ValueError("chars_per_token must be between 0.5 and 8")
-        return v
-
-    @field_validator("tool_output_chars")
-    @classmethod
-    def _toc(cls, v: int | None) -> int | None:
-        if v is not None and v < 200:
-            raise ValueError("tool_output_chars must be >= 200")
-        return v
-
-    @field_validator("context_tokens")
-    @classmethod
-    def _context_tokens(cls, v: int | None) -> int | None:
-        if v is not None and v < 256:
-            raise ValueError("context_tokens must be >= 256")
-        return v
-
     @model_validator(mode="after")
-    def _bash_llm_only(self) -> TypeSpec:
-        if self.bash is False and self.harness != Harness.llm:
-            raise ValueError(f"bash: false: only the llm harness has a bash tool to take away "
-                             f"(this type's harness is {self.harness.value})")
-        if self.bash is False and self.tool_choice == "bash":
-            raise ValueError("bash: false contradicts tool_choice: bash (it forces the bash tool)")
+    def _checks(self) -> TypeSpec:
         if self.ephemeral and self.replicas:
             raise ValueError("ephemeral: true is for spawned agents only; set replicas: 0")
+        if self.harbor is None:
+            raise ValueError("harness harbor needs the `harbor:` block (written by the compile "
+                             "step of a flock.harbor spec)")
         return self
 
     @field_validator("workers")
@@ -936,7 +869,7 @@ def size_problem(cpus: int | str | None, mem: str | None, max_cpus: int | str | 
     return None
 
 
-class SlurmResources(_Removable):
+class SlurmResources(BaseModel):
     """Per-type overrides of a `compute: slurm` spec."""
 
     model_config = {"extra": "forbid"}
@@ -948,7 +881,7 @@ class SlurmResources(_Removable):
     container_root: str | None = None
 
 
-class ComputeSpec(_Removable):
+class ComputeSpec(BaseModel):
     """Where workers run (docs/local.md). `hf-jobs` (the default): one HF Job per worker.
     `local`: one `python -m flock.worker.main` subprocess per worker on the controller's machine
     (`flock launch` runs them on this machine). `slurm`: one `sbatch` job per worker (docs/slurm.md).
@@ -976,7 +909,7 @@ class ComputeSpec(_Removable):
     venv: str | None = None  # written to the env file as FLOCK_VENV for the script
     secrets_file: str | None = None  # path only, as FLOCK_SECRETS_FILE; never read by flock
     # workers run in a container whose /tmp is RAM: every agent/harness path goes under this
-    # root instead: <root>/flock/<worker id>/{work,llm,home,hf,tmp}
+    # root instead: <root>/flock/<worker id>/{work,home,hf,tmp}
     container_root: str | None = None
     container_image: str | None = None  # an Enroot image (.sqsh): FLOCK_CONTAINER_IMAGE
 
@@ -1036,7 +969,7 @@ class SwarmSpec(BaseModel):
     providers: dict[str, ProviderSpec] = Field(default_factory=dict)
     models: dict[str, ModelSpec] = Field(default_factory=dict)
     types: dict[str, TypeSpec]
-    # The tools folder (docs/tools.md), relative to the spec file; None: `tools/` next to it.
+    # The tools folder, relative to the spec file; None: `tools/` next to it.
     # Read by `flock launch` only.
     tools_dir: str | None = None
     # Content hash of the tools bundle, written by `flock launch` after uploading the folder
@@ -1049,9 +982,11 @@ class SwarmSpec(BaseModel):
     # The run's flock-overview row (docs/dashboard.md); None: not registered.
     dashboard: DashboardSpec | None = None
     # How agents are named (docs/spawn.md "Names"): `numeric` (`<type>-NNNN`, children
-    # `<parent>-<type>-NNNN`) or `words` (`<adjective>-<noun>`, unique on the controller,
-    # reserved and never reused while the swarm exists).
-    naming: Literal["numeric", "words"] = "numeric"
+    # `<parent>-<type>-NNNN`), `words` (`<adjective>-<noun>`, unique on the controller,
+    # reserved and never reused while the swarm exists; a Harbor spec's default) or
+    # `consecutive-id` (Harbor types: their roster's names, consecutive `agent-001`, ...;
+    # children as numeric).
+    naming: Literal["numeric", "words", "consecutive-id"] = "numeric"
 
     @field_validator("tools_version")
     @classmethod
@@ -1086,16 +1021,10 @@ class SwarmSpec(BaseModel):
         for type_name, ts in self.types.items():
             ts.resolved_model = resolve_model(self, ts, type_name=type_name)
             r = ts.resolved_model
-            llm_only = ("tool_choice", "done_tool", "context_tokens", "chars_per_token",
-                        "tool_output_chars")
-            if ts.harness != Harness.llm and any(getattr(ts, f) is not None for f in llm_only):
-                raise ValueError(f"types.{type_name}: {', '.join(llm_only)} are for harness llm only")
             if r is None:
-                if ts.harness == Harness.llm:
-                    raise ValueError(
-                        f"types.{type_name}.model: harness 'llm' needs a provider-backed model "
-                        f"('<provider>:<model id>' or an alias); {ts.model!r} names no provider")
-                continue
+                raise ValueError(
+                    f"types.{type_name}.model: harness {ts.harness.value!r} needs a provider-backed "
+                    f"model ('<provider>:<model id>' or an alias); {ts.model!r} names no provider")
             want = HARNESSES[ts.harness].provider_type
             if r.provider.type != want:
                 raise ValueError(
@@ -1217,14 +1146,14 @@ class SwarmSpec(BaseModel):
 
 def resolve_model(spec: SwarmSpec, type_spec: TypeSpec, *, type_name: str = "?") -> ResolvedModel | None:
     """Resolve a type's `model`: alias under `models:` -> "<provider>:<id>" with the prefix
-    under `providers:` -> harness-native id (returns None). Raises ValueError naming the type
+    under `providers:`; None when it names no provider. Raises ValueError naming the type
     and field for an unknown provider prefix or a provider-backed model with no price."""
     where = f"types.{type_name}.model"
     alias = spec.models.get(type_spec.model)
     target = alias.model if alias else type_spec.model
     prefix, sep, model_id = target.partition(":")
     if not sep or not PROVIDER_NAME_RE.match(prefix):
-        return None  # harness-native id
+        return None  # names no provider
     if prefix not in spec.providers:
         raise ValueError(f"{where}: unknown provider {prefix!r} in {target!r}; declare it under "
                          f"providers: (known: {sorted(spec.providers)}) or use a model alias")
@@ -1258,8 +1187,8 @@ def agent_name(type_name: str, slot: int) -> str:
 
 
 class WorkersSpec(BaseModel):
-    """Worker slots a type may use: `initial` (default: what v1 computes from replicas and
-    agents_per_worker) plus up to `max_extra` opened on demand for spawned agents."""
+    """Worker slots a type may use: `initial` (default: `ceil(replicas /
+    agents_per_worker)`) plus up to `max_extra` opened on demand for spawned agents."""
 
     initial: int | None = None
     max_extra: int = 0
@@ -1272,7 +1201,7 @@ class WorkersSpec(BaseModel):
         return v
 
 
-class SpawnRule(_Removable):
+class SpawnRule(BaseModel):
     """What an agent of one type may spawn. `types` is a list (with one total `max`) or a map
     of per-type caps (`max` then an optional total cap). Caps count the parent's existing
     children. `depth` is the generations allowed below the agent (0: cannot spawn). Unknown
@@ -1361,7 +1290,7 @@ def child_name(parent: str, type_name: str, n: int) -> str:
 
 
 def initial_workers(ts: TypeSpec) -> int:
-    """v1's worker count for a type's replicas, or the declared `workers.initial`."""
+    """`ceil(replicas / agents_per_worker)` for a type, or the declared `workers.initial`."""
     if ts.workers is not None and ts.workers.initial is not None:
         return ts.workers.initial
     return -(-ts.replicas // max(1, ts.agents_per_worker))
@@ -1386,10 +1315,12 @@ def child_depth(spec: SwarmSpec, parent_depth: int, type_name: str) -> int:
 # Placeholders the worker fills in loop prompts; any other `{name}` is left as written.
 LOOP_PLACEHOLDERS = ("round", "elapsed", "wall", "spend", "cap", "why", "last_summary")
 NEEDS_WORLD = "needs a world (not in this version)"
-_LOOP_SOURCE_RE = re.compile(r"^(comms|world|artifacts)\.[A-Za-z0-9_.:*-]+$")
+# message_board.*: the message_board resource's events (harness harbor); world.* and artifacts.*
+# have no feeder now: a warning at launch
+_LOOP_SOURCE_RE = re.compile(r"^(message_board|world|artifacts)\.[A-Za-z0-9_.:*-]+$")
 
 
-class LoopWhile(_Removable):
+class LoopWhile(BaseModel):
     """While every set condition holds, the loop goes on. Type-wide: `until` (wall time since
     the loop started), `budget_usd` (the type's cost). Per agent: `max_rounds` (loop prompts),
     `agent_usd` (the agent's cost; a map is keyed by model alias or model id)."""
@@ -1437,7 +1368,7 @@ class LoopWhile(_Removable):
         return v
 
 
-class LoopFinal(_Removable):
+class LoopFinal(BaseModel):
     """One last prompt per live agent when the loop stops (any reason but `--no-final`).
     `reserve_usd` is held back from `limits.budget_usd` for it."""
 
@@ -1461,12 +1392,12 @@ class LoopFinal(_Removable):
         return self
 
 
-class LoopWake(_Removable):
+class LoopWake(BaseModel):
     """How `on:` wake-ups spend rounds (docs/loop.md, "Wake queue"). Per agent: at least
     `min_gap` between two wake prompts (wakes in between are coalesced into the next one), at
     most `max` wake prompts per run of the loop, or per `window` when set (None: no cap).
     `counts_as_round: false` keeps wake prompts out of `max_rounds` (they carry the current
-    round number and do not advance it); `true` is the behaviour before this setting."""
+    round number and do not advance it); `true`: a wake prompt is a round."""
 
     model_config = {"extra": "forbid"}
 
@@ -1490,7 +1421,7 @@ class LoopWake(_Removable):
         return v
 
 
-class LoopSpec(_Removable):
+class LoopSpec(BaseModel):
     """A type's prompting loop (docs/loop.md). The loop prompt goes on every `every`
     (`turn_end`: re-sent by the worker when a turn completes; a duration: the controller
     prompts idle agents that long after their last loop prompt) and on each `on` wake-up,
@@ -1501,7 +1432,7 @@ class LoopSpec(_Removable):
     prompt: str | None = None
     prompt_file: str | None = None  # inlined into `prompt` by `flock launch`
     every: str = "turn_end"
-    on: list[str] = Field(default_factory=list)  # comms.mention, comms.thread, world.event:*
+    on: list[str] = Field(default_factory=list)  # message_board.mention, world.event:*
     while_: LoopWhile = Field(default_factory=LoopWhile, alias="while")
     final: LoopFinal | None = None
     wake: LoopWake = Field(default_factory=LoopWake)
@@ -1515,7 +1446,7 @@ class LoopSpec(_Removable):
         if isinstance(out, dict) and "while_" in out:
             out["while"] = out.pop("while_")
         if isinstance(out, dict) and not self.notices:
-            out.pop("notices", None)  # off: dumps (and hashes) exactly as before the key existed
+            out.pop("notices", None)  # off: not dumped, so workers never see the key
         return out
 
     @field_validator("every")
@@ -1530,7 +1461,8 @@ class LoopSpec(_Removable):
     def _sources(cls, v: list[str]) -> list[str]:
         for x in v:
             if not _LOOP_SOURCE_RE.match(x):
-                raise ValueError(f"{x!r}: expected comms.<name>, world.<name> or artifacts.<name>")
+                raise ValueError(f"{x!r}: expected message_board.<name>, world.<name> "
+                                 "or artifacts.<name>")
         return v
 
     @model_validator(mode="after")
@@ -1548,8 +1480,8 @@ class LoopSpec(_Removable):
 
 
 def hit_max_turns(turn_ended: dict) -> bool:
-    """A `turn_ended` that stopped at the type's `max_turns` (llm, Pi, Codex: `reason`; Claude:
-    `subtype`). Not a failed turn for a loop: with `tool_choice: required` it is how turns end."""
+    """A `turn_ended` that stopped at the type's `max_turns` (its `reason`, or `subtype: error_max_turns`).
+    Not a failed turn for a loop."""
     return turn_ended.get("reason") == "max_turns" or turn_ended.get("subtype") == "error_max_turns"
 
 
@@ -1635,13 +1567,13 @@ class AgentHeartbeat(BaseModel):
     session_id: str | None = None
     resumed: bool | None = None  # None until the first (re)start on this worker
     tokens: dict[str, TokenUsage] = Field(default_factory=dict)  # by model, cumulative
-    harness_estimate_usd: float | None = None  # Claude's client-side total, stored not trusted
     turns: int = 0
     last_sync: datetime | None = None
     msgboard_principal: str | None = None
     rev: str | None = None  # `type_spec_rev` the agent applied at its last turn boundary
     start_rev: str | None = None  # the one its running harness process started with
     endpoint: str | None = None  # `host:port` of the model server it is pinned to (base_urls)
+    trial: dict[str, Any] | None = None  # harness harbor: {id, attempt, alive} of its Trial
 
 
 class WorkerMem(BaseModel):
@@ -1666,7 +1598,7 @@ class RestoreProgress(BaseModel):
 
 
 class ToolCounters(BaseModel):
-    """One world tool's calls since this worker process started (world/hub.py)."""
+    """One world tool's calls since this worker process started."""
 
     n: int = 0
     err: int = 0
@@ -1808,7 +1740,7 @@ class AssignCommand(BaseModel):
     parent: str | None = None  # the spawning agent, None for a replica
     # The agent's scoped controller token, injected into its harness env as FLOCK_AGENT_TOKEN.
     agent_token: str | None = None
-    tools_version: str | None = None  # the swarm's tools bundle (docs/tools.md); None: no tools
+    tools_version: str | None = None  # the swarm's tools bundle; None: no tools
     comms: CommsSpec | None = None  # the swarm's comms block (docs/comms.md), channel resolved
     world: WorldSpec | None = None  # the swarm's world (docs/world.md), manifest fetched
 
@@ -1913,7 +1845,6 @@ class AgentStatus(BaseModel):
     pending: int = 0
     tokens: dict[str, TokenUsage] = Field(default_factory=dict)
     cost_usd: float = 0.0  # derived by the controller from its price table
-    harness_estimate_usd: float | None = None
     turns: int = 0
     created_at: datetime
     last_heartbeat: datetime | None = None
@@ -2030,8 +1961,8 @@ class PreflightResult(BaseModel):
     model: str  # "<provider>:<model id>"
     provider: str
     types: list[str]
-    # "responses" (openai_compat, what Codex speaks) | "messages" (anthropic) |
-    # "chat_completions" (openai_compat for llm types)
+    # "responses" (openai_compat) | "messages" (anthropic) |
+    # "chat_completions" (openai_compat; Harbor's Pi)
     api: str
     ok: bool  # a tool call in turn one and a completed follow-up turn carrying its result
     # Not probed (e.g. the key is not in the controller's environment): neither ok nor failed.

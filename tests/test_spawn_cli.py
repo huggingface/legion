@@ -98,18 +98,6 @@ def test_agent_spawns_prompts_and_removes(agent_cli):
     assert r.exit_code == 0 and json.loads(r.output) == {"removed": [child]}
 
 
-def test_old_flock_spawn_and_remove_still_work_inside_an_agent(agent_cli):
-    """Agents of runs started before flock-agent call `flock spawn|remove` (hidden aliases)."""
-    agent_cli(LEADER)
-    r = runner.invoke(cli.app, ["spawn", "analyst", "--key", "old"])
-    assert r.exit_code == 0, r.output
-    child = r.output.strip()
-    assert child.startswith("leader-0000-analyst-")
-    r = runner.invoke(cli.app, ["remove", child])
-    assert json.loads(r.output) == {"removed": [child]}
-    assert "spawn" not in runner.invoke(cli.app, ["--help"]).output
-
-
 def test_operator_names_swarms_or_agents(agent_cli):
     agent_cli(None)
     r = run("spawn", "analyst", "--parent", LEADER)

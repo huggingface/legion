@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import shlex
 import sys
 import time
 from collections.abc import Mapping
@@ -23,30 +22,40 @@ API_PORT = 7860
 STATUS_PORT = 7861
 ALIAS = "controller"
 IMAGE = "python:3.12-slim"
-HF_HUB_VERSION = "2.2.0"  # matches jobs.HF_HUB_VERSION (workers)
 DATA_DIR = "/state/flock"  # job disk: ephemeral, synced to FLOCK_STATE_URL
 ROLE_LABEL = "flock-role"
 GROUP_LABEL = "flock-group"
 DEFAULT_GROUP = "flock"
 
+# As the workers' (flock.controller.jobs): msgboard is private on GitHub (a job cannot clone it),
+# so its wheel and uv.lock's versions come in harbor-deps.tar next to flock's wheel
+# (scripts/publish-wheel.sh); uv installs flock with those pins and msgboard's wheel.
 _BOOTSTRAP = r"""set -euo pipefail
 t0=$(date +%s)
-pip() { python3 -m pip install -q --no-cache-dir --root-user-action=ignore "$@"; }
-pip "huggingface_hub=={hub}"
+python3 -m pip install -q --no-cache-dir --root-user-action=ignore huggingface_hub uv
 mkdir -p /opt/wheels "$FLOCK_DATA"
-WHEEL=/opt/wheels/$(basename "$FLOCK_WHEEL_URL")
-python3 -c 'import sys; from huggingface_hub import HfApi
+fetch() {  # fetch hf://buckets/<namespace>/<bucket>/<path> <file>
+  python3 -c 'import sys; from huggingface_hub import HfApi
 ns, name, path = sys.argv[1].removeprefix("hf://buckets/").split("/", 2)
 HfApi().download_bucket_files(f"{ns}/{name}", [(path, sys.argv[2])], raise_on_missing_files=True)
-' "$FLOCK_WHEEL_URL" "$WHEEL"
-pip "$WHEEL[controller]" "huggingface_hub=={hub}"
+' "$1" "$2"
+}
+WHEEL=/opt/wheels/$(basename "$FLOCK_WHEEL_URL")
+fetch "$FLOCK_WHEEL_URL" "$WHEEL"
+fetch "${FLOCK_WHEEL_URL%/*}/harbor-deps.tar" /opt/wheels/harbor-deps.tar || {
+  echo "bootstrap: no harbor-deps.tar next to the wheel: scripts/publish-wheel.sh" >&2
+  exit 1; }
+tar -xf /opt/wheels/harbor-deps.tar -C /opt/wheels
+echo "msgboard @ file://$(ls /opt/wheels/msgboard-*.whl)" > /opt/wheels/overrides.txt
+uv pip install -q --system --no-cache "$WHEEL[controller]" -c /opt/wheels/constraints.txt \
+  --overrides /opt/wheels/overrides.txt
 echo "bootstrap: $(($(date +%s) - t0)) s; $(python3 --version)"
 exec flock-controller
 """
 
 
 def bootstrap_command() -> list[str]:
-    return ["bash", "-c", _BOOTSTRAP.replace("{hub}", shlex.quote(HF_HUB_VERSION))]
+    return ["bash", "-c", _BOOTSTRAP]
 
 
 def default_state_url(wheel_url: str, group: str) -> str:
@@ -83,7 +92,7 @@ def run_job_args(
         "FLOCK_JOB_LABELS": job_labels,
         "PYTHONUNBUFFERED": "1",
     }
-    return {
+    out = {
         "image": IMAGE,
         "command": bootstrap_command(),
         "env": env,
@@ -92,24 +101,32 @@ def run_job_args(
         "timeout": timeout,
         "labels": {ROLE_LABEL: "controller", GROUP_LABEL: group},
         "expose": [API_PORT],
-        "expose_public": [STATUS_PORT],
         "network_group": group,
         "network_aliases": [ALIAS],
         "namespace": namespace,
     }
+    if public_status_supported():
+        out["expose_public"] = [STATUS_PORT]
+    return out
+
+
+def public_status_supported() -> bool:
+    """huggingface_hub 1.33 (uv.lock's pin, Harbor's) has no `expose_public`; the public status
+    page is optional, so without it the controller starts and the page is just not exposed."""
+    import inspect
+
+    from huggingface_hub import HfApi
+
+    return "expose_public" in inspect.signature(HfApi.run_job).parameters
 
 
 def collect_secrets(env: Mapping[str, str], extra: list[str]) -> dict[str, str]:
-    """FLOCK_TOKEN, HF_TOKEN, ANTHROPIC_API_KEY (or ANTHROPIC_KEY, as deploy-space.sh) and
-    every `--secret NAME` from the local environment. Values are never printed."""
+    """FLOCK_TOKEN, HF_TOKEN and every `--secret NAME` from the local environment. Values are never printed."""
     out = {}
     for name in ("FLOCK_TOKEN", "HF_TOKEN"):
         if not env.get(name):
             raise SystemExit(f"{name} must be set in the environment")
         out[name] = env[name]
-    anthropic = env.get("ANTHROPIC_API_KEY") or env.get("ANTHROPIC_KEY")
-    if anthropic:
-        out["ANTHROPIC_API_KEY"] = anthropic
     for name in extra:
         if not env.get(name):
             raise SystemExit(f"--secret {name}: not set in the environment")
@@ -205,7 +222,10 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] = os.environ) -> 
     job = api.run_job(**kwargs)
     print(f"controller job: {job.id} ({job.url})")
     print(f"API (HF token via the jobs proxy): https://{job.id}--{API_PORT}.hf.jobs")
-    print(f"status page (public, read-only):  https://{job.id}--{STATUS_PORT}.hf.jobs")
+    if "expose_public" in kwargs:
+        print(f"status page (public, read-only):  https://{job.id}--{STATUS_PORT}.hf.jobs")
+    else:
+        print("status page: not exposed (this huggingface_hub has no expose_public)")
     print(f"workers: http://${{HF_NETWORK_GROUP_PREFIX}}{ALIAS}:{API_PORT} in group {a.group}")
     print(f"export FLOCK_URL=https://{job.id}--{API_PORT}.hf.jobs")
     return 0

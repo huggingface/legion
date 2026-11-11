@@ -52,8 +52,8 @@ def test_verdict_levels():
 
 def _vllm_spec() -> SwarmSpec:
     data = make_spec(researcher={"replicas": 2}).model_dump(mode="json")
-    data["providers"] = {"v": {"type": "openai_compat", "base_urls": ["http://g1/v1", "http://g2/v1"],
-                               "api_key_env": "K", "self_hosted": True, "metrics": True}}
+    data["providers"]["v"] = {"type": "openai_compat", "base_urls": ["http://g1/v1", "http://g2/v1"],
+                              "api_key_env": "K", "self_hosted": True, "metrics": True}
     return SwarmSpec.model_validate(data)
 
 
@@ -77,7 +77,7 @@ async def test_dead_server_flags_its_agents(store, clock, tick):
     h.tick(t)
     body = h.latest("demo")["body"]
     assert body["alerts"] == [] and fs.dead_servers({"body": body}) == set()  # one miss: no alert
-    assert body["providers"]["v"] == {"waiting": 1.0, "running": 2.0}  # summed, as before
+    assert body["providers"]["v"] == {"waiting": 1.0, "running": 2.0}  # summed
     await h.probe(t)
     h.tick(t)
     body = h.latest("demo")["body"]
@@ -186,7 +186,6 @@ def test_normalise_swarm_events():
         ("worker.sync_failed", None, "s-w-w0002", None)]
     assert got[0] == {"name": "worker.crashed", "ts": "2026-11-03T10:00:00+00:00", "swarm": "s",
                       "worker": "s-w-w0001", "data": {"target": "s-w-w0001", "detail": "exit 1"}}
-    assert fs.event_name("comms_mention", "agent") == "comms.mention"
     assert fs.event_name("turn_interrupted", "agent") == "agent.turn_interrupted"
 
 
@@ -303,29 +302,6 @@ def test_events_of_a_removed_agent(monkeypatch):
     monkeypatch.setattr(Client, "_call", call)
     (page,) = fs.events(Client(), "w-0001")
     assert page["events"][0]["name"] == "agent.turn_ended" and page["events"][0]["agent"] == "w-0001"
-
-
-def test_hidden_old_events_and_agents(monkeypatch):
-    """Prompts in resumed runs still call them: raw JSONL and the old agents table."""
-    evs = [{"type": "spawned", "ts": "t", "agent": "l-0000", "data": {"child": "l-0000-a-0001"}}]
-    rows = [{"name": "l-0000-a-0001", "state": "working", "provider": None, "worker": "w0",
-             "turns": 2, "pending": 0, "cost_usd": 0.01, "last_heartbeat": "t"}]
-    seen = []
-
-    def call(_, method, path, **kw):
-        seen.append(path)
-        return {"agents": rows, "cursor": None} if path.endswith("/agents") else \
-            {"events": evs, "next": 1}
-
-    monkeypatch.setattr(Client, "_call", call)
-    r = runner.invoke(cli.app, ["events", "l-0000", "--wait", "--timeout", "0"])
-    assert r.exit_code == 0 and json.loads(r.stdout.splitlines()[0]) == evs[0]
-    assert "  events " not in runner.invoke(cli.app, ["--help"]).output  # hidden
-    r = runner.invoke(cli.app, ["agents", "s", "--parent", "l-0000"])
-    lines = r.output.splitlines()
-    assert lines[0].split() == ["name", "state", "provider", "worker", "turns", "pending", "cost",
-                                "last_heartbeat"]
-    assert lines[1].split()[:3] == ["l-0000-a-0001", "working", "-"]  # awk '$2=="working"'
 
 
 def test_status_prints_the_age_of_heartbeat_and_snapshot_numbers(monkeypatch):

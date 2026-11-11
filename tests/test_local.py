@@ -13,7 +13,6 @@ import re
 import sys
 import time
 from datetime import UTC, datetime
-from pathlib import Path
 
 import httpx
 import pytest
@@ -22,7 +21,7 @@ from typer.testing import CliRunner
 
 from flock import cli
 from flock.client import connect
-from flock.controller import localrun
+from flock.controller import local, localrun
 from flock.controller.api import create_app
 from flock.controller.local import LocalJobsClient
 from flock.controller.reconcile import Settings, reconcile
@@ -31,17 +30,17 @@ from flock.current import clear_current, read_current, write_current
 from flock.models import ComputeSpec, SwarmSpec
 from flock.worker.main import Worker, WorkerConfig
 
-from .conftest import TOKEN, make_spec
+from .conftest import HB, TOKEN, make_spec
 
 runner = CliRunner()
-LLM_TYPE = {"harness": "llm", "model": "fake:m", "replicas": 2}
+TYPE = {**HB, "model": "fake:m", "replicas": 2}
 FAKE = {"fake": {"type": "openai_compat", "base_url": "http://127.0.0.1:9/v1",
                  "api_key_env": "FAKE_KEY", "self_hosted": True}}
 
 
 def local_spec(**kw) -> SwarmSpec:
     return SwarmSpec.model_validate({"swarm": "loc", "compute": "local", "providers": FAKE,
-                                     "types": {"w": {**LLM_TYPE, **kw}}})
+                                     "types": {"w": {**TYPE, **kw}}})
 
 
 # --------------------------------------------------------------------------- spec
@@ -50,30 +49,18 @@ def local_spec(**kw) -> SwarmSpec:
 def test_compute_defaults_to_hf_jobs_and_keeps_job_fields_required():
     spec = make_spec()
     assert spec.compute.kind == "hf-jobs"
-    types = {"a": {"harness": "claude", "model": "m"}}
+    types = {"a": TYPE}
     with pytest.raises(ValueError, match="namespace and bucket required for compute hf-jobs"):
-        SwarmSpec.model_validate({"swarm": "s", "types": types})
+        SwarmSpec.model_validate({"swarm": "s", "providers": FAKE, "types": types})
     with pytest.raises(ValueError, match="bucket required"):
-        SwarmSpec.model_validate({"swarm": "s", "namespace": "n", "types": types})
-
-
-def test_example_switches_compute_with_one_line():
-    from flock.cli import load_spec
-
-    path = Path(__file__).parent.parent / "examples" / "local.yaml"
-    assert load_spec(str(path)).compute.kind == "local"
-    text = path.read_text()
-    assert "\ncompute: local\n" in text
-    jobs = SwarmSpec.model_validate(yaml.safe_load(text.replace("\ncompute: local\n",
-                                                                "\ncompute: hf-jobs\n")))
-    assert jobs.compute.kind == "hf-jobs" and jobs.namespace and jobs.bucket
+        SwarmSpec.model_validate({"swarm": "s", "namespace": "n", "providers": FAKE, "types": types})
 
 
 def test_compute_local_short_and_long_form():
     short = local_spec()
     assert short.compute.kind == "local" and short.namespace == "" and short.bucket == ""
     long = SwarmSpec.model_validate({"swarm": "s", "compute": {"kind": "local"},
-                                     "types": {"a": {"harness": "claude", "model": "m"}}})
+                                     "providers": FAKE, "types": {"a": TYPE}})
     assert long.compute.kind == "local"
     again = SwarmSpec.model_validate(short.model_dump(mode="json"))  # stored form round-trips
     assert again.compute.kind == "local"
@@ -87,7 +74,7 @@ def test_compute_local_short_and_long_form():
 def test_liveness_defaults_per_backend_and_overrides():
     assert make_spec().compute.liveness() == ComputeSpec(kind="slurm").liveness() == (90, 180, 30)
     assert local_spec().compute.liveness() == (15, 30, 2)
-    assert local_spec().model_dump(mode="json")["compute"] == {"kind": "local"}  # stored as before
+    assert local_spec().model_dump(mode="json")["compute"] == {"kind": "local"}  # only the set keys
     c = ComputeSpec(kind="local", worker_dead_after="1m", crash_backoff="500ms")
     assert c.liveness() == (15, 60, 0.5)
     with pytest.raises(ValueError, match=re.escape("(90s (default)) must be shorter than "
@@ -173,7 +160,6 @@ def test_local_jobs_env_contract_and_stages(tmp_path):
     assert seen["FLOCK_URL"] == "http://127.0.0.1:1"  # the controller's, not the caller's
     assert seen["FLOCK_TOKEN"] == "tok" and seen["FAKE_KEY"] == "k"  # secrets arrive as env
     assert seen["WORK_ROOT"] == str(tmp_path.resolve() / "agents")
-    assert seen["FLOCK_LLM_HOME"] == str(tmp_path.resolve() / "state" / "llm")
     assert seen["FLOCK_LOCAL_PARENT_PID"] == str(os.getpid())
     assert seen["HEARTBEAT_INTERVAL"] == "1"  # the type's env wins over the local default
     assert seen["HOME"] == "/h"
@@ -184,7 +170,8 @@ def test_local_jobs_env_contract_and_stages(tmp_path):
     assert jobs.inspect("local-9999", namespace="").stage == "DELETED"
 
 
-def test_local_jobs_error_cancel_and_timeout(tmp_path):
+def test_local_jobs_error_cancel_and_timeout(tmp_path, monkeypatch):
+    monkeypatch.setattr(local, "HARBOR_STOP_GRACE", 0.0)  # the timeout's SIGKILL follows at once
     jobs = LocalJobsClient(root=tmp_path, command=_script(DUMP_ENV),
                            base_env={"PATH": os.environ["PATH"]})
     ts = local_spec().types["w"]
@@ -359,7 +346,7 @@ def test_tracker_idle(tmp_path):
     assert snap["completed"] == 2 and tr.idle(snap)
     assert "completed 2" in localrun.status_line(snap, 3)
     # an agent removed with a turn still open (an ephemeral child whose turn_ended was never
-    # read): its open turn goes with its row and does not block idle (chatbot-v1 run 2)
+    # read): its open turn goes with its row and does not block idle
     store.insert_agent("w-gone", "loc", "w", 9, now)
     _events(store, "w-gone", "turn_started")
     assert not tr.idle(tr.snapshot(spec, now)) and "w-gone" in tr.open_turns
@@ -419,33 +406,17 @@ def test_run_local_refuses_a_jobs_spec(tmp_path):
         asyncio.run(localrun.run_local(opts))
 
 
-# --------------------------------------------------------------------------- review of #13
+# --------------------------------------------------------------------------- local env
 
 
-def test_local_env_keeps_harness_overrides_and_isolates_pi(tmp_path):
-    from flock.worker.adapters.pi import PiModelConfig, write_models_json
-
-    home = tmp_path / "home"
-    user_pi = home / ".pi" / "agent"
-    user_pi.mkdir(parents=True)
-    (user_pi / "models.json").write_text('{"providers": {"mine": {}}}')
-    base = {"HOME": str(home), "FLOCK_CLAUDE_CLI": "/c/claude", "FLOCK_CODEX_CLI": "/c/codex",
-            "FLOCK_PI_CLI": "/c/pi", "FLOCK_URL": "http://mine", "FLOCK_TOKEN": "my-token",
-            "FLOCK_AGENT_TOKEN": "agent", "FLOCK_CURRENT": "/x"}
+def test_local_env_keeps_harness_overrides_and_drops_the_callers_flock_env(tmp_path):
+    base = {"HOME": str(tmp_path), "FLOCK_PROMPTS_DIR": "/p", "FLOCK_URL": "http://mine",
+            "FLOCK_TOKEN": "my-token", "FLOCK_AGENT_TOKEN": "agent", "FLOCK_CURRENT": "/x"}
     jobs = LocalJobsClient(root=tmp_path / "run", base_env=base)
     a = jobs.process_env({"WORKER_ID": "s-a-w0000", "TYPE": "a"}, {})
-    b = jobs.process_env({"WORKER_ID": "s-b-w0000", "TYPE": "b"}, {})
-    for k in ("FLOCK_CLAUDE_CLI", "FLOCK_CODEX_CLI", "FLOCK_PI_CLI"):
-        assert a[k] == base[k]  # documented executable overrides survive
+    assert a["FLOCK_PROMPTS_DIR"] == base["FLOCK_PROMPTS_DIR"]  # documented override survives
     for k in ("FLOCK_URL", "FLOCK_TOKEN", "FLOCK_AGENT_TOKEN", "FLOCK_CURRENT"):
         assert k not in a  # the caller's connection and auth never reach a worker
-    pa, pb = Path(a["PI_CODING_AGENT_DIR"]), Path(b["PI_CODING_AGENT_DIR"])
-    assert pa != pb and tmp_path / "run" in pa.parents and tmp_path / "run" in pb.parents
-    write_models_json(pa, PiModelConfig("http://a/v1", "KA", "model-a", "a"))
-    write_models_json(pb, PiModelConfig("http://b/v1", "KB", "model-b", "b"))
-    assert list(json.loads((pa / "models.json").read_text())["providers"]) == ["a"]
-    assert list(json.loads((pb / "models.json").read_text())["providers"]) == ["b"]
-    assert json.loads((user_pi / "models.json").read_text()) == {"providers": {"mine": {}}}
 
 
 def _pid_dead(pid: int) -> bool:
@@ -457,9 +428,10 @@ def _pid_dead(pid: int) -> bool:
     return not _alive(pid)
 
 
-def test_stop_kills_detached_descendants_of_a_stubborn_worker(tmp_path):
-    # a "worker" that ignores SIGTERM and has a tool in its own session (as the llm harness
-    # starts bash): the group SIGKILL misses the tool, the descendant sweep does not
+def test_stop_kills_detached_descendants_of_a_stubborn_worker(tmp_path, monkeypatch):
+    # a "worker" that ignores SIGTERM and has a child in its own session: the group SIGKILL
+    # misses the child, the descendant sweep does not
+    monkeypatch.setattr(local, "HARBOR_STOP_GRACE", 0.0)
     code = ("import signal, subprocess, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
             "p = subprocess.Popen(['sleep', '600'], start_new_session=True); "
             "open('tool.pid', 'w').write(str(p.pid)); time.sleep(600)")
@@ -479,7 +451,7 @@ def test_stop_kills_detached_descendants_of_a_stubborn_worker(tmp_path):
 async def test_live_budget_put_stops_the_run_and_lands_in_the_bundle(tmp_path):
     spec = SwarmSpec.model_validate({
         "swarm": "budget", "compute": "local", "limits": {"budget_usd": 10},
-        "types": {"w": {"harness": "claude", "model": "m", "replicas": 0}}})
+        "providers": FAKE, "types": {"w": {**TYPE, "replicas": 0}}})
     out = io.StringIO()
     task = asyncio.create_task(localrun.run_local(localrun.RunOptions(
         spec=spec, data_dir=tmp_path, until=30, refresh=0.1, grace=0, out=out)))
