@@ -17,7 +17,6 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
-from urllib.parse import parse_qs
 
 import httpx
 from fastapi import APIRouter, Body, Depends, FastAPI, Header, HTTPException
@@ -754,26 +753,6 @@ def create_app(
         return request_stats["mw"]
 
     app.add_middleware(make_stats)
-
-    def note_arrival(app):
-        """Pure ASGI, on the event loop: a worker's request counts as a sign of life when it
-        arrives, not when a busy controller gets to it (Store.arrived)."""
-
-        async def asgi(scope, receive, send):
-            path = scope.get("path", "") if scope["type"] == "http" else ""
-            if path.startswith("/workers/") and path.count("/") >= 3:
-                hdrs = dict(scope["headers"])
-                given = [hdrs.get(b"x-flock-token", b""),
-                         hdrs.get(b"authorization", b"").removeprefix(b"Bearer ")]
-                if token and any(secrets.compare_digest(g, token.encode()) for g in given if g):
-                    inc = parse_qs(scope.get("query_string", b"").decode()).get("incarnation")
-                    store.arrived[path.split("/")[2]] = (inc[0] if inc else None,
-                                                         clock().timestamp())
-            await app(scope, receive, send)
-
-        return asgi
-
-    app.add_middleware(note_arrival)
 
     def auth(
         request: Request,
