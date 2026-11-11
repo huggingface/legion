@@ -660,6 +660,9 @@ def _refresh_worker(p: _Pass, spec: SwarmSpec, w: Row, ts: TypeSpec | None) -> N
     if st.stage == "SCHEDULING":  # queued (Slurm, HF Jobs): the launch timeout starts later
         p.store.update_worker(w["id"], started_at=p.now)
     hb, seen = w["last_heartbeat"], last_seen(w)
+    inc, arrived = p.store.arrived.get(w["id"], (None, 0.0))
+    if seen is not None and inc in (None, w["incarnation"]):  # a request still queued here
+        seen = max(seen, arrived)
     silent = seen is not None and p.now - seen > p.lv.dead_after  # no heartbeat, poll or event post
     start = w["started_at"] or w["launched_at"]
     never = hb is None and st.stage != "SCHEDULING" and p.now - start > LAUNCH_TIMEOUT

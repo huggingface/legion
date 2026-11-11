@@ -17,12 +17,14 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
+from urllib.parse import parse_qs
 
 import httpx
 from fastapi import APIRouter, Body, Depends, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field, TypeAdapter
 from starlette.background import BackgroundTask
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 
 from flock.controller.comms import CommsError
@@ -87,6 +89,11 @@ log = logging.getLogger(__name__)
 MAX_WAIT = 30.0
 ADMIT_GRACE = 10.0  # s, a heartbeat this soon after an admission may predate the prompt
 SEEN_EVERY = 5.0  # s, min gap between last_seen writes per worker
+# Event batches processed at once (threads), out of the threadpool's 40: the rest stay free for
+# heartbeats and operator calls. A batch that waits EVENT_WAIT s for a slot gets 503, which the
+# worker sends again after a backoff (worker/main.py UNSENT_STATUSES).
+EVENT_SLOTS = 8
+EVENT_WAIT = 10.0
 _COMMAND = TypeAdapter(Annotated[Command, Field(discriminator="kind")])
 
 
@@ -748,6 +755,26 @@ def create_app(
 
     app.add_middleware(make_stats)
 
+    def note_arrival(app):
+        """Pure ASGI, on the event loop: a worker's request counts as a sign of life when it
+        arrives, not when a busy controller gets to it (Store.arrived)."""
+
+        async def asgi(scope, receive, send):
+            path = scope.get("path", "") if scope["type"] == "http" else ""
+            if path.startswith("/workers/") and path.count("/") >= 3:
+                hdrs = dict(scope["headers"])
+                given = [hdrs.get(b"x-flock-token", b""),
+                         hdrs.get(b"authorization", b"").removeprefix(b"Bearer ")]
+                if token and any(secrets.compare_digest(g, token.encode()) for g in given if g):
+                    inc = parse_qs(scope.get("query_string", b"").decode()).get("incarnation")
+                    store.arrived[path.split("/")[2]] = (inc[0] if inc else None,
+                                                         clock().timestamp())
+            await app(scope, receive, send)
+
+        return asgi
+
+    app.add_middleware(note_arrival)
+
     def auth(
         request: Request,
         authorization: str = Header(default=""),
@@ -787,7 +814,7 @@ def create_app(
         return a
 
     @app.get("/healthz")
-    def healthz() -> dict:
+    async def healthz() -> dict:  # on the event loop: answers while every thread is busy
         mw = request_stats.get("mw")
         return {"ok": True, **(stats() if stats else {}), "process": process_stats(),
                 "requests": mw.snapshot() if mw else {}}
@@ -1562,8 +1589,23 @@ def create_app(
                 out["type_spec"], out["spec_rev"] = wts.model_dump(mode="json"), rev
         return out
 
+    event_slots = asyncio.Semaphore(EVENT_SLOTS)
+
     @api.post("/workers/{worker_id}/events")
-    def post_events(worker_id: str, batch: EventBatch, incarnation: str | None = None) -> dict:
+    async def post_events(worker_id: str, batch: EventBatch,
+                          incarnation: str | None = None) -> dict:
+        try:
+            async with asyncio.timeout(EVENT_WAIT):
+                await event_slots.acquire()
+        except TimeoutError:
+            raise HTTPException(503, "busy: event batch not processed, send it again",
+                                headers={"Retry-After": "5"}) from None
+        try:
+            return await run_in_threadpool(ingest_events, worker_id, batch, incarnation)
+        finally:
+            event_slots.release()
+
+    def ingest_events(worker_id: str, batch: EventBatch, incarnation: str | None) -> dict:
         w = worker_or_404(worker_id)
         if not stale(w, incarnation):  # a replaced job's last events are still accepted
             seen(w)
