@@ -39,6 +39,8 @@ FIXED = ("bot/__init__.py", "bot/__main__.py", "bot/runtime.py", "bot/modules/__
 # A module the loader finds: bot/modules/<name>.py or a package bot/modules/<name>/__init__.py.
 MODULE_FILE = re.compile(r"bot/modules/(?:[^/]+\.py|[^/]+/__init__\.py)")
 MAX_FILE_BYTES = int(os.environ.get("CHATBOT_MAX_FILE_BYTES", str(1 << 20)))
+# A PR upload deleting more files than this is refused: usually a clone restored incompletely.
+MAX_DELETED_FILES = int(os.environ.get("CHATBOT_MAX_DELETED_FILES", "1000"))
 EXCLUDE = ("__pycache__/", "*.pyc", ".venv/", ".pytest_cache/", ".mypy_cache/", ".ruff_cache/",
            "*.egg-info/", ".DS_Store")
 MAX_REQUESTS = 5000  # open_pr idempotency keys kept for worker retries (oldest dropped)
@@ -1264,7 +1266,11 @@ class Chatbot4World(World):
         with self._checkout_slot(), tempfile.TemporaryDirectory(dir=self.tmp_dir) as tmp:
             tree = Path(tmp) / "tree"
             self.repo.checkout(base, tree)
-            self._files(snapshot, tree)
+            deleted = sum(not (tree / name).exists() for name in self._files(snapshot, tree))
+            if deleted > MAX_DELETED_FILES:
+                raise ToolError(f"this upload deletes {deleted} files; your clone looks incomplete. "
+                                "Re-clone main and redo your change (a deliberate large removal "
+                                "needs the stewards)", "mass_delete")
             self._contract(tree, self.repo.staged(tree))
             # An older base is rebased onto main here, before anything exists on the Hub.
             return self.repo.commit(tree, base, agent.name, title, onto=main)

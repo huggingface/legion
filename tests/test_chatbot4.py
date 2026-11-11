@@ -17,7 +17,7 @@ import pytest
 
 from flock.world import Agent, ToolError
 from flock.world.server import create_app
-from flock.world.workspace import capture
+from flock.world.workspace import capture, capture_v2
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "worlds/chatbot4"))
@@ -340,6 +340,7 @@ def test_upload_respects_ignores_size_limit_and_compiles_only_changes(setup, mon
             ".pytest_cache/v/cache/lastfailed": b"{}"}
     snapshot["files"].update({k: base64.b64encode(v).decode() for k, v in junk.items()})
     snapshot["files"].pop(".gitignore")  # the world's default excludes still apply
+    monkeypatch.setattr("chatbot4.MAX_DELETED_FILES", 1)  # dropping .gitignore is 1 deletion: allowed
     checked = []
     real = world._contract
     monkeypatch.setattr(world, "_contract", lambda tree, names=None: (checked.append(names),
@@ -357,7 +358,15 @@ def test_upload_respects_ignores_size_limit_and_compiles_only_changes(setup, mon
     with pytest.raises(ToolError, match="file too large"):
         world.call_workspace("run_bot", {"ref_or_path": "chatbot-swarm", "lines": ["hi"]},
                              Agent("cedar"), capture(clone.parent, clone.name))
-    assert world.repo.hub.n == 1  # the refused upload created no Hub PR
+    big.unlink()
+    (clone / "README.md").unlink()
+    (clone / "AGENTS.md").unlink()
+    for snap in (capture, capture_v2):  # an incomplete clone, sent as v1 files or a v2 patch
+        with pytest.raises(ToolError, match="deletes 2 files; your clone looks incomplete") as err:
+            world.call_workspace("open_pr", {"branch": "gone", "title": "Tidy", "description": "tested"},
+                                 Agent("cedar"), snap(clone.parent, clone.name))
+        assert err.value.code == "mass_delete"
+    assert world.repo.hub.n == 1  # the refused uploads created no Hub PR
 
 
 def test_open_pr_from_an_older_main_rebases_or_refuses_before_the_hub(setup):
