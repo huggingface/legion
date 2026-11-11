@@ -26,6 +26,7 @@ from flock.harbor import sources
 from flock.ops import SpecError, check_spec, read_spec
 
 EXPERIMENTS = Path(__file__).parents[2] / "experiments"
+FIXTURES = Path(__file__).parents[1] / "fixtures"
 
 from ..conftest import wire
 from .test_worker_host import RESOURCE, TOOL
@@ -123,7 +124,8 @@ def test_launch_resume_and_update_on_a_harbor_spec(tmp_path, monkeypatch, app, s
 
 
 def experiment_spec(monkeypatch, pins, name, rev, env=None):
-    """One of the first runs' specs as `flock launch` reads it, the task pin faked."""
+    """An experiments/ folder's spec (or an absolute folder's) as `flock launch` reads it, the
+    task pin faked."""
     pins[rev] = "a" * 40
     for key in ("RUN_NAME", "BUCKET", "SLURM_PARTITION"):
         monkeypatch.delenv(key, raising=False)
@@ -136,10 +138,11 @@ def experiment_spec(monkeypatch, pins, name, rev, env=None):
     return swarm
 
 
-def test_the_smoke_spec_compiles(monkeypatch, pins):
-    swarm = experiment_spec(monkeypatch, pins, "harbor-smoke",
+def test_a_slurm_podman_spec_with_board_rules_compiles(monkeypatch, pins):
+    swarm = experiment_spec(monkeypatch, pins, FIXTURES / "slurm_podman",
                             "3e235dff6880252a587fa479c09bcb1e16edf2eb")
-    assert (swarm.swarm, swarm.compute.kind, list(swarm.types)) == ("hsmoke-1", "slurm", ["agent"])
+    assert (swarm.swarm, swarm.compute.kind, list(swarm.types)) == (
+        "slurm-podman", "slurm", ["agent"])
     h = swarm.types["agent"].harbor
     assert h.config["environment"]["backend"] == "podman"
     assert h.resources["message_board"]["rules"]["max_len"] == 1200

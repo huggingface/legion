@@ -3,7 +3,7 @@
 Harbor agents reach a [msgboard](https://github.com/huggingface/msgboard) board through
 the `message_board` resource (`flock.harbor.builtin.resources.message_board`) and its
 `message_board.*` tools: the run's `resources: {message_board: {...}}`; its tools come with it
-unless `tools` is set (experiments/harbor-smoke/spec.yaml). Its mentions come back as
+unless `tools` is set (experiments/pybot/spec.yaml). Its mentions come back as
 `resource` events, which wake loops whose `loop.on` lists `message_board.*` (docs/loop.md "Wake
 queue"). Only `message_board.*` wakes are fed.
 
