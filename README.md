@@ -148,7 +148,7 @@ must be in the controller's environment.
 ### Declare and drive a swarm
 
 ```yaml
-# demo.yaml: a Harbor spec; experiments/harbor-smoke/spec.yaml is a complete one
+# demo.yaml: a Harbor spec on HF Jobs; experiments/pybot/spec.yaml is a complete one
 name: demo
 namespace: <you>
 bucket: hf://buckets/<you>/flock/demo

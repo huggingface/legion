@@ -23,7 +23,7 @@ uv sync
 
 Write a Harbor spec (`compute: local` is the default). This one runs 2 agents on one
 terminal-bench task in docker, with the HF router as the model server (tests/harbor/examples/
-has more; experiments/harbor-smoke/spec.yaml adds a board and a loop):
+has more; experiments/mini-swarm/spec.yaml adds a Space board and a loop, on hf-sandbox):
 
 ```yaml
 name: hello

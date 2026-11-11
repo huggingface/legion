@@ -1,0 +1,28 @@
+# Slurm + rootless podman, a managed board with rules (its rule proxy is mounted into podman),
+# a loop and a Trial rollover (trial_hours): compiled by tests/harbor/test_cli_launch.py.
+name: slurm-podman
+namespace: ns
+bucket: hf://buckets/ns/runs
+compute: {kind: slurm, cpus: 4, mem: 7G, time: '2:00:00'}
+model: huggingface/Qwen/Qwen3.8-27B:deepinfra
+pricing: [0.2, 2.5, 0.2]
+inference:
+  base_url: https://router.huggingface.co/v1
+  api_key_env: HF_INFERENCE_TOKEN
+  api_format: openai_chat_completions
+task:
+  repo: https://huggingface.co/datasets/harborframework/terminal-bench-2.1
+  dataset: terminal-bench-2.1@2.1.0
+  selector: regex-log
+  revision: 3e235dff6880252a587fa479c09bcb1e16edf2eb
+resources:
+  message_board: {channels: [general], rules: {max_len: 1200, min_post_gap: 10s}}
+tools: [message_board.*]
+agents: {count: 2}
+environment: {backend: podman}
+workers: {agents_per_worker: 2, turn_timeout: 15m}
+loop:
+  prompt: Continue the task, then post one line on #general about what you did.
+  every: turn_end
+  while: {until: 40m, max_rounds: 10}
+limits: {run_timeout_seconds: 3000, agent_max_turns: 30, budget_usd: 5, trial_hours: 0.15}
