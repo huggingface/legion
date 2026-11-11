@@ -544,6 +544,12 @@ def _place(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec) -> None:
         fill(store.get_worker(wid))
 
 
+def can_resume(text: str | None, nudges: int, loop_st: dict | None) -> bool:
+    """A stuck agent may still get its type's resume_prompt `text` (_nudge_stuck); False: it
+    stays stuck until something else prompts it."""
+    return bool(text) and nudges < NUDGE_MAX and (loop_st or {}).get("phase") != "done"
+
+
 def _nudge_stuck(p: _Pass, swarm: str, type_name: str, text: str | None) -> None:
     """A newly stuck agent (its turn timed out) gets an `agent.stuck` event. One stuck for
     NUDGE_AFTER gets the type's resume_prompt (when it has one), at
@@ -561,10 +567,10 @@ def _nudge_stuck(p: _Pass, swarm: str, type_name: str, text: str | None) -> None
         nudges = 0 if a["hb_state"] == AgentState.idle.value else a["nudges"]  # turn completed
         if since != a["stuck_since"] or nudges != a["nudges"]:
             store.update_agent(a["name"], stuck_since=since, nudges=nudges)
-        if (not text or since is None or p.now - since < NUDGE_AFTER or nudges >= NUDGE_MAX
+        if (not can_resume(text, nudges, loops.get(a["name"])) or since is None
+                or p.now - since < NUDGE_AFTER
                 or (a["nudged_at"] is not None and p.now - a["nudged_at"] < NUDGE_EVERY)
-                or flags.get("budget_stop") or store.held(a, flags)
-                or (loops.get(a["name"]) or {}).get("phase") == "done"):
+                or flags.get("budget_stop") or store.held(a, flags)):
             continue
         pending = store.pending_counts(swarm) if pending is None else pending
         if pending.get(a["name"]):

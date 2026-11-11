@@ -40,8 +40,9 @@ class Sim:
         await self.commands()  # drop the assigns
         return r
 
-    async def heartbeat(self, working: tuple[str, ...] = ()) -> None:
-        agents = [AgentHeartbeat(name=n, state="working" if n in working else "idle",
+    async def heartbeat(self, working: tuple[str, ...] = (), stuck: tuple[str, ...] = ()) -> None:
+        agents = [AgentHeartbeat(name=n, state="working" if n in working else
+                                 "stuck" if n in stuck else "idle",
                                  turn_id="t-1" if n in working else None,
                                  tokens={PRICED: TokenUsage(output=self.cost[n])})
                   for n in (A0, A1)]
@@ -733,6 +734,41 @@ async def test_until_idle_ignores_a_dormant_looping_type(sim):
                            sim.clock().timestamp())
     snap = tracker.snapshot(spec, sim.clock().timestamp())
     assert not snap["loops_settled"] and not tracker.idle(snap)
+
+
+@pytest.mark.parametrize("every", ["30s", "turn_end"])
+async def test_until_idle_ends_after_a_turn_timeout(sim, every):
+    """`--until idle` (localrun.Tracker): one round per agent, A0's turn hits turn_timeout and
+    A0 stays stuck. Its loop is over, so no resume_prompt comes, and the run is idle."""
+    from flock.controller.localrun import Tracker
+
+    await sim.apply({"prompt": "work", "every": every, "while": {"max_rounds": 1}},
+                    resume_prompt="go on")
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    start = {"kind": "loop", "round": 1, "why": "start"}
+    if every == "30s":  # controller-side rounds
+        await sim.turn(A1, got[A1])
+        await sim.events(A0, ("loop_prompt", start), ("turn_started", {}),
+                         ("turn_interrupted", {"reason": "timeout"}))
+    else:  # worker-side: the worker ends its loop at max_rounds
+        await sim.events(A1, ("loop_prompt", start), ("turn_started", {}),
+                         ("turn_ended", {"status": "completed", "tool_calls": 1}),
+                         ("loop_stopped", {"reason": "max_rounds", "round": 1, "active": True}))
+        await sim.events(A0, ("loop_prompt", start), ("turn_started", {}),
+                         ("turn_interrupted", {"reason": "timeout"}),
+                         ("loop_stopped", {"reason": "max_rounds", "round": 1, "active": True}))
+    tracker = Tracker(sim.store, "demo")
+    spec = sim.store.get_swarm("demo")["spec"]
+    for _ in range(4):
+        sim.clock.advance(70)
+        await sim.heartbeat(stuck=(A0,))
+        sim.tick()
+        sim.reconcile()
+    snap = tracker.snapshot(spec, sim.clock().timestamp())
+    assert snap["states"][A0] == "stuck" and snap["pending"] == 0 and snap["loops_settled"]
+    assert tracker.idle(snap)
 
 
 async def test_wake_min_gap_coalesces_and_max_caps(sim):

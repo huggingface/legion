@@ -51,9 +51,9 @@ from flock.controller.local import LocalJobsClient
 from flock.controller.loop import loop_status, swarm_stream
 from flock.controller.prices import cost_usd, type_price_table
 from flock.controller.reconcile import (
-    NUDGE_MAX,
     Settings,
     agent_state,
+    can_resume,
     run_reconciler,
     worker_state,
 )
@@ -229,11 +229,16 @@ class Tracker:
         workers = {w["id"]: w for w in self.store.list_workers(self.swarm)}
         lv = spec.compute.liveness()
         states: dict[str, str] = {}
+        stuck_done: set[str] = set()  # stuck after a turn timeout, no resume_prompt to come
         for a in agents:
             st = agent_state(a, workers.get(a["worker"]), now, lv).value
             if a["name"] in self.open_turns and st in ("idle", "unknown"):
                 st = "working"  # turn_started seen, heartbeat not yet
             states[a["name"]] = st
+            ts = spec.types.get(a["type"])
+            if st == "stuck" and not can_resume(ts and ts.resume_prompt, a["nudges"],
+                                                self.store.get_loop_agent(a["name"])):
+                stuck_done.add(a["name"])
         pending = self.store.pending_counts(self.swarm)
         tokens: dict[str, TokenUsage] = {}
         for a in agents:
@@ -245,8 +250,7 @@ class Tracker:
             "loops_settled": loops_settled(spec, status),
             "agents": agents,
             "states": states,
-            "stuck_done": {a["name"] for a in agents
-                           if states[a["name"]] == "stuck" and not self._nudge_left(spec, a)},
+            "stuck_done": stuck_done,
             "workers": {wid: worker_state(w, now, lv).value for wid, w in workers.items()},
             "pending": sum(pending.values()),
             "running": sum(1 for s in states.values() if s == "working"),
@@ -254,13 +258,6 @@ class Tracker:
             "cost": self.store.swarm_cost(self.swarm),
             "tokens": tokens,
         }
-
-    def _nudge_left(self, spec: SwarmSpec, a: dict[str, Any]) -> bool:
-        """A stuck agent the controller may still send its type's resume_prompt to (as in
-        reconcile._nudge_stuck)."""
-        ts = spec.types.get(a["type"])
-        return bool(ts and ts.resume_prompt) and a["nudges"] < NUDGE_MAX and (
-            self.store.get_loop_agent(a["name"]) or {}).get("phase") != "done"
 
     def idle(self, snap: dict[str, Any]) -> bool:
         """Every agent idle or done, nothing pending, no turn open, at least one turn done
@@ -674,8 +671,9 @@ def main(
     data_dir: str = typer.Option(".flock", "--data-dir", help="Where the run dir and `current` go."),
     until: str = typer.Option(
         None, "--until",
-        help="Stop after a duration (30s, 10m, 2h) or `idle`: every agent idle with nothing "
-             "pending, after at least one turn (and one per agent with --prompt), every loop over."),
+        help="Stop after a duration (30s, 10m, 2h) or `idle`: every agent idle (or stuck after "
+             "a turn timeout with no resume left) with nothing pending, after at least one turn "
+             "(and one per agent with --prompt), every loop over."),
     prompt_text: str = typer.Option(None, "--prompt",
                                     help="Send this prompt to every agent once at start."),
     preflight: bool = typer.Option(
