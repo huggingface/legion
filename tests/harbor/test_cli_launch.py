@@ -127,7 +127,7 @@ def experiment_spec(monkeypatch, pins, name, rev, env=None):
     """An experiments/ folder's spec (or an absolute folder's) as `flock launch` reads it, the
     task pin faked."""
     pins[rev] = "a" * 40
-    for key in ("RUN_NAME", "BUCKET", "SLURM_PARTITION"):
+    for key in ("RUN_NAME", "BUCKET"):
         monkeypatch.delenv(key, raising=False)
     for key, value in (env or {}).items():
         monkeypatch.setenv(key, value)
