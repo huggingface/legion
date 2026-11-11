@@ -310,8 +310,8 @@ class ControllerClient:
         instead of the worker's, retried and re-resolved like every route here; the answer is
         returned whatever its status. Only a GET is retried after the request may have reached
         the controller, so a prompt is never delivered twice.
-        shortcut: 503 counts as never processed (the Space edge's answer); an app 503 after a
-        side effect would be resent, revisit if the controller starts returning 503 itself."""
+        503 counts as never processed: the Space edge's answer, and the controller's only for
+        event posts, before any work (never for these calls), so resending it is safe."""
         try:
             return await self._send(method, path, budget=budget, retry_sent=method == "GET",
                                     params=params, json=body,

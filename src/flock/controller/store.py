@@ -8,6 +8,7 @@ so `after=` cursors are line offsets.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import sqlite3
@@ -19,6 +20,10 @@ from typing import Any
 from flock.models import ComputeSpec, Event, Liveness, SwarmSpec, TokenUsage
 
 log = logging.getLogger(__name__)
+# Specs are read on every heartbeat, event batch and loop wake; parsing a large one each time
+# saturates the controller at ~1,000 agents. Keyed by the stored JSON, so a re-apply is seen at
+# once; callers never mutate the shared result (they model_copy).
+_parse_spec = functools.lru_cache(64)(SwarmSpec.model_validate_json)
 
 DB_NAME = "controller.db"
 
@@ -375,7 +380,7 @@ class Store:
     def get_swarm(self, name: str) -> Row | None:
         row = self._one("SELECT * FROM swarms WHERE name = ?", [name])
         if row:
-            row["spec"] = SwarmSpec.model_validate_json(row["spec"])
+            row["spec"] = _parse_spec(row["spec"])
         return row
 
     def liveness(self, swarm: str) -> Liveness:
@@ -395,7 +400,7 @@ class Store:
         out = []
         for row in self._q("SELECT * FROM swarms ORDER BY name"):
             try:
-                row["spec"] = SwarmSpec.model_validate_json(row["spec"])
+                row["spec"] = _parse_spec(row["spec"])
             except ValueError as e:
                 if row["name"] not in self._unloadable:
                     self._unloadable.add(row["name"])

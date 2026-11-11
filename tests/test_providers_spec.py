@@ -151,6 +151,8 @@ def test_a_stored_swarm_that_does_not_load_is_skipped(tmp_path, caplog):
     store = Store(tmp_path)
     good = spec({"w": {**HB, "model": "qwen-27b"}})
     store.put_swarm(good, 0)
+    parsed = store.get_swarm(good.swarm)["spec"]  # parsed once per stored JSON
+    assert store.get_swarm(good.swarm)["spec"] is parsed is store.list_swarms()[0]["spec"]
     bad = good.model_dump(mode="json") | {"swarm": "bad"}
     bad["types"]["w"]["harness"] = "nope"
     store._x("INSERT INTO swarms (name, spec, applied_at) VALUES (?, ?, 0)",

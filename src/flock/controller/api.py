@@ -23,6 +23,7 @@ from fastapi import APIRouter, Body, Depends, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field, TypeAdapter
 from starlette.background import BackgroundTask
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 
 from flock.controller.comms import CommsError
@@ -87,6 +88,11 @@ log = logging.getLogger(__name__)
 MAX_WAIT = 30.0
 ADMIT_GRACE = 10.0  # s, a heartbeat this soon after an admission may predate the prompt
 SEEN_EVERY = 5.0  # s, min gap between last_seen writes per worker
+# Event batches processed at once (threads), out of the threadpool's 40: the rest stay free for
+# heartbeats and operator calls. A batch that waits EVENT_WAIT s for a slot gets 503, which the
+# worker sends again after a backoff (worker/main.py UNSENT_STATUSES).
+EVENT_SLOTS = 8
+EVENT_WAIT = 10.0
 _COMMAND = TypeAdapter(Annotated[Command, Field(discriminator="kind")])
 
 
@@ -787,7 +793,7 @@ def create_app(
         return a
 
     @app.get("/healthz")
-    def healthz() -> dict:
+    async def healthz() -> dict:  # on the event loop: answers while every thread is busy
         mw = request_stats.get("mw")
         return {"ok": True, **(stats() if stats else {}), "process": process_stats(),
                 "requests": mw.snapshot() if mw else {}}
@@ -1562,8 +1568,23 @@ def create_app(
                 out["type_spec"], out["spec_rev"] = wts.model_dump(mode="json"), rev
         return out
 
+    event_slots = asyncio.Semaphore(EVENT_SLOTS)
+
     @api.post("/workers/{worker_id}/events")
-    def post_events(worker_id: str, batch: EventBatch, incarnation: str | None = None) -> dict:
+    async def post_events(worker_id: str, batch: EventBatch,
+                          incarnation: str | None = None) -> dict:
+        try:
+            async with asyncio.timeout(EVENT_WAIT):
+                await event_slots.acquire()
+        except TimeoutError:
+            raise HTTPException(503, "busy: event batch not processed, send it again",
+                                headers={"Retry-After": "5"}) from None
+        try:
+            return await run_in_threadpool(ingest_events, worker_id, batch, incarnation)
+        finally:
+            event_slots.release()
+
+    def ingest_events(worker_id: str, batch: EventBatch, incarnation: str | None) -> dict:
         w = worker_or_404(worker_id)
         if not stale(w, incarnation):  # a replaced job's last events are still accepted
             seen(w)
