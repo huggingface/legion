@@ -44,3 +44,15 @@ def test_old_db_with_removed_feature_rows_opens(tmp_path):
     store.delete_swarm(name)  # removing it works with the leftover rows in place
     assert store.get_swarm(name) is None
     store.close()
+
+
+def test_get_swarm_parses_each_stored_spec_once(tmp_path):
+    from .conftest import make_spec
+
+    s = Store(tmp_path)
+    s.put_swarm(make_spec(), 0)
+    first = s.get_swarm("demo")["spec"]
+    assert s.get_swarm("demo")["spec"] is first and s.list_swarms()[0]["spec"] is first
+    s.put_swarm(make_spec(researcher={"replicas": 5}), 1)
+    assert s.get_swarm("demo")["spec"].types["researcher"].replicas == 5
+    s.close()

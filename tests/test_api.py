@@ -360,3 +360,36 @@ async def test_heartbeat_during_restore_does_not_double_count_cost(client, clock
     a = (await client.get("/agents/researcher-0000")).json()
     assert a["cost_usd"] == 6.0
     assert a["tokens"]["claude-opus-5-5"]["input"] == 1_500_000
+
+
+async def test_event_batches_wait_for_a_slot_then_get_503(monkeypatch, store, clock, tick):
+    """At most EVENT_SLOTS batches take threads; one that cannot get a slot in EVENT_WAIT s is
+    refused with 503 (the worker sends it again) while heartbeats and /healthz still answer, and
+    its arrival still counts as a sign of life."""
+    import httpx
+
+    from flock.controller import api as api_mod
+
+    from .conftest import TOKEN
+
+    monkeypatch.setattr(api_mod, "EVENT_SLOTS", 0)
+    monkeypatch.setattr(api_mod, "EVENT_WAIT", 0.05)
+    app = api_mod.create_app(store, TOKEN, clock=clock)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t",
+                                 headers={"Authorization": f"Bearer {TOKEN}"}) as c:
+        await apply(c, make_spec(researcher={"replicas": 1}))
+        tick()
+        ev = Event(type="message", ts=clock(), agent="researcher-0000")
+        r = await c.post(f"/workers/{W0}/events?incarnation=i1",
+                         json={"worker": W0, "events": [ev.model_dump(mode="json")]})
+        assert r.status_code == 503 and r.headers["retry-after"] == "5"
+        assert store.arrived[W0] == ("i1", clock().timestamp())
+        assert store.event_count("researcher-0000") == 0
+        r = await c.post(f"/workers/{W0}/heartbeat", json=hb_body(clock, W0, []))
+        assert r.status_code == 200
+        assert (await c.get("/healthz")).status_code == 200
+        store.arrived.clear()
+        bad = {"Authorization": "Bearer nope"}
+        assert (await c.get(f"/workers/{W0}/commands?wait=0", headers=bad)).status_code == 401
+        assert W0 not in store.arrived  # only an authenticated request counts

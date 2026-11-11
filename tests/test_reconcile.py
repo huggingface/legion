@@ -8,6 +8,7 @@ from pydantic import TypeAdapter
 from flock import status as fs
 from flock.controller.jobs import FakeJobsClient, JobState
 from flock.controller.reconcile import (
+    INSPECT_EVERY,
     LAUNCH_TIMEOUT,
     NUDGE_EVERY,
     NUDGE_MAX,
@@ -161,6 +162,22 @@ def test_unresponsive_worker_is_cancelled_and_relaunched(store, jobs, clock, tic
     clock.advance(31)
     tick()
     assert jobs.job_for(W0) != job
+
+
+def test_a_request_that_arrived_keeps_a_worker_alive_on_a_slow_controller(store, jobs, clock,
+                                                                          tick):
+    """Its requests arrived (Store.arrived) but were not processed yet: not unresponsive. One
+    from another incarnation of the slot does not count."""
+    store.put_swarm(make_spec(), 0)
+    tick()
+    heartbeat(store, clock, W0, [("researcher-0000", "idle", None)])
+    job, inc = jobs.job_for(W0), store.get_worker(W0)["incarnation"]
+    clock.advance(200)
+    store.arrived[W0] = (inc, clock().timestamp() - 5)
+    assert job not in jobs.cancels and "crash" not in kinds(tick())
+    clock.advance(INSPECT_EVERY)
+    store.arrived[W0] = ("an-older-job", clock().timestamp())
+    assert "crash" in kinds(tick()) and job in jobs.cancels
 
 
 def test_crash_relaunch_restores_and_resumes_interrupted(store, jobs, clock, tick):

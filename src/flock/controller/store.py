@@ -221,6 +221,10 @@ class Store:
         # token and never stored: the table holds only hashes.
         self.agent_token_key: bytes | None = None
         self._liveness: dict[str, Liveness] = {}  # swarm -> its spec's timings (`liveness`)
+        self._specs: dict[str, SwarmSpec] = {}  # stored spec JSON -> parsed (`_spec`)
+        # worker id -> (incarnation, when) of its last request, noted on arrival (api.py):
+        # a slow controller does not make its workers look silent (reconcile._refresh_worker)
+        self.arrived: dict[str, tuple[str | None, float]] = {}
 
     def _migrate(self) -> None:
         """Additive column changes for databases created by an older version."""
@@ -402,10 +406,22 @@ class Store:
             r["source"], r["diff"] = json.loads(r["source"]), json.loads(r["diff"])
         return rows
 
+    def _spec(self, raw: str) -> SwarmSpec:
+        """The parsed spec, shared by every reader of the same stored JSON: specs are read on
+        every heartbeat, event batch and loop wake, and parsing a large one (inlined prompts)
+        each time saturated the controller at 1,000 agents. Callers never mutate it (they
+        model_copy); a re-apply stores new JSON, so a stale parse is never returned."""
+        spec = self._specs.get(raw)
+        if spec is None:
+            if len(self._specs) >= 64:  # old versions of re-applied specs
+                self._specs.clear()
+            spec = self._specs[raw] = SwarmSpec.model_validate_json(raw)
+        return spec
+
     def get_swarm(self, name: str) -> Row | None:
         row = self._one("SELECT * FROM swarms WHERE name = ?", [name])
         if row:
-            row["spec"] = SwarmSpec.model_validate_json(row["spec"])
+            row["spec"] = self._spec(row["spec"])
         return row
 
     def liveness(self, swarm: str) -> Liveness:
@@ -422,7 +438,7 @@ class Store:
     def list_swarms(self) -> list[Row]:
         rows = self._q("SELECT * FROM swarms ORDER BY name")
         for row in rows:
-            row["spec"] = SwarmSpec.model_validate_json(row["spec"])
+            row["spec"] = self._spec(row["spec"])
         return rows
 
     def set_removing(self, name: str) -> None:
