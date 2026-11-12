@@ -257,6 +257,7 @@ class AsyncBoard:
         # this board; meanwhile requests fail at once, without being sent.
         self.blocked_until = 0.0
         self.strikes = 0  # consecutive 429s without Retry-After (edge limits count over minutes)
+        self.refused_at = 0.0  # only a request sent after the last 429 changes `strikes`
 
     async def aclose(self) -> None:
         await self.http.aclose()
@@ -266,16 +267,17 @@ class AsyncBoard:
         if left > 0:
             raise _busy("rate limited", left)
 
-    def _close_gate(self, error: BoardError) -> None:
+    def _close_gate(self, error: BoardError, sent: float) -> None:
         if error.retry_after is None:
-            if time.monotonic() >= self.blocked_until:  # requests already in flight count once
+            if sent > self.refused_at:  # requests already in flight count once
                 self.strikes += 1
             ra = min(GATE_MAX_S, GATE_DEFAULT_S * 2 ** (self.strikes - 1))
             wait = ra * random.uniform(0.75, 1.25)
         else:
             ra = error.retry_after
             wait = min(RETRY_AFTER_MAX_S, ra + random.uniform(0, max(1.0, 0.2 * ra)))
-        self.blocked_until = max(self.blocked_until, time.monotonic() + wait)
+        self.refused_at = time.monotonic()
+        self.blocked_until = max(self.blocked_until, self.refused_at + wait)
         error.retry_after = max(ra, wait)
 
     async def request(self, route: tuple[str, str, dict], cred: Credential | None = None, *,
@@ -297,6 +299,7 @@ class AsyncBoard:
                                            max_wait=None if background else TOOL_WAIT_S)
                 self._check_gate()
             r: httpx.Response | None = None
+            sent = time.monotonic()
             try:
                 r = await self.http.request(method, path, headers=headers, **kw)
             except httpx.TransportError as e:
@@ -308,12 +311,13 @@ class AsyncBoard:
                 # retry_after.
                 error = _error(r, method, path)
                 _log_429(method, path, r, error.retry_after)
-                self._close_gate(error)
+                self._close_gate(error, sent)
                 raise error
             if r is not None and r.status_code not in RETRY_STATUSES:
                 if r.status_code >= 400:
                     raise _error(r, method, path)
-                self.strikes = 0
+                if sent > self.refused_at:  # a long poll sent before the 429 proves nothing
+                    self.strikes = 0
                 return r.json() if r.content else {}
             if attempt == ATTEMPTS - 1 and r is not None:
                 raise _error(r, method, path)

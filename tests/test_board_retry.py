@@ -1,6 +1,7 @@
 """Board client 429 handling: Retry-After (seconds or HTTP-date) plus jitter, capped."""
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 
@@ -100,7 +101,7 @@ async def test_429s_without_retry_after_back_off_until_a_success(monkeypatch):
             with pytest.raises(BoardError):
                 await board.channels(cred)
             gates.append(board.blocked_until - now[0])
-            board._close_gate(BoardError("in flight", 429))  # an in-flight 429 is no new strike
+            board._close_gate(BoardError("in flight", 429), now[0] - 1)  # sent before: no new strike
             assert board.blocked_until - now[0] == gates[-1]
             with pytest.raises(BoardError) as e:  # a closed gate answers "busy" at once
                 await board.channels(cred)
@@ -113,6 +114,38 @@ async def test_429s_without_retry_after_back_off_until_a_success(monkeypatch):
         with pytest.raises(BoardError):
             await board.channels(cred)
         assert board.blocked_until - now[0] == 22.5  # the success reset it
+    finally:
+        await board.aclose()
+
+
+async def test_a_long_poll_answered_after_a_429_does_not_reset_the_back_off(monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(board_mod.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(board_mod.random, "uniform", lambda a, b: a)
+    polling, release = asyncio.Event(), asyncio.Event()
+
+    async def handler(r):
+        if r.url.path == "/v1/activity":
+            polling.set()
+            await release.wait()
+            return httpx.Response(200, json={"messages": []})
+        return httpx.Response(429)
+
+    board = AsyncBoard("http://b.invalid", transport=httpx.MockTransport(handler))
+    cred = type("C", (), {"url": "http://b.invalid", "token": "t"})()
+    try:
+        for strikes in (1, 2, 3, 4):
+            polling.clear()
+            release.clear()
+            poll = asyncio.create_task(board.activity(cred, "joined", 5, wait=25))
+            await polling.wait()
+            now[0] += 1
+            with pytest.raises(BoardError):
+                await board.channels(cred)
+            release.set()
+            assert await poll == {"messages": []}
+            assert board.strikes == strikes
+            now[0] = board.blocked_until
     finally:
         await board.aclose()
 
