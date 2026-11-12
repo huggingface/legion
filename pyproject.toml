@@ -9,6 +9,7 @@ dependencies = [
   "pyyaml>=6",
   "typer>=0.12",
   "huggingface_hub>=1.0",
+  "tomli>=2",  # bundled Hub tools also run in Python 3.10 task images
   # Harbor (flock.harbor: every agent is a Trial)
   "harbor==0.25.0",
   "podman-compose==1.5.0",
