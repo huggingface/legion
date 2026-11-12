@@ -41,6 +41,7 @@ group, so worker traffic never crosses an edge or a proxy.
 
 ```sh
 export HF_TOKEN=... FLOCK_TOKEN=$(openssl rand -hex 24)
+uv run hf buckets create <you>/flock --private  # once, for wheels and state
 W=$(uv run scripts/publish-wheel.sh hf://buckets/<you>/flock/dist)
 scripts/deploy-job.sh "$W" --group my-run [--flavor cpu-upgrade] [--timeout 48h] \
     [--secret OPENAI_API_KEY ...] [--dry-run]
@@ -73,6 +74,29 @@ same wheel and tar. The job gets:
 container and the proxy URL is `https://<JOB_ID>--<port>.hf.jobs`. The controller derives
 both URLs itself, with no Hub call and no second launch step. It logs them at start and
 reports them in `/healthz` (`public_url`, `status_url`). `FLOCK_PUBLIC_URL` overrides.
+
+Publishing requires Git access to the private `huggingface/msgboard` dependency.
+The publication includes `harbor-deps.tar`, so jobs install the pinned dependencies
+without needing your GitHub credentials. Workers bootstrap from a stock
+`node:22-bookworm` image and download the wheel from the bucket.
+
+Every secret named by a spec, including model `api_key_env` values, must be in the
+controller's environment. Workers need `HF_TOKEN` to access the wheel and state
+bucket. Do not list `FLOCK_TOKEN` in the spec's secrets; the controller supplies
+worker authentication itself.
+
+For a controller running directly on your machine instead of as an HF Job:
+
+```sh
+FLOCK_TOKEN=... HF_TOKEN=... \
+FLOCK_WHEEL_URL=hf://buckets/<you>/flock/dist/<rev>/flock-0.0.1-py3-none-any.whl \
+uv run flock-controller
+```
+
+This starts the API at `http://127.0.0.1:7860`. Controller state lives in
+`FLOCK_DATA` (`/data` in the controller image). Keep that directory persistent or
+configure `FLOCK_STATE_URL`; otherwise a restart loses controller state, including
+spawned-agent records.
 
 ## Two URLs, two auth paths
 

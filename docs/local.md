@@ -7,8 +7,9 @@ under `.flock/<swarm>-<UTC time>/`), then returns. `flock status`, `flock prompt
 `flock update` and `flock stop` find the run through `.flock/current` in the same
 directory. The controller writes a run bundle when it ends. The
 controller is the same code as on HF Jobs (reconcile loop, placement, heartbeats, admission,
-prompts, events); only the backend that starts workers differs. `compute: hf-jobs` (the
-default) is the only line you change to run the same spec on HF Jobs.
+prompts, events); only the backend that starts workers differs. `compute: local` is
+the default for Harbor specs; see
+[Switching to HF Jobs](#switching-to-hf-jobs) for remote execution.
 
 No HF token, bucket or network is needed when the model endpoint is local.
 
@@ -18,7 +19,7 @@ Install (Python 3.12+; Harbor comes with flock):
 
 ```sh
 git clone https://github.com/huggingface/flock && cd flock
-uv sync
+uv sync --extra controller
 ```
 
 Write a Harbor spec (`compute: local` is the default). This one runs 2 agents on one
@@ -112,8 +113,7 @@ budget check, the view and the bundle use the spec as currently applied, so a
 ## Switching to HF Jobs
 
 Change `compute: local` to `compute: hf-jobs` (and give `namespace` and `bucket` if the spec does
-not have them), deploy a controller ([README](../README.md#run-the-controller),
-[docs/deploy-job.md](deploy-job.md)) and `flock launch spec.yaml`. `flock launch` of a
+not have them), [deploy a controller](deploy-job.md), and run `flock launch spec.yaml`. `flock launch` of a
 `hf-jobs` spec goes to the jobs controller, and a jobs controller refuses a `local` spec (HTTP 400), so a spec never runs
 on a backend it did not ask for.
 
