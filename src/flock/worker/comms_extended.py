@@ -32,7 +32,7 @@ from flock.comms.tools import (
 log = logging.getLogger(__name__)
 
 POLL_BACKOFF_MAX_S = 120.0
-CACHE_TTL_S = 60.0  # per agent: its channel list and the principals directory
+CACHE_TTL_S = 300.0  # per agent (both answers depend on the caller): its channel list and the principals directory
 TOOL_CACHE_MAX = 64  # entries kept per agent (channel list, directory, DM pages); oldest out
 READ_DMS_CHANNELS = 10  # read_dms reads at most this many DM channels (the newest)
 
@@ -140,11 +140,14 @@ class ExtendedComms:
                 check_content(op.c.rules.model_copy(update={"threads": None}), args["text"], None)
                 posts, last = self._state(m)
                 check_rate(op.c.rules, posts, last, self._clock())
-                data, _ = await self._cached(m, "principals", lambda: board.request(
-                    ("GET", "/v1/principals", {}), ident))
                 name = args["to"].lstrip("@")
-                people = data.get("principals") or []
-                person = next((p for p in people if name in (p.get("external_id"), p.get("display_name"))), None)
+                for fresh in (False, True):  # a cached directory misses agents joined since
+                    data, hit = await self._cached(m, "principals", lambda: board.request(
+                        ("GET", "/v1/principals", {}), ident), fresh=fresh)
+                    people = data.get("principals") or []
+                    person = next((p for p in people if name in (p.get("external_id"), p.get("display_name"))), None)
+                    if person is not None or not hit:
+                        break
                 if person is None:
                     raise ValueError("no agent or human with that name")
                 channel = await board.request(("POST", "/v1/dms", {"json": {"with": person["id"]}}), ident)

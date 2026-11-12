@@ -31,7 +31,8 @@ ATTEMPTS = 4
 BACKOFF_S = 1.0
 BACKOFF_MAX_S = 20.0
 RETRY_AFTER_MAX_S = 120.0  # a board's Retry-After is honoured up to this (plus jitter)
-GATE_DEFAULT_S = 5.0  # a 429 without Retry-After closes the gate this long (plus jitter)
+GATE_DEFAULT_S = 30.0  # a 429 without Retry-After closes the gate this long (±25% jitter), doubled
+GATE_MAX_S = 300.0  # per consecutive such 429 up to this; a success resets it
 TOOL_WAIT_S = 10.0  # a foreground request waits at most this for the worker's request budget
 NEWEST = 2 ** 53  # `before=` that means "the newest messages"
 
@@ -255,6 +256,7 @@ class AsyncBoard:
         # Shared gate: a 429 closes it until Retry-After (plus jitter) for every caller of
         # this board; meanwhile requests fail at once, without being sent.
         self.blocked_until = 0.0
+        self.strikes = 0  # consecutive 429s without Retry-After (edge limits count over minutes)
 
     async def aclose(self) -> None:
         await self.http.aclose()
@@ -265,8 +267,14 @@ class AsyncBoard:
             raise _busy("rate limited", left)
 
     def _close_gate(self, error: BoardError) -> None:
-        ra = error.retry_after if error.retry_after is not None else GATE_DEFAULT_S
-        wait = min(RETRY_AFTER_MAX_S, ra + random.uniform(0, max(1.0, 0.2 * ra)))
+        if error.retry_after is None:
+            if time.monotonic() >= self.blocked_until:  # requests already in flight count once
+                self.strikes += 1
+            ra = min(GATE_MAX_S, GATE_DEFAULT_S * 2 ** (self.strikes - 1))
+            wait = ra * random.uniform(0.75, 1.25)
+        else:
+            ra = error.retry_after
+            wait = min(RETRY_AFTER_MAX_S, ra + random.uniform(0, max(1.0, 0.2 * ra)))
         self.blocked_until = max(self.blocked_until, time.monotonic() + wait)
         error.retry_after = max(ra, wait)
 
@@ -305,6 +313,7 @@ class AsyncBoard:
             if r is not None and r.status_code not in RETRY_STATUSES:
                 if r.status_code >= 400:
                     raise _error(r, method, path)
+                self.strikes = 0
                 return r.json() if r.content else {}
             if attempt == ATTEMPTS - 1 and r is not None:
                 raise _error(r, method, path)

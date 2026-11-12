@@ -87,6 +87,36 @@ async def test_a_429_closes_the_gate_for_every_caller_without_sending(monkeypatc
         await board.aclose()
 
 
+async def test_429s_without_retry_after_back_off_until_a_success(monkeypatch):
+    now, status = [1000.0], [429]
+    monkeypatch.setattr(board_mod.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(board_mod.random, "uniform", lambda a, b: a)  # -25%
+    board = AsyncBoard("http://b.invalid", transport=httpx.MockTransport(
+        lambda r: httpx.Response(status[0], json={"channels": []})))  # an edge 429: no Retry-After
+    cred = type("C", (), {"url": "http://b.invalid", "token": "t"})()
+    try:
+        gates = []
+        for _ in range(6):
+            with pytest.raises(BoardError):
+                await board.channels(cred)
+            gates.append(board.blocked_until - now[0])
+            board._close_gate(BoardError("in flight", 429))  # an in-flight 429 is no new strike
+            assert board.blocked_until - now[0] == gates[-1]
+            with pytest.raises(BoardError) as e:  # a closed gate answers "busy" at once
+                await board.channels(cred)
+            assert e.value.code == "board_busy"
+            now[0] = board.blocked_until
+        assert gates == [22.5, 45.0, 90.0, 180.0, 225.0, 225.0]  # 30, 60, 120, 240, 300 cap
+        status[0] = 200
+        assert await board.channels(cred) == []
+        status[0] = 429
+        with pytest.raises(BoardError):
+            await board.channels(cred)
+        assert board.blocked_until - now[0] == 22.5  # the success reset it
+    finally:
+        await board.aclose()
+
+
 async def test_worker_budget_tool_calls_wait_briefly_and_the_poller_yields(monkeypatch):
     now = [0.0]
     limiter = board_mod.RateLimiter(0.5, burst=2, clock=lambda: now[0])

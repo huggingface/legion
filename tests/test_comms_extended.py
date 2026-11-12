@@ -323,6 +323,8 @@ async def test_tool_fan_out_is_cached_and_limited_per_agent(tmp_path, board, mon
             out, error = await team.call("cedar", "dm", to="birch", text=text)
             assert not error, out
         assert sent.count(("GET", "/v1/principals")) == 1
+        out, error = await team.call("cedar", "dm", to="nobody", text="x")
+        assert error and sent.count(("GET", "/v1/principals")) == 2  # a miss refreshes once
         read, error = await team.call("birch", "read_dms")
         assert not error and [m["text"] for m in read["messages"]] == ["one", "two"]
         sent.clear()
