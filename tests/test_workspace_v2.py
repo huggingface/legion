@@ -142,10 +142,11 @@ def test_clone_filters_never_run(repos, tmp_path):
     assert len(list((clone / ".git/objects").rglob("*"))) == loose  # no objects left in the clone
 
 
-def test_payload_size_5k_files(tmp_path, capsys):
-    """Measured: a 5,000-file clone with a 3-file change, v1 vs v2 JSON payload sizes."""
+def test_payload_size_11k_files(tmp_path, capsys):
+    """Measured: an 11,000-file clone (over the old 10,000-file cap) with a 3-file change,
+    v1 vs v2 JSON payload sizes."""
     seed = tmp_path / "seed"
-    for i in range(5000):
+    for i in range(11000):
         d = seed / f"pkg{i // 100}"
         d.mkdir(parents=True, exist_ok=True)
         (d / f"m{i}.py").write_text(f"# module {i}\n" + "def f(x):\n    return x + 1\n" * 20)
@@ -161,7 +162,7 @@ def test_payload_size_5k_files(tmp_path, capsys):
     v1 = len(json.dumps(capture(work, "clone")))
     v2 = len(json.dumps(capture_v2(work, "clone")))
     with capsys.disabled():
-        print(f"\n5k files, 3 changed: v1 {v1:,} bytes, v2 {v2:,} bytes")
+        print(f"\n11k files, 3 changed: v1 {v1:,} bytes, v2 {v2:,} bytes")
     assert v2 * 100 < v1
 
 

@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path, PurePosixPath
 
 MAX_BYTES = 128 << 20
-MAX_FILES = 10000
+MAX_FILES = 50_000
 PATCH_MAX_BYTES = 20 << 20  # a larger v2 patch is sent as a v1 snapshot instead
 APPLY_MAX_MEMORY = 2 << 30  # address space of `git apply`: a binary delta can expand a lot
 # The agent owns its clone's config: never run a command it configured (fsmonitor, filters,
@@ -125,7 +125,7 @@ def apply_patch(snapshot: dict, tree: Path) -> list[str]:
     # memory limits below; decode delta headers if a world takes uploads from untrusted callers.
     if (patch.count(b"\ndiff --git ") + patch.startswith(b"diff --git ") > MAX_FILES
             or sum(int(n) for n in _SIZES.findall(patch)) > MAX_BYTES):
-        raise ValueError("workspace snapshot exceeds 128 MiB or 10,000 files")
+        raise ValueError(f"workspace snapshot exceeds 128 MiB or {MAX_FILES:,} files")
     if patch:  # prlimit, not preexec_fn: the world's server is threaded
         p = subprocess.run(["prlimit", f"--fsize={MAX_BYTES}", f"--as={APPLY_MAX_MEMORY}", "git",
                             "-C", str(tree), "apply", "--binary", "--whitespace=nowarn", "-"],
