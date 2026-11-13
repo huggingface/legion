@@ -90,6 +90,9 @@ MERGE_TESTS_TIMEOUT_S = 60.0  # past this the shared tests are skipped (logged),
 MERGE_RETRY_CODES = (*TRANSIENT_CODES, "hub_busy", "busy", "stale_lease", "paused")
 MERGE_BACKOFF = (5.0, 600.0)
 MERGE_REASON = 1500  # refusal characters quoted in the inbox
+# Committer of the commits a bundle lands on main (agents commit as <name>@flock.invalid):
+# a crashed bundle is recovered from main by it and the "PR #N by" subject (_landed).
+LANDER = ("merge-queue", "merge-queue@world.flock.invalid")
 STATUS_QUEUE_MAX = 50  # entries per list in world_status (the counts give the totals)
 log = logging.getLogger(__name__)
 _LIVE: dict[str, Chatbot4World] = {}  # one world per state directory: a restart replaces it
@@ -313,6 +316,11 @@ class Chatbot4World(World):
         if scope not in ("all", "new_modules"):
             raise ValueError("CHATBOT_PR_OPEN_BUDGET_SCOPE must be all or new_modules")
         self.budget_scope = scope
+        self.bundle = self.knob(
+            "merge.bundle", int, int(os.environ.get("CHATBOT_MERGE_BUNDLE", "5")), min=0, max=20,
+            doc="Queued PRs landed together in one push to main (0: one Hub merge per PR).",
+            on_change=lambda v: setattr(self, "bundle", v))
+        self.landed_at, self.landed = None, {}  # main sha -> its bundle commits (_landed)
         self.max_reviewers = self.knob(
             "review.max_reviewers", int, int(os.environ.get("CHATBOT_MAX_REVIEWERS", "0")), min=0,
             doc="Reviewers per PR change (0: unlimited); one more is refused with review_full.",
@@ -323,6 +331,9 @@ class Chatbot4World(World):
             on_change=lambda v: setattr(self, "budget_floor", v))
         self.open_reserved = set()  # new-PR calls past the budget check, Hub PR not yet created
         self.stopping = threading.Event()
+        # Review comments (and closes of landed PRs) wait in the comment lane's outbox
+        # (outbox-comment.jsonl); its thread posts them, joining the comments of one PR that piled up.
+        self.outbox = self.lanes.outbox("comment", drain=self._post, backoff=OUTBOX_BACKOFF)
         with self.lock:  # cached results from before slimming: the first save is already small
             if self._slim_requests():
                 self._save()
@@ -335,9 +346,6 @@ class Chatbot4World(World):
             self._reconcile()
         self.hub_states_at = float("-inf")
         self._sync_hub_states()  # outside the lock: a Hub read
-        # Review comments wait in the comment lane's outbox (outbox-comment.jsonl); its thread
-        # posts them, joining the comments of one PR that piled up.
-        self.outbox = self.lanes.outbox("comment", drain=self._post, backoff=OUTBOX_BACKOFF)
         legacy = self.state.pop("hub_outbox", None)  # prs.json from before the lanes
         if legacy is not None:
             for entry in legacy:
@@ -367,9 +375,15 @@ class Chatbot4World(World):
         """Outbox drain: post the queued comments of PR pr as one Hub comment (the caller holds
         a comment lane slot). Returns "ok", "transient", "final" (closed or merged, or the Hub
         refused a single comment with a 4xx other than 429) or "split" (it refused the joined
-        comments: post them one by one)."""
+        comments: post them one by one). A {"close": text} entry (a PR a bundle landed) closes
+        the PR with the comments and that text."""
+        closing = [t["close"] for t in texts if isinstance(t, dict)]
+        comments = [t for t in texts if isinstance(t, str)]
         try:
-            self.repo.hub.comment(pr, COMMENT_SEPARATOR.join(texts))
+            if closing:
+                self.repo.hub.close(pr, COMMENT_SEPARATOR.join(comments + closing))
+            else:
+                self.repo.hub.comment(pr, COMMENT_SEPARATOR.join(comments))
             return "ok"
         except Exception as exc:  # noqa: BLE001 -- retried later, never raised to a tool call
             failure = getattr(exc, "code", type(exc).__name__)
@@ -912,24 +926,39 @@ class Chatbot4World(World):
                 self._save()
         return ToolError(f"PR #{pr} is already {status} on the Hub", code)
 
-    def _reconcile(self, author=None):
-        """Mark open PRs whose head is already in main as merged (call with the lock held).
+    def _landed(self, main):
+        """{PR number: its commit} of the commits bundles landed on main's first-parent history
+        (lock held; cached per main sha)."""
+        if self.landed_at != main:
+            out = self.repo.git("log", "--first-parent", f"--committer=<{LANDER[1]}>", "--format=%H %s", main)
+            self.landed = {int(n): sha for sha, n in re.findall(r"^(\w+) PR #(\d+) by ", out, re.MULTILINE)}
+            self.landed_at = main
+        return self.landed
 
-        This recovers a Hub merge whose local bookkeeping failed, and state restored
-        from an archive that predates merges. Uses the local main ref.
+    def _reconcile(self, author=None):
+        """Mark open PRs whose head is already in main, or that a bundle landed, as merged
+        (call with the lock held).
+
+        This recovers a Hub merge or a bundle push whose local bookkeeping failed, and state
+        restored from an archive that predates merges. Uses the local main ref.
         """
         changed, main = False, self.repo.sha()
+        landed = self._landed(main)
         for rec in self.state["prs"].values():
             if rec["state"] != "open" or (author and rec["author"] != author):
                 continue
-            key = (rec["head_sha"], main)  # a git subprocess per open PR only when main moved
-            if key not in self.ancestry:
-                if len(self.ancestry) >= 10000:
-                    self.ancestry.clear()
-                self.ancestry[key] = self.repo.ancestor(rec["head_sha"], main)
-            if not self.ancestry[key]:
-                continue
-            merged = self.repo.merged_by(rec["head_sha"])
+            merged = landed.get(rec["pr"])
+            if merged:  # its head is not in main: the bundle landed a commit of its own
+                self.outbox.put(rec["pr"], {"close": f"Landed in {merged}"})
+            else:
+                key = (rec["head_sha"], main)  # a git subprocess per open PR only when main moved
+                if key not in self.ancestry:
+                    if len(self.ancestry) >= 10000:
+                        self.ancestry.clear()
+                    self.ancestry[key] = self.repo.ancestor(rec["head_sha"], main)
+                if not self.ancestry[key]:
+                    continue
+                merged = self.repo.merged_by(rec["head_sha"])
             reviewers = sorted(name for name, r in self._current_reviews(rec).items()
                                if r["verdict"] == "approve")
             rec.update(state="merged", merged_sha=merged)
@@ -1591,21 +1620,51 @@ class Chatbot4World(World):
             self.merge_wake.wait(min(5.0, max(0.1, soonest - now)))
 
     def _merge_next(self):
-        """Run the first queued PR whose retry time has come (None: none) as the agent that
-        queued it and return the merge. A merge or a refusal takes it off the queue, a refusal
-        with news for the author and that agent; a failure in MERGE_RETRY_CODES (or not a
-        ToolError) keeps its place with a backoff (MERGE_BACKOFF), the PRs behind it going
-        ahead meanwhile. Failures are re-raised."""
+        """Run the queued PRs whose retry time has come (None: none), up to merge.bundle of them
+        in queue order landed together (_merge_bundle; with 0, the first alone by _merge), and
+        return the first's merge or re-raise its failure. Each is settled by _merge_one; those a
+        bundle leaves out (its checks failed) go the single-PR path, _merge, one by one."""
         with self.lock:
             now = time.time()
-            entry = next((e for e in self.state["merge_queue"] if e["next_at"] <= now), None)
-            if entry is None:
-                return None
+            due = [e for e in self.state["merge_queue"] if e["next_at"] <= now][:max(1, self.bundle)]
+        if not due:
+            return None
+        if not self.bundle:
+            return self._merge_one(due[0])
+        steps, started, outcomes = {}, time.monotonic(), None
+        try:
+            outcomes = self._merge_bundle(due, steps)
+        except Exception as exc:  # noqa: BLE001 - e.g. main moved: nothing landed, each PR retried
+            outcomes = {e["pr"]: exc for e in due}
+        finally:  # one line per bundle run (bundle=N: its size), besides _merge's own lines
+            codes = ["fallback" if o is None else "merged" if isinstance(o, dict) else
+                     getattr(o, "code", type(o).__name__) for o in map((outcomes or {}).get, (e["pr"] for e in due))]
+            log.info("merge_pr bundle=%d prs=%s outcome=%s total=%.1f %s", len(due),
+                     ",".join(str(e["pr"]) for e in due), ",".join(codes), time.monotonic() - started,
+                     " ".join(f"{k}={v:.1f}" for k, v in steps.items()))
+        results = []
+        for entry in due:
+            try:
+                results.append(self._merge_one(entry, outcomes.get(entry["pr"])))
+            except Exception as exc:  # noqa: BLE001 - settled; the first PR's is re-raised below
+                results.append(exc)
+        if isinstance(results[0], Exception):
+            raise results[0]
+        return results[0]
+
+    def _merge_one(self, entry, given=None):
+        """Settle queue entry `entry` with `given` (a bundle's merge of it, or its failure) or
+        else its own merge (_merge) as the agent that queued it; return the merge. A merge or
+        a refusal takes it off the queue, a refusal with news for the author and that agent; a
+        failure in MERGE_RETRY_CODES (or not a ToolError) keeps its place with a backoff
+        (MERGE_BACKOFF), the PRs behind it going ahead meanwhile. Failures are re-raised."""
         pr, agent = entry["pr"], Agent(entry["by"])
         steps, outcome, started = {}, "error", time.monotonic()
         try:
             try:
-                result = self._merge(agent, pr, steps)
+                if isinstance(given, BaseException):
+                    raise given
+                result = given or self._merge(agent, pr, steps)
             except ToolError as exc:  # merged meanwhile (on the Hub, or by an earlier entry)
                 if exc.code != "pr_merged" or not (result := self._already_merged(pr)):
                     raise
@@ -1643,9 +1702,10 @@ class Chatbot4World(World):
                 self._dirty("_", "merge_queue")
                 self._save()
             raise
-        finally:  # one line per queue run: where a merge spends its time
-            log.info("merge_pr pr=%s outcome=%s total=%.1f %s", pr, outcome,
-                     time.monotonic() - started, " ".join(f"{k}={v:.1f}" for k, v in steps.items()))
+        finally:  # one line per single-PR run: where a merge spends its time
+            if given is None:
+                log.info("merge_pr pr=%s outcome=%s total=%.1f %s", pr, outcome,
+                         time.monotonic() - started, " ".join(f"{k}={v:.1f}" for k, v in steps.items()))
 
     def _merge(self, agent, pr, steps):
         """Merge PR pr as agent (the merge queue's turn of it)."""
@@ -1723,35 +1783,149 @@ class Chatbot4World(World):
                         log.error("PR #%s: main %s after the Hub merge is not the checked tree of %s",
                                   pr, merged[:12], new[:12])
                     with self.lock:
-                        rec.update(state="merged", merged_sha=merged)
-                        self._dirty("prs", pr)
-                        self._note_merge()
-                        news = {name: f"PR #{pr} you approved was merged by {agent.name}" for name in reviewers}
-                        news[agent.name] = f"PR #{pr} you queued is merged"
-                        news[rec["author"]] = f"your PR #{pr} was merged" + (
-                            f" by {agent.name}" if rec["author"] != agent.name else "")
-                        self._unnotify(rec["author"], pr, "mergeable")
-                        for name, text in news.items():
-                            self._notify(name, pr, "merged", text)
-                        self._save()
                         event = {"pr": pr, "author": rec["author"], "reviewers": reviewers,
                                  "parent_sha": main, "head_sha": new, "merged_sha": merged,
                                  **({"tree_mismatch": True} if mismatch else {})}
-                        rebased = {"rebased_from": base} if new != head else {}
-                        self._event("merged", agent, **event, **rebased)
-                        # Append-only integration hook, consumed by the separate evaluation workstream.
-                        with open(self.ws / "eval-queue.jsonl", "a") as out:
-                            out.write(json.dumps({"ts": time.time(), **event}) + "\n")
-                        return {**event, **rebased}
+                        return self._merged(agent, rec, event, **({"rebased_from": base} if new != head else {}))
                 finally:
                     with self.lock:
                         if rec["state"] == "merging":  # failed before the record was settled
                             rec["state"] = "open"
 
-    def _check_merge(self, pr, rec, main, steps):
+    def _merge_bundle(self, entries, steps):
+        """Land the PRs of queue entries `entries` together (the merge queue's turn of them).
+        Each PR that passes _merge's pre-checks has its change replayed onto main in queue
+        order as its own commit (its author's, committed by LANDER, subject "PR #N by ...");
+        one that conflicts, or whose diff the replay changes, is refused as _merge refuses it.
+        The bot contract and the shared tests run once on the last tree, then ONE push of the
+        series to main, a fast-forward with a lease on the main it was built on. Returns
+        {pr: its merge or refusal}; a PR missing from it goes the single-PR path (all but the
+        pre-check answers and refusals against main itself, when the checks fail). Main moving,
+        or a PR changing, before the push raises: nothing lands and every PR is retried."""
+        lane_at = time.monotonic()
+        with self._hub_write(Agent(entries[0]["by"]), "merge", entries[0]["pr"], lane="merge"):
+            steps["lane_wait"] = time.monotonic() - lane_at
+            with _timed(steps, "refresh"):
+                self.repo.refresh(0)
+            out, views = {}, []
+            with self.lock:
+                main = self.repo.sha()
+                for entry in entries:
+                    pr = entry["pr"]
+                    try:
+                        rec = self._pr(pr)
+                        if self._reconcile(rec["author"]) and rec["state"] == "merged":
+                            out[pr] = self._merged_event(rec)
+                            continue
+                        self._approved(rec)
+                        if any(p[2] == pr for p in self.pending.values()):
+                            raise ToolError("an update of this PR is in progress; retry when it finishes", "busy")
+                    except ToolError as exc:
+                        out[pr] = exc
+                        continue
+                    views.append(({**rec, "reviews": dict(rec["reviews"])}, Agent(entry["by"])))
+            tip, series = main, []
+            for view, agent in views:
+                pr, author = view["pr"], view["author"]
+                try:
+                    new = self._check_merge(pr, view, tip, steps, checks=False)
+                    reviewers = self._approved({**view, "base_sha": tip, "head_sha": new})
+                except ToolError as exc:
+                    exc.checked = (view["head_sha"], tip)
+                    out[pr] = exc
+                    continue
+                env = {**self.repo.env, "GIT_AUTHOR_NAME": author, "GIT_AUTHOR_EMAIL": f"{author}@flock.invalid",
+                       "GIT_COMMITTER_NAME": LANDER[0], "GIT_COMMITTER_EMAIL": LANDER[1]}
+                message = f"PR #{pr} by {author}; approved by {', '.join(reviewers)}\n\n{view['title']}\n"
+                sha = self.repo.git("commit-tree", f"{new}^{{tree}}", "-p", tip, data=message.encode(), env=env)
+                series.append((view, agent, tip, new, sha))
+                tip = sha
+            if not series:
+                return out
+            label = "+".join(str(view["pr"]) for view, *_ in series)
+            try:  # the tree tested is the tree landed
+                self._check_merge(label, {"base_sha": main, "head_sha": tip}, main, steps)
+            except ToolError as exc:
+                if exc.code in MERGE_RETRY_CODES:
+                    raise
+                if len(series) == 1:  # a bundle of one: _merge's own refusal
+                    exc.checked = (series[0][0]["head_sha"], main)
+                    return {**out, series[0][0]["pr"]: exc}
+                log.warning("merge bundle %s refused on main %s (%s); its PRs go one by one",
+                            label, main[:12], exc.code)
+                return {pr: o for pr, o in out.items() if getattr(o, "checked", (None, main))[1] == main}
+            lock_at = time.monotonic()
+            with self.main_lock:
+                steps["main_lock_wait"] = time.monotonic() - lock_at
+                with self.lock:
+                    try:  # every PR as checked and still approved right before landing
+                        if self.repo.sha() != main:
+                            raise ToolError("main moved")
+                        for i, (view, agent, parent, new, sha) in enumerate(series):
+                            rec = self.state["prs"].get(str(view["pr"]))
+                            if (rec is None or rec["state"] != "open" or rec["head_sha"] != view["head_sha"]
+                                    or any(p[2] == rec["pr"] for p in self.pending.values())):
+                                raise ToolError("a PR changed")
+                            series[i] = (rec, agent, parent, new, sha,
+                                         self._approved({**rec, "base_sha": parent, "head_sha": new}))
+                    except ToolError:
+                        raise ToolError("main or the PR changed during checks; retry merge_pr", "busy") from None
+                    for rec, *_ in series:
+                        rec["state"] = "merging"  # no update, review, close or merge while landing
+                try:
+                    with _timed(steps, "push"):
+                        try:
+                            self.repo.push(tip, "refs/heads/main", expected=main)
+                        except ToolError:  # it may have landed before failing (e.g. a timeout)
+                            with contextlib.suppress(ToolError):
+                                self.repo.fetch()
+                            if self.repo.sha() != tip:
+                                raise  # nothing landed (stale_lease: main moved): retried
+                    with _timed(steps, "update_ref"):  # local main moves before main_lock is released
+                        self.repo.update_refs(("refs/heads/main", tip))
+                    with self.lock:
+                        for rec, agent, parent, _new, sha, reviewers in series:
+                            event = {"pr": rec["pr"], "author": rec["author"], "reviewers": reviewers,
+                                     "parent_sha": parent, "head_sha": sha, "merged_sha": sha}
+                            extra = {"bundle": len(series), **(
+                                {"rebased_from": rec["base_sha"]} if rec["base_sha"] != parent else {})}
+                            rec.update(base_sha=parent, head_sha=sha)  # its commit on main (refs/pr/N keeps the old head)
+                            out[rec["pr"]] = self._merged(agent, rec, event, **extra)
+                            self.outbox.put(rec["pr"], {"close": f"Landed in {sha} (bundle of {len(series)})"})
+                    return out
+                finally:
+                    with self.lock:
+                        for rec, *_ in series:
+                            if rec["state"] == "merging":  # failed before the record was settled
+                                rec["state"] = "open"
+
+    def _merged(self, agent, rec, event, **extra):
+        """Record rec merged as `event` says (lock held; saves): news for the author, the agent
+        that queued it and the approvers, the merged event (with extra) and the eval-queue
+        line. Returns the merge."""
+        pr = rec["pr"]
+        rec.update(state="merged", merged_sha=event["merged_sha"])
+        self._dirty("prs", pr)
+        self._note_merge()
+        news = {name: f"PR #{pr} you approved was merged by {agent.name}" for name in event["reviewers"]}
+        news[agent.name] = f"PR #{pr} you queued is merged"
+        news[rec["author"]] = f"your PR #{pr} was merged" + (
+            f" by {agent.name}" if rec["author"] != agent.name else "")
+        self._unnotify(rec["author"], pr, "mergeable")
+        for name, text in news.items():
+            self._notify(name, pr, "merged", text)
+        self._save()
+        self._event("merged", agent, **event, **extra)
+        # Append-only integration hook, consumed by the separate evaluation workstream.
+        with open(self.ws / "eval-queue.jsonl", "a") as out:
+            out.write(json.dumps({"ts": time.time(), **event}) + "\n")
+        return {**event, **extra}
+
+    def _check_merge(self, pr, rec, main, steps, checks=True):
         """What merging rec makes main, checked (the caller holds a merge lane slot, no lock):
         the PR head, or on an older base the PR's change replayed onto main, whose approvals
-        must still hold; then the bot contract and the shared tests. Returns the head to merge."""
+        must still hold; then (checks) the bot contract and the shared tests. Returns the head
+        to merge."""
         base, head = rec["base_sha"], rec["head_sha"]
         with tempfile.TemporaryDirectory(dir=self.tmp_dir) as tmp:
             tree = Path(tmp) / "tree"
@@ -1781,6 +1955,8 @@ class Chatbot4World(World):
                     raise ToolError(f"rebasing PR #{pr} onto main {main[:12]} changes its diff, so it "
                                     "needs a fresh review: rebase onto origin/main, update the PR and "
                                     "ask for a review", "rebase_changed") from None
+            if not checks:
+                return new
             # The shared tests run beside the bot contract (both read the tree only); leaving the
             # pool waits for them, so the tree outlives them and a contract refusal still comes first.
             with concurrent.futures.ThreadPoolExecutor(1) as pool:

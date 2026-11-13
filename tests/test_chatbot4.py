@@ -49,6 +49,7 @@ class LocalHub:
 
     def close(self, pr, comment):
         self.closed = [*getattr(self, "closed", []), pr]
+        self.close_comments = {**getattr(self, "close_comments", {}), pr: comment}
 
     def merge(self, pr, comment):  # like the Hub: a three-way merge of refs/pr/N into main
         main, head = git(self.remote, "rev-parse", "main"), git(self.remote, "rev-parse", f"refs/pr/{pr}")
@@ -77,6 +78,7 @@ def _setup(tmp_path, monkeypatch, seed_dir):
     monkeypatch.setenv("CHATBOT_PR_CREATE_GAP_S", "0")  # the gap has its own test
     monkeypatch.setenv("CHATBOT_HUB_OUTBOX_GAP_S", "0")
     monkeypatch.setattr(Chatbot4World, "MERGER", False)  # merge() runs the queue in the test's thread
+    monkeypatch.setenv("CHATBOT_MERGE_BUNDLE", "0")  # the single-PR path; bundle tests set world.bundle
     seed = tmp_path / "seed"
     shutil.copytree(ROOT / "worlds/chatbot4" / seed_dir, seed, ignore=shutil.ignore_patterns("__pycache__"))
     git(seed, "init", "-b", "main")
@@ -582,7 +584,7 @@ def test_admin_lanes_and_knobs(setup):
     rec = submit(world, clone)
     approve(world, rec)
     assert world.knobs == {"save.interval_s": world.save_interval, "save.legacy_json": True,
-                           "review.max_reviewers": 0, "pr.open_floor": 20, "hub.push.slots": 1, "hub.merge.slots": 1, "hub.comment.slots": 1,
+                           "merge.bundle": 0, "review.max_reviewers": 0, "pr.open_floor": 20, "hub.push.slots": 1, "hub.merge.slots": 1, "hub.comment.slots": 1,
                            "hub.comment.gap_s": 0.0}
     world.admin.set({"hub.push.slots": 2, "hub.comment.gap_s": 0.5})
     assert world.lanes["push"].slots == 2 and world.lanes["comment"].gap_s == 0.5
@@ -1379,6 +1381,119 @@ def test_merge_queue_logs_one_timing_line_per_run(setup, caplog):
                           "replay", "approvals", "contract", "shared_tests", "main_lock_wait",
                           "push", "update_ref", "hub_merge", "fetch", "tree_check"}
     assert all(float(v) >= 0 for v in steps.values())
+
+
+def _bundle(setup, *replies):
+    """Bundle mode; one approved PR per (module, reply), each from its own clone and author,
+    queued in that order."""
+    world, clone, remote = setup
+    world.bundle = 5
+    recs = []
+    for i, (name, reply) in enumerate(replies):
+        work = clone.parent / f"bundle-{i}"
+        git(clone.parent, "clone", "-q", str(remote), str(work))
+        _module(work, name, reply)
+        recs.append(submit(world, work, author=f"author{i}", branch=f"b{i}"))
+        approve(world, recs[-1])
+        world.merge_pr(Agent("oak"), recs[-1]["pr"])
+    return world, remote, recs
+
+
+def test_a_bundle_lands_its_prs_as_one_commit_each_in_one_push(setup, monkeypatch, caplog):
+    world, remote, recs = _bundle(setup, ("one", None), ("two", None), ("three", None))
+    main, pushes, real = world.repo.sha(), [], world.repo.push
+    monkeypatch.setattr(world.repo, "push", lambda sha, ref, **kw: pushes.append(ref) or real(sha, ref, **kw))
+    caplog.set_level("INFO", logger="chatbot4")
+    first = world._merge_next()
+    assert pushes == ["refs/heads/main"] and not world.state["merge_queue"]
+    shas = git(remote, "rev-list", "--reverse", f"{main}..main").split()
+    parents = [main, *shas[:2]]
+    assert len(shas) == 3 and first["merged_sha"] == shas[0] and world.repo.sha() == shas[-1]
+    for rec, sha in zip(recs, shas):
+        assert world.state["prs"][str(rec["pr"])]["state"] == "merged"
+        assert git(remote, "log", "-1", "--format=%an|%ce|%s", sha) == (
+            f"{rec['author']}|{chatbot4.LANDER[1]}|PR #{rec['pr']} by {rec['author']}; approved by birch")
+        assert any(n["kind"] == "merged" for n in world.state["inbox"][rec["author"]])
+    queue = [json.loads(line) for line in (world.ws / "eval-queue.jsonl").read_text().splitlines()]
+    assert [(q["pr"], q["parent_sha"], q["merged_sha"]) for q in queue] == list(
+        zip([r["pr"] for r in recs], parents, shas))
+    [line] = [r.getMessage() for r in caplog.records if r.getMessage().startswith("merge_pr ")]
+    assert line.startswith(f"merge_pr bundle=3 prs={','.join(str(r['pr']) for r in recs)} outcome=merged,merged,merged total=")
+    hub = world.repo.hub
+    assert _wait(lambda: len(getattr(hub, "closed", [])) == 3)
+    assert hub.close_comments == {r["pr"]: f"Landed in {s} (bundle of 3)" for r, s in zip(recs, shas)}
+
+
+def test_a_bundle_refuses_a_conflicting_pr_as_today_and_lands_the_others(setup):
+    world, remote, recs = _bundle(setup, ("same", "a"), ("same", "b"), ("other", None))
+    world._merge_next()
+    states = [world.state["prs"][str(r["pr"])]["state"] for r in recs]
+    assert states == ["merged", "open", "merged"] and not world.state["merge_queue"]
+    landed = world.state["prs"][str(recs[0]["pr"])]["merged_sha"]
+    assert world.state["prs"][str(recs[2]["pr"])]["merged_sha"] == git(remote, "rev-parse", "main")
+    [news] = [n["text"] for n in world.state["inbox"]["author1"] if n["kind"] == "merge"]
+    assert news.startswith(f"your PR #{recs[1]['pr']} was not merged: PR #{recs[1]['pr']} conflicts "
+                           f"with main {landed[:12]} in bot/modules/same.py")
+    assert world.merge_refusals[-1]["code"] == "conflict"
+
+
+def test_a_bundle_failing_its_checks_falls_back_to_one_merge_per_pr(setup, monkeypatch):
+    world, remote, recs = _bundle(setup, ("one", None), ("bad", None), ("three", None))
+    real = world._shared_tests
+
+    def shared_tests(pr, tree, main):
+        if (tree / "bot/modules/bad.py").exists():
+            raise ToolError("the shared tests fail", "shared_tests")
+        return real(pr, tree, main)
+
+    monkeypatch.setattr(world, "_shared_tests", shared_tests)
+    world._merge_next()
+    states = [world.state["prs"][str(r["pr"])]["state"] for r in recs]
+    assert states == ["merged", "open", "merged"] and not world.state["merge_queue"]
+    assert world.merge_refusals[-1] == {**world.merge_refusals[-1], "pr": recs[1]["pr"], "code": "shared_tests"}
+    assert len(git(remote, "rev-list", "--parents", "-n", "1", "main").split()) == 3  # Hub merges
+
+
+def test_a_bundle_lands_nothing_when_main_moves_before_its_push(setup, monkeypatch):
+    world, remote, recs = _bundle(setup, ("one", None), ("two", None))
+    real, moved = world._shared_tests, []
+
+    def main_moves(pr, tree, main):
+        if not moved:
+            _push_to_main(setup, "extra")
+            moved.append(git(remote, "rev-parse", "main"))
+        return real(pr, tree, main)
+
+    monkeypatch.setattr(world, "_shared_tests", main_moves)
+    with pytest.raises(ToolError) as refused:
+        world._merge_next()
+    assert refused.value.code == "stale_lease" and git(remote, "rev-parse", "main") == moved[0]
+    assert [world.state["prs"][str(r["pr"])]["state"] for r in recs] == ["open", "open"]
+    assert [e["tries"] for e in world.state["merge_queue"]] == [1, 1]
+    for entry in world.state["merge_queue"]:
+        entry["next_at"] = 0.0
+    world._merge_next()  # retried from the start on the new main
+    assert git(remote, "rev-list", "--count", f"{moved[0]}..main") == "2" and not world.state["merge_queue"]
+
+
+def test_bundle_merges_stay_merged_through_hub_closed_states_and_a_lost_state_write(setup):
+    world, _remote, recs = _bundle(setup, ("one", None), ("two", None))
+    world.flush()
+    before = (world.ws / "prs.json").read_text()  # the state as a crash after the push leaves it
+    world._merge_next()
+    prs = [r["pr"] for r in recs]
+    merged = {pr: world.state["prs"][str(pr)]["merged_sha"] for pr in prs}
+    world.repo.hub.pr_states = lambda: dict.fromkeys(prs, "closed")
+    world.hub_states_at = float("-inf")
+    world._sync_hub_states()
+    assert {pr: world.state["prs"][str(pr)]["state"] for pr in prs} == dict.fromkeys(prs, "merged")
+    world.close()
+    _write_archive(world, json.loads(before))
+    restarted = Chatbot4World(world.ws, world.repo)
+    assert len(restarted.state["merge_queue"]) == 2  # the old state, restored
+    assert {pr: (restarted.state["prs"][str(pr)]["state"], restarted.state["prs"][str(pr)]["merged_sha"])
+            for pr in prs} == {pr: ("merged", sha) for pr, sha in merged.items()}
+    assert restarted._merge_next()["already_merged"]  # the queue left in the old state is answered
 
 
 def test_temporary_checkouts_go_to_chatbot_tmp_dir(setup, tmp_path, monkeypatch):

@@ -427,7 +427,7 @@ python -m flock.world set <swarm> pr.open_floor=10 --reason "hub 429s"
 ```
 
 chatbot4's knobs: `save.interval_s` (`CHATBOT_SAVE_INTERVAL_S`), `save.legacy_json`, `pr.open_floor`
-(`CHATBOT_PR_OPEN_FLOOR`), `hub.push.slots`, `hub.merge.slots`, `hub.comment.slots` and
+(`CHATBOT_PR_OPEN_FLOOR`), `merge.bundle` (`CHATBOT_MERGE_BUNDLE`, below), `hub.push.slots`, `hub.merge.slots`, `hub.comment.slots` and
 `hub.comment.gap_s` (its Hub write lanes, below). `open_pr` honours the `open` lane (new PRs)
 and `push`, `merge_pr` and the merge queue the `merge` lane (paused: `merge_pr` refuses and the
 queue waits), besides `CHATBOT_PRS_PAUSED` and its flag file;
@@ -536,7 +536,18 @@ refused that head on that main (conflict, `rebase_changed`, `shared_tests`, `con
 Hub and git failures, a lane refusal or an update in progress keep the PR's place, retried
 after its own backoff (5 s doubling to 10 min) while the PRs behind it go ahead. `get_pr` and
 `list_prs` show a queued PR's `queued` position. Each queue run logs one `merge_pr pr=N
-outcome=... total=...` timing line. The inbox is the only path for this news: it rides on the
+outcome=... total=...` timing line.
+With `merge.bundle` B > 0 (`CHATBOT_MERGE_BUNDLE`, default 5) the queue lands up to B due PRs
+at once: each one passing the checks above is replayed onto main in queue order as its own
+commit (the PR's author, committer `merge-queue@world.flock.invalid`, subject `PR #N by <author>;
+approved by ...`), refused as above on a conflict or a changed diff; the bot contract and the
+shared tests run once on the last tree, and one push moves main to it (a fast-forward with a
+lease on the main it was built on: if main moved, nothing lands and the PRs are retried). Each
+PR is then merged with `merged_sha` its own commit, the same news and events, and is closed on
+the Hub through the comment outbox ("Landed in <sha> (bundle of N)"). When the checks fail on
+a bundle of several, its PRs go the single-PR path above one by one. A restart recovers a push
+whose state write was lost from those commits on main. Each bundle logs one `merge_pr bundle=N
+prs=... outcome=...` line. B = 0: one Hub merge per PR. The inbox is the only path for this news: it rides on the
 agent's next successful world tool result. `CHATBOT_UNION_PATHS` (gitattributes
 patterns, e.g. `deck/*.jsonl`; empty by default) makes `merge_pr`'s replay onto main merge
 those paths with `merge=union` (both sides' lines kept) from a world-side attributes file; the
