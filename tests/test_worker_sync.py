@@ -519,6 +519,35 @@ async def test_restore_skips_excluded_remote_files(tmp_path):
                   if p.is_file()) == ["keep.txt", "wt/.git"]
 
 
+async def test_sync_only_allowlist_mirrors_restores_and_counts_only_listed_paths(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOCK_SYNC_ONLY", "chatbot-swarm/,notes/,*/.git/*,*,")
+    store = MemoryStore()
+    pre = "sw/researcher/researcher-0001/workdir/"
+    rt, _ = runtime(tmp_path / "a", sync=BucketSync(store, "sw"))
+    await rt.setup(restore=False)
+    store.files[pre + "w8/old.py"] = b"remote"  # outside the allowlist: never deleted
+    store.files[pre + "notes/gone.md"] = b"stale"  # inside: mirrored
+    for rel in ["chatbot-swarm/a.py", "notes/n.md", "top.txt", "w8/b.py", "w8/.git/HEAD",
+                "w8/sub/c.py", "chatbot-swarm/__pycache__/a.pyc"]:
+        (rt.workdir / rel).parent.mkdir(parents=True, exist_ok=True)
+        (rt.workdir / rel).write_text("x")
+    await rt.sync.push(rt)
+    listed = ["chatbot-swarm/a.py", "notes/n.md", "top.txt", "w8/.git/HEAD"]
+    assert sorted(k[len(pre):] for k in store.files if k.startswith(pre)) == sorted(
+        listed + ["w8/old.py"])
+    assert rt.workdir_stats.files == len(listed)  # size and quota: mirrored files only
+    await rt.stop()
+
+    store.files[pre + "fresh/x.py"] = b"x"
+    store.files[pre + "fresh/.git/config"] = b"x"
+    rt2, _ = runtime(tmp_path / "b", sync=BucketSync(store, "sw"))
+    res = await rt2.sync.restore(rt2)
+    assert not res.failed
+    assert sorted(p.relative_to(rt2.workdir).as_posix() for p in rt2.workdir.rglob("*")
+                  if p.is_file()) == sorted(listed + ["fresh/.git/config"])
+
+
 async def test_over_soft_limit_notes_hourly_and_hard_limit_emits_event(tmp_path):
     from flock.worker.sync import QUOTA_NOTE_EVERY
     store = MemoryStore()

@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-import fnmatch
 import shutil
 import threading
 import time
 from pathlib import Path
 
+from huggingface_hub._buckets import FilterMatcher
+
 from flock.models import TokenUsage, TypeSpec
 from flock.worker.adapters.base import AdapterEvent, EventQueue, ResumeError
 from flock.worker.agents import AgentRuntime
 from flock.worker.events import Outbox
-from flock.worker.sync import BucketSync
+from flock.worker.sync import BucketSync, sync_filter_rules
 
 
 def spec(**kw) -> TypeSpec:
@@ -132,7 +133,8 @@ class MemoryStore:
 
     def sync_up(self, local, prefix, *, delete=True, exclude=None):
         prefix = prefix.rstrip("/") + "/"
-        keep = lambda rel: not any(fnmatch.fnmatchcase(rel, pat) for pat in exclude or ())
+        keep = FilterMatcher(exclude_patterns=exclude,  # sync_bucket's own filter
+                             filter_rules=sync_filter_rules(exclude)).matches
         mine = {prefix + p.relative_to(local).as_posix(): p for p in Path(local).rglob("*")
                 if p.is_file() and keep(p.relative_to(local).as_posix())}
         if delete:

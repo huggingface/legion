@@ -48,6 +48,8 @@ bucket copies, deleting entries the in-flight restore had not fetched yet):
   FLOCK_SYNC_EXCLUDE adds globs, FLOCK_SYNC_EXCLUDE_DEFAULTS=0 drops the defaults) are neither
   uploaded nor deleted by the mirror, and restore skips them, also those already in the bucket.
   `.git/` and worktrees are never excluded by default.
+- Env FLOCK_SYNC_ONLY (comma-separated, same syntax) is an allowlist: when set, a path outside it
+  is treated like an excluded one. An allow pattern without `/` matches top-level files only (`*`).
 - The type's `workdir.ephemeral` dirs (root-relative) are excluded like the caches; the agent's
   setup empties them (`reset_ephemeral`), so they never come back after a move.
 - Each push's modes walk also measures what is mirrored (`WorkdirStats`): above the type's
@@ -109,6 +111,7 @@ import re
 import shutil
 import stat
 import tarfile
+import tempfile
 import threading
 import time
 from collections import Counter
@@ -212,10 +215,14 @@ def _expand(pattern: str) -> list[str]:
     return [pattern]
 
 
+ONLY = "+"  # marks a FLOCK_SYNC_ONLY (allowlist) entry in a `workdir_excludes()` list
+
+
 def workdir_excludes() -> list[str]:
     """Globs for the workdir mirror, relative to the workdir, always including `*.flock-part`:
     the defaults (unless env FLOCK_SYNC_EXCLUDE_DEFAULTS=0) plus the spec's `sync_exclude`, else
-    the comma-separated FLOCK_SYNC_EXCLUDE. `.git/` is never in the defaults."""
+    the comma-separated FLOCK_SYNC_EXCLUDE. `.git/` is never in the defaults. The comma-separated
+    FLOCK_SYNC_ONLY patterns follow, each prefixed with `ONLY` (module docstring)."""
     pats = list(PUSH_EXCLUDE)
     if os.environ.get("FLOCK_SYNC_EXCLUDE_DEFAULTS", "1").strip() != "0":
         pats += [x for d in DEFAULT_WORKDIR_EXCLUDE for x in _expand(d)]
@@ -225,20 +232,45 @@ def workdir_excludes() -> list[str]:
     for item in extra:
         if item.strip():
             pats += _expand(item.strip())
+    for item in os.environ.get("FLOCK_SYNC_ONLY", "").split(","):
+        if item.strip():
+            pats += [ONLY + x for x in _expand(item.strip())]
     return pats
 
 
 @functools.lru_cache(maxsize=64)
 def _matcher(patterns: tuple[str, ...]):
-    """One compiled regex for a pattern list (a walk tests every file of a workdir)."""
-    if not patterns:
-        return lambda rel: None
-    return re.compile("|".join(fnmatch.translate(p.replace("\\", "/")) for p in patterns)).match
+    """rel -> excluded? for a pattern list, compiled once (a walk tests every file of a workdir):
+    it matches an exclude, or allowlist (`ONLY`) entries exist and it matches none of them. A
+    directory (`rel` ending in `/`) is never left out by the allowlist: `*/.git/*` may be below."""
+    def rx(ps: list[str]):
+        if not ps:
+            return lambda rel: None
+        return re.compile("|".join(fnmatch.translate(p.replace("\\", "/")) for p in ps)).match
+
+    excl = rx([p for p in patterns if not p.startswith(ONLY)])
+    allow = [p[len(ONLY):] for p in patterns if p.startswith(ONLY)]
+    if not allow:
+        return lambda rel: excl(rel) is not None
+    deep, top = rx([p for p in allow if "/" in p]), rx([p for p in allow if "/" not in p])
+    return lambda rel: excl(rel) is not None or not (
+        rel.endswith("/") or deep(rel) or ("/" not in rel and top(rel)))
 
 
 def is_excluded(rel: str, patterns: list[str]) -> bool:
     """Does the workdir-relative posix path match one of the patterns (as `sync_bucket` does)?"""
-    return _matcher(tuple(patterns))(rel) is not None
+    return _matcher(tuple(patterns))(rel)
+
+
+def sync_filter_rules(exclude: list[str] | None) -> list[tuple[str, str]] | None:
+    """`sync_bucket` filter rules (first match decides) equal to `is_excluded`, or None when
+    there is no allowlist (plain `exclude` then)."""
+    allow = [p[len(ONLY):] for p in exclude or () if p.startswith(ONLY)]
+    if not allow:
+        return None
+    return ([("-", p) for p in exclude if not p.startswith(ONLY)]
+            + [("+", p) for p in allow if "/" in p] + [("-", "*/*")]
+            + [("+", p) for p in allow if "/" not in p] + [("-", "*")])
 
 
 @dataclass
@@ -310,10 +342,10 @@ def _walk(workdir: Path, exclude: list[str] | None = None):
         base = Path(root).relative_to(workdir).as_posix()
         base = "" if base == "." else base + "/"
         links = [d for d in dirs if os.path.islink(os.path.join(root, d))]
-        dirs[:] = sorted(d for d in dirs if d not in links and excl(f"{base}{d}/") is None)
+        dirs[:] = sorted(d for d in dirs if d not in links and not excl(f"{base}{d}/"))
         for f in sorted(files + links):
             rel = base + f
-            if excl(rel) is not None:
+            if excl(rel):
                 continue
             try:
                 st = os.lstat(os.path.join(root, f))
@@ -628,7 +660,7 @@ class BucketStore(Protocol):
                 exclude: list[str] | None = None) -> None:
         """Upload new/changed files of a local directory to `prefix`; with `delete`, also
         delete remote files missing locally. `exclude`: fnmatch patterns on relative paths,
-        neither uploaded nor deleted."""
+        neither uploaded nor deleted (`ONLY` entries: an allowlist, as in `is_excluded`)."""
         ...
 
     def sync_down(self, prefix: str, local: Path) -> None: ...
@@ -712,9 +744,14 @@ class HubBucketStore:
     def sync_up(self, local: Path, prefix: str, *, delete: bool = True,
                 exclude: list[str] | None = None) -> None:
         self.stats.add("ops", "sync_bucket_up")
-        with _xet_aborted_is_an_error():
-            self.api.sync_bucket(str(local), self._url(prefix), delete=delete,
-                                 exclude=exclude or None, quiet=True)
+        rules = sync_filter_rules(exclude)
+        with _xet_aborted_is_an_error(), contextlib.ExitStack() as stack:
+            kw: dict = {"exclude": exclude or None}
+            if rules is not None:  # an allowlist: sync_bucket takes ordered rules from a file only
+                path = Path(stack.enter_context(tempfile.TemporaryDirectory())) / "filter"
+                path.write_text("".join(f"{sign} {p}\n" for sign, p in rules))
+                kw = {"filter_from": str(path)}
+            self.api.sync_bucket(str(local), self._url(prefix), delete=delete, quiet=True, **kw)
 
     def sync_down(self, prefix: str, local: Path) -> None:
         self.stats.add("ops", "sync_bucket_down")
