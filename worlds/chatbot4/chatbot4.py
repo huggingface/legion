@@ -1779,6 +1779,9 @@ class Chatbot4World(World):
         with _timed(steps, "overlap_wait"):  # also keeps the merge checks one at a time
             concurrent.futures.wait([future])
         exc, seconds = future.exception(), sum(spec_steps.values())
+        if exc is not None and not (isinstance(exc, ToolError) and exc.code not in MERGE_RETRY_CODES):
+            log.warning("merge overlap: the check of PR #%s failed (%s %s); it is checked again at its turn",
+                        spec_pr, type(exc).__name__, getattr(exc, "code", ""))
         trees = self.repo.git("rev-parse", f"{main}^{{tree}}", f"{predicted}^{{tree}}").split()
         if spec_pr == pr and trees[0] == trees[1] and all(
                 spec_rec[k] == rec[k] for k in ("base_sha", "head_sha", "reviews")):
