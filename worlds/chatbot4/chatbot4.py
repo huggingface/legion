@@ -300,6 +300,7 @@ class Chatbot4World(World):
         # "next_at"} (see merge_pr and _merge_next).
         self.state.setdefault("merge_queue", [])
         self.merge_wake = threading.Event()
+        self.spec = None  # the next queued PR's checks during a merge's Hub calls (see _merge); memory only
         # New-PR budget: Hub PR creations and merges (unix times, last WINDOW seconds).
         self.state.setdefault("pr_opens", [])
         self.state.setdefault("pr_merges", [])
@@ -1670,7 +1671,9 @@ class Chatbot4World(World):
                 main, base, head = self.repo.sha(), rec["base_sha"], rec["head_sha"]
                 view = {**rec, "reviews": dict(rec["reviews"])}
             try:
-                new = self._check_merge(pr, view, main, steps)
+                spec, self.spec = self.spec, None
+                new = (spec and self._overlapped(spec, pr, view, main, steps)) or self._check_merge(
+                    pr, view, main, steps)
             except ToolError as exc:
                 exc.checked = (head, main)  # what the refusal is about (merge_pr's cache)
                 raise
@@ -1684,6 +1687,13 @@ class Chatbot4World(World):
                         raise ToolError("main or the PR changed during checks; retry merge_pr", "busy")
                     reviewers = self._approved({**rec, "base_sha": main, "head_sha": new})
                     rec["state"] = "merging"  # no update, review, close or merge while the Hub calls run
+                    # Overlap: while the Hub calls below run, check the next queued PR on the main
+                    # this merge should make (new's tree); its turn uses that only if main has it.
+                    nxt = next((self.state["prs"].get(str(e["pr"])) for e in self.state["merge_queue"]
+                                if e["pr"] != pr), None)
+                    if (nxt and nxt["state"] == "open"
+                            and not any(p[2] == nxt["pr"] for p in self.pending.values())):
+                        self.spec = self._overlap(nxt["pr"], {**nxt, "reviews": dict(nxt["reviews"])}, new)
                 try:
                     if new != head:  # the Hub merges refs/pr/N as it is: publish the rebase first
                         # A stale lease (e.g. a rebase pushed just before a restart) adopts the Hub head.
@@ -1747,6 +1757,42 @@ class Chatbot4World(World):
                     with self.lock:
                         if rec["state"] == "merging":  # failed before the record was settled
                             rec["state"] = "open"
+
+    def _overlap(self, pr, rec, predicted):
+        """Start _check_merge of rec on the predicted main in a daemon thread (see _merge)."""
+        future, steps = concurrent.futures.Future(), {}
+
+        def check():
+            try:
+                future.set_result(self._check_merge(pr, rec, predicted, steps))
+            except BaseException as exc:  # noqa: BLE001 - read by _overlapped
+                future.set_exception(exc)
+
+        threading.Thread(target=check, name="chatbot4-merge-overlap", daemon=True).start()
+        return pr, rec, predicted, future, steps
+
+    def _overlapped(self, spec, pr, rec, main, steps):
+        """The head _overlap checked for rec, moved onto main, when that PR, head, base and
+        reviews are unchanged and main's tree is the predicted one: the checks only see trees,
+        so their refusal stands too (raised). None: check again."""
+        spec_pr, spec_rec, predicted, future, spec_steps = spec
+        with _timed(steps, "overlap_wait"):  # also keeps the merge checks one at a time
+            concurrent.futures.wait([future])
+        exc, seconds = future.exception(), sum(spec_steps.values())
+        trees = self.repo.git("rev-parse", f"{main}^{{tree}}", f"{predicted}^{{tree}}").split()
+        if spec_pr == pr and trees[0] == trees[1] and all(
+                spec_rec[k] == rec[k] for k in ("base_sha", "head_sha", "reviews")):
+            if isinstance(exc, ToolError) and exc.code not in MERGE_RETRY_CODES:
+                steps["overlap"] = seconds
+                raise ToolError(exc.message.replace(predicted[:12], main[:12]), exc.code)
+            if exc is None and self.repo.git("rev-parse", f"{future.result()}^@") == predicted:
+                steps["overlap"] = seconds
+                # Same tree, message, author and committer as checked; only the parent becomes main.
+                raw = self.repo.git_bytes("cat-file", "commit", future.result())
+                return self.repo.git("hash-object", "-t", "commit", "-w", "--stdin", data=raw.replace(
+                    f"parent {predicted}".encode(), f"parent {main}".encode(), 1))
+        steps["overlap_lost"] = seconds
+        return None
 
     def _check_merge(self, pr, rec, main, steps):
         """What merging rec makes main, checked (the caller holds a merge lane slot, no lock):

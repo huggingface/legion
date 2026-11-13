@@ -1336,6 +1336,92 @@ def test_a_transient_merge_failure_keeps_the_pr_queued_while_the_next_goes_ahead
     assert not any(e["kind"] == "merge" for box in world.state["inbox"].values() for e in box)
 
 
+def _overlap_prs(setup, monkeypatch, reply_two=None):
+    """Two approved PRs on the same main, queued; the threads that ran each bot contract."""
+    world, clone, remote = setup
+    other = clone.parent / "other"
+    git(clone.parent, "clone", "-q", str(remote), str(other))
+    _module(other, "weather", None)
+    a = submit(world, other, "pine", "a")
+    _module(clone, "time" if reply_two is None else "weather", reply_two)
+    b = submit(world, clone, "cedar", "b")
+    approve(world, a)
+    approve(world, b)
+    checks, contract = [], world._bot_contract
+    monkeypatch.setattr(world, "_bot_contract", lambda tree, names: (
+        checks.append(threading.current_thread().name), contract(tree, names))[1])
+    world.merge_pr(Agent("oak"), a["pr"])
+    world.merge_pr(Agent("oak"), b["pr"])
+    return world, clone, remote, a, b, checks
+
+
+def _timing(caplog, pr):
+    return next(r.getMessage() for r in caplog.records if r.getMessage().startswith(f"merge_pr pr={pr} "))
+
+
+def test_the_next_pr_is_checked_during_the_hub_merge_and_lands_on_the_predicted_tree(setup, monkeypatch, caplog):
+    world, _clone, remote, a, b, checks = _overlap_prs(setup, monkeypatch)
+    caplog.set_level("INFO", logger="chatbot4")
+    first, second = world._merge_next(), world._merge_next()
+    assert checks == ["MainThread", "chatbot4-merge-overlap"]  # B checked once, during A's Hub calls
+    assert second["parent_sha"] == first["merged_sha"] == git(remote, "rev-parse", f"{second['head_sha']}^")
+    assert git(remote, "rev-parse", "main^{tree}") == git(remote, "rev-parse", f"{second['head_sha']}^{{tree}}")
+    line = _timing(caplog, b["pr"])
+    assert " overlap=" in line and " contract=" not in line and "overlap=" not in _timing(caplog, a["pr"])
+
+
+def test_a_refusal_on_the_predicted_main_stands_worded_for_the_real_one(setup, monkeypatch):
+    world, _clone, _remote, _a, b, _checks = _overlap_prs(setup, monkeypatch, reply_two="Sunny")
+    first = world._merge_next()
+    with pytest.raises(ToolError, match=f"conflicts with main {first['merged_sha'][:12]}"):
+        world._merge_next()
+    assert world.refused[b["pr"]][:2] == (b["head_sha"], first["merged_sha"])
+
+
+def test_a_failed_hub_merge_discards_the_overlap_and_checks_the_next_pr_again(setup, monkeypatch, caplog):
+    world, _clone, _remote, _a, b, checks = _overlap_prs(setup, monkeypatch)
+    caplog.set_level("INFO", logger="chatbot4")
+    real_merge = world.repo.hub.merge
+
+    def failing(pr, comment):
+        raise ToolError("Hub request failed; retry later", "hub_error")
+
+    monkeypatch.setattr(world.repo.hub, "merge", failing)
+    with pytest.raises(ToolError, match="Hub request failed"):
+        world._merge_next()
+    monkeypatch.setattr(world.repo.hub, "merge", real_merge)
+    out = world._merge_next()  # A waits out its backoff; B lands on the real main
+    assert out["pr"] == b["pr"] and "rebased_from" not in out
+    assert checks == ["MainThread", "chatbot4-merge-overlap", "MainThread"]
+    assert " overlap_lost=" in _timing(caplog, b["pr"])
+
+
+@pytest.mark.parametrize("change", ["update", "request_changes"])
+def test_a_pr_changed_during_the_hub_merge_never_lands_on_its_overlap_checks(setup, monkeypatch, change):
+    world, clone, remote, _a, b, checks = _overlap_prs(setup, monkeypatch)
+    real_merge = world.repo.hub.merge
+
+    def merge_while_b_changes(pr, comment):
+        if change == "update":
+            _module(clone, "time", "It is noon")
+            approve(world, submit(world, clone, "cedar", "b", pr=b["pr"]))
+        else:
+            world.review_pr(Agent("oak"), b["pr"], b["head_sha"], "request_changes", "Breaks the deck")
+        return real_merge(pr, comment)
+
+    monkeypatch.setattr(world.repo.hub, "merge", merge_while_b_changes)
+    world._merge_next()
+    monkeypatch.setattr(world.repo.hub, "merge", real_merge)
+    if change == "update":
+        assert world._merge_next()["pr"] == b["pr"]
+        assert "It is noon" in git(remote, "show", "main:bot/modules/time.py")
+        assert checks == ["MainThread", "chatbot4-merge-overlap", "MainThread"]
+    else:
+        with pytest.raises(ToolError, match="requests changes"):
+            world._merge_next()
+        assert world.state["prs"][str(b["pr"])]["state"] == "open"
+
+
 def test_a_retry_after_a_landed_merge_and_a_failed_fetch_finds_it_merged(setup, monkeypatch):
     world, _clone, second = _two_prs(setup, lambda c: _module(c, "weather", None),
                                      lambda c: _module(c, "time", None))
