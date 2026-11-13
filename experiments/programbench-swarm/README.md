@@ -32,14 +32,17 @@ Use a fresh timestamped run directory and name, private HF dataset initialized
 with a README, board deployed once, and bucket results prefix. Each worker connects
 to the existing board URL; do not configure Space deployment on every worker.
 
-Supply RUN_NAME, RUN_BUCKET, ROUTER_URL, HF_REPO_ID and BOARD_URL. Supply HF_TOKEN,
+Supply RUN_NAME, RUN_BUCKET, ROUTER_URL, HF_REPO_ID and BOARD_URL. Use the router's
+private IP or fully qualified hostname; containers do not inherit the host's DNS
+search domain. Validate connectivity inside the task, not only on the login node. Supply HF_TOKEN,
 ROUTER_API_KEY and BOARD_TOKEN through the runtime's protected secret handling.
 The router key comes from its local api-key file, never from a committed YAML.
 The operator explicitly approved sharing HF_TOKEN with these experiment agents;
 the local hf_repo plugin implements that choice without changing Flock defaults.
 
 Use `flock init RUN_DIR --from experiments/programbench-swarm --profile PROFILE`
-with the cluster profile based on cluster.env.example, then fill the run's
+with the cluster profile based on cluster.env.example, run
+`python experiments/programbench-swarm/prepare_slurm.py RUN_DIR`, then fill the run's
 mode 0600 environment using the existing deployment workflow. The run snapshot
 must configure unqualified container images to resolve against docker.io and use the validated cluster's Netavark/aardvark 1.11 helpers, job-local Podman
 storage, and Git LFS on PATH. Keep generated launch artifacts and secrets outside
