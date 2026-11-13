@@ -1,0 +1,56 @@
+name: ${RUN_NAME}
+namespace: edbeeching
+bucket: ${RUN_BUCKET}
+compute:
+  kind: slurm
+  partition: hopper-cpu
+  cpus: 24
+  mem: 44G
+  time: '5:00:00'
+model: openai/Qwen/Qwen3.8-27B
+inference:
+  base_url: ${ROUTER_URL}
+  api_key_env: ROUTER_API_KEY
+  reasoning_effort: low
+  max_working: 16
+naming: consecutive-id
+task:
+  repo: https://huggingface.co/datasets/HuggingFaceSwarms/programbench-harbor-staging
+  revision: 71a3477240b19b966da44873be69e15364e50481
+  selector: wfxr--csview.8ac4de0
+team_file: team.md
+resources_dir: resources
+resources:
+  hf_repo:
+    repo_id: ${HF_REPO_ID}
+    token_env: HF_TOKEN
+  programbench_runtime: {}
+  message_board:
+    url: ${BOARD_URL}
+    token_env: BOARD_TOKEN
+tools:
+- message_board.*
+- hf_repo.*
+agents:
+  count: 16
+environment:
+  backend: podman
+workers:
+  agents_per_worker: 2
+  max_working_per_worker: 2
+  turn_timeout: 20m
+  worker_lifetime: 5h
+  lifetime_jitter: 0s
+  drain_window: 130m
+loop:
+  prompt: Read the task instructions and identify your agent name. Verify tool schemas
+    and Git availability. Run no reference probes and make no source changes yet.
+    Post READY with your name on the board, then end the turn. Wait for the coordinator
+    working-phase prompt.
+  every: turn_end
+  while:
+    max_rounds: 1
+limits:
+  run_timeout_seconds: 18000
+  agent_max_turns: 60
+  trial_hours: 4
