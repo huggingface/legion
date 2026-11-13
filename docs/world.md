@@ -543,7 +543,8 @@ commit (the PR's author, committer `merge-queue@world.flock.invalid`, subject `P
 approved by ...`), refused as above on a conflict or a changed diff; the bot contract and the
 shared tests run once on the last tree, and one push moves main to it (a fast-forward with a
 lease on the main it was built on: if main moved, nothing lands and the PRs are retried). Each
-PR is then merged with `merged_sha` its own commit, the same news and events, and is closed on
+PR is then merged with `merged_sha` its own commit, the same news and events (plus `bundle`, its
+size, and `bundle_tip`, the only commit whose tree was checked), and is closed on
 the Hub through the comment outbox ("Landed in <sha> (bundle of N)"). When the checks fail on
 a bundle of several, its PRs go the single-PR path above one by one. A restart recovers a push
 whose state write was lost from those commits on main. Each bundle logs one `merge_pr bundle=N

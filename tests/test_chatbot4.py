@@ -1415,8 +1415,8 @@ def test_a_bundle_lands_its_prs_as_one_commit_each_in_one_push(setup, monkeypatc
             f"{rec['author']}|{chatbot4.LANDER[1]}|PR #{rec['pr']} by {rec['author']}; approved by birch")
         assert any(n["kind"] == "merged" for n in world.state["inbox"][rec["author"]])
     queue = [json.loads(line) for line in (world.ws / "eval-queue.jsonl").read_text().splitlines()]
-    assert [(q["pr"], q["parent_sha"], q["merged_sha"]) for q in queue] == list(
-        zip([r["pr"] for r in recs], parents, shas))
+    assert [(q["pr"], q["parent_sha"], q["merged_sha"], q["bundle"], q["bundle_tip"]) for q in queue] == [
+        (r["pr"], parent, sha, 3, shas[-1]) for r, parent, sha in zip(recs, parents, shas)]
     [line] = [r.getMessage() for r in caplog.records if r.getMessage().startswith("merge_pr ")]
     assert line.startswith(f"merge_pr bundle=3 prs={','.join(str(r['pr']) for r in recs)} outcome=merged,merged,merged total=")
     hub = world.repo.hub
@@ -1474,6 +1474,72 @@ def test_a_bundle_lands_nothing_when_main_moves_before_its_push(setup, monkeypat
         entry["next_at"] = 0.0
     world._merge_next()  # retried from the start on the new main
     assert git(remote, "rev-list", "--count", f"{moved[0]}..main") == "2" and not world.state["merge_queue"]
+
+
+def test_a_bundle_of_one_failing_its_checks_keeps_no_refusal_against_its_own_commit(setup, monkeypatch):
+    world, _remote, recs = _bundle(setup, ("same", "a"), ("same", "b"))
+    real = world._shared_tests
+
+    def shared_tests(pr, tree, main):
+        if "'a'" in (tree / "bot/modules/same.py").read_text():
+            raise ToolError("the shared tests fail", "shared_tests")
+        return real(pr, tree, main)
+
+    monkeypatch.setattr(world, "_shared_tests", shared_tests)
+    with pytest.raises(ToolError, match="the shared tests fail"):
+        world._merge_next()  # A refused; B, which conflicted only with A, goes the single-PR path
+    assert [world.state["prs"][str(r["pr"])]["state"] for r in recs] == ["open", "merged"]
+    assert [(r["pr"], r["code"]) for r in world.merge_refusals] == [(recs[0]["pr"], "shared_tests")]
+
+
+@pytest.mark.parametrize("change", ["request_changes", "close"])
+def test_a_bundle_lands_nothing_when_a_pr_changes_before_its_push(setup, monkeypatch, change):
+    world, remote, recs = _bundle(setup, ("one", None), ("two", None))
+    main, real = world.repo.sha(), world._shared_tests
+
+    def changes(pr, tree, main):
+        if change == "close":
+            world.close_pr(Agent(recs[1]["author"]), recs[1]["pr"], "obsolete")
+        else:
+            world.review_pr(Agent("pine"), recs[1]["pr"], recs[1]["head_sha"], "request_changes", "Wrong reply")
+        return real(pr, tree, main)
+
+    monkeypatch.setattr(world, "_shared_tests", changes)
+    with pytest.raises(ToolError, match="changed during checks"):
+        world._merge_next()
+    assert git(remote, "rev-parse", "main") == main
+    assert world.state["prs"][str(recs[0]["pr"])]["state"] == "open"
+    assert [e["tries"] for e in world.state["merge_queue"]] == [1, 1]
+
+
+def test_a_bundle_push_that_lands_then_fails_is_reconciled(setup, monkeypatch):
+    world, remote, recs = _bundle(setup, ("one", None), ("two", None))
+    real_push, real_fetch, hiccup = world.repo.push, world.repo.fetch, []
+
+    def push_then_time_out(sha, ref, **kw):
+        real_push(sha, ref, **kw)
+        hiccup.append(1)
+        raise subprocess.TimeoutExpired("git push", 120)
+
+    def fetch():  # the "did it land?" fetch fails too
+        if hiccup and hiccup.pop():
+            raise ToolError("repository operation failed; refresh your clone and retry", "git_error")
+        return real_fetch()
+
+    monkeypatch.setattr(world.repo, "push", push_then_time_out)
+    monkeypatch.setattr(world.repo, "fetch", fetch)
+    with pytest.raises(subprocess.TimeoutExpired):
+        world._merge_next()
+    assert [world.state["prs"][str(r["pr"])]["state"] for r in recs] == ["open", "open"]
+    for entry in world.state["merge_queue"]:
+        entry["next_at"] = 0.0
+    assert world._merge_next()["already_merged"] and not world.state["merge_queue"]
+    merged = [world.state["prs"][str(r["pr"])]["merged_sha"] for r in recs]
+    assert [world.state["prs"][str(r["pr"])]["state"] for r in recs] == ["merged", "merged"]
+    assert merged[1] == git(remote, "rev-parse", "main") and merged[0] == git(remote, "rev-parse", "main^")
+    queue = [json.loads(line) for line in (world.ws / "eval-queue.jsonl").read_text().splitlines()]
+    assert [(q["pr"], q["merged_sha"], q["reconciled"]) for q in queue] == [
+        (r["pr"], sha, True) for r, sha in zip(recs, merged)]
 
 
 def test_bundle_merges_stay_merged_through_hub_closed_states_and_a_lost_state_write(setup):

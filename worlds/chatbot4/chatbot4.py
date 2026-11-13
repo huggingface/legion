@@ -1848,12 +1848,14 @@ class Chatbot4World(World):
             except ToolError as exc:
                 if exc.code in MERGE_RETRY_CODES:
                     raise
+                # Refusals against a commit of this bundle (never landed) do not stand: decided again alone.
+                kept = {pr: o for pr, o in out.items() if getattr(o, "checked", (None, main))[1] == main}
                 if len(series) == 1:  # a bundle of one: _merge's own refusal
                     exc.checked = (series[0][0]["head_sha"], main)
-                    return {**out, series[0][0]["pr"]: exc}
+                    return {**kept, series[0][0]["pr"]: exc}
                 log.warning("merge bundle %s refused on main %s (%s); its PRs go one by one",
                             label, main[:12], exc.code)
-                return {pr: o for pr, o in out.items() if getattr(o, "checked", (None, main))[1] == main}
+                return kept
             lock_at = time.monotonic()
             with self.main_lock:
                 steps["main_lock_wait"] = time.monotonic() - lock_at
@@ -1876,8 +1878,8 @@ class Chatbot4World(World):
                     with _timed(steps, "push"):
                         try:
                             self.repo.push(tip, "refs/heads/main", expected=main)
-                        except ToolError:  # it may have landed before failing (e.g. a timeout)
-                            with contextlib.suppress(ToolError):
+                        except Exception:  # it may have landed before failing (e.g. a timeout)
+                            with contextlib.suppress(Exception):
                                 self.repo.fetch()
                             if self.repo.sha() != tip:
                                 raise  # nothing landed (stale_lease: main moved): retried
@@ -1886,9 +1888,9 @@ class Chatbot4World(World):
                     with self.lock:
                         for rec, agent, parent, _new, sha, reviewers in series:
                             event = {"pr": rec["pr"], "author": rec["author"], "reviewers": reviewers,
-                                     "parent_sha": parent, "head_sha": sha, "merged_sha": sha}
-                            extra = {"bundle": len(series), **(
-                                {"rebased_from": rec["base_sha"]} if rec["base_sha"] != parent else {})}
+                                     "parent_sha": parent, "head_sha": sha, "merged_sha": sha,
+                                     "bundle": len(series), "bundle_tip": tip}  # only the tip's tree was tested
+                            extra = {"rebased_from": rec["base_sha"]} if rec["base_sha"] != parent else {}
                             rec.update(base_sha=parent, head_sha=sha)  # its commit on main (refs/pr/N keeps the old head)
                             out[rec["pr"]] = self._merged(agent, rec, event, **extra)
                             self.outbox.put(rec["pr"], {"close": f"Landed in {sha} (bundle of {len(series)})"})
