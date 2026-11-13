@@ -29,6 +29,21 @@ def prepare(root):
   export CONTAINERS_REGISTRIES_CONF="$PODMAN_LOCAL/registries.conf"
   printf 'unqualified-search-registries = ["docker.io"]\\n' > "$CONTAINERS_REGISTRIES_CONF"
 '''
+    setup += '''  # Harbor uses Docker Compose spelling; podman-compose expects -T.
+  export VENV
+  cat > "$PODMAN_LOCAL/bin/podman-compose" <<'COMPOSE'
+#!/bin/bash
+args=("$@")
+for ((i=0; i+1<${#args[@]}; i++)); do
+  if [[ "${args[i]}" == exec && "${args[i+1]}" == --no-TTY ]]; then
+    args[i+1]=-T
+  fi
+done
+exec "$VENV/bin/podman-compose" "${args[@]}"
+COMPOSE
+  chmod 700 "$PODMAN_LOCAL/bin/podman-compose"
+  export PODMAN_COMPOSE_PROVIDER="$PODMAN_LOCAL/bin/podman-compose"
+'''
     text = text.replace(marker, setup + marker)
     marker = '  chmod 700 "$PODMAN_LOCAL/bin/podman" "$PODMAN_LOCAL/bin/systemd-run" || exit 2'
     if marker not in text:
