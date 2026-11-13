@@ -20,7 +20,9 @@ component interface and test evidence to the board. Use hf_repo.update_pr for
 follow-up commits; recover partially published PRs instead of opening duplicates.
 Inspect and test peers' PRs using hf_repo.inspect_pr and hf_repo.checkout_pr.
 Reviews record the exact head SHA and are advisory. Recheck changes before merging.
-Use the shell to resolve conflicts explicitly; hf_repo.sync fast-forwards clean main.
+Pass your clone path to hf_repo.inspect_pr. Use hf_repo.sync to fetch origin/main,
+then merge origin/main in your work branch before opening a PR. Never rebase a
+published PR. Shell Git has no credentials. Sync fast-forwards main only when checked out.
 
 After each implemented component, check the board for peer PRs and integrate useful
 work. Copy selected original code back into /workspace. Every agent must produce

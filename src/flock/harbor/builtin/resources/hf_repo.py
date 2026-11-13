@@ -4,7 +4,7 @@ import asyncio
 import os
 
 from huggingface_hub import HfApi
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from flock.harbor.results import write_json
 
@@ -14,6 +14,13 @@ class Options(BaseModel):
     repo_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
     token_env: str = Field(default="HF_REPO_TOKEN", pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+    @field_validator("token_env")
+    @classmethod
+    def repository_credential(cls, value):
+        if value == "HF_TOKEN":
+            raise ValueError("Use a separate repository-scoped token, not HF_TOKEN")
+        return value
+
 
 class Resource:
     def __init__(self, options, *, state_dir, agents, secrets):
@@ -21,6 +28,8 @@ class Resource:
         self.token = os.environ.get(self.options.token_env)
         if not self.token:
             raise ValueError(f"Set {self.options.token_env} for the hf_repo resource")
+        if self.token == os.environ.get("HF_TOKEN"):
+            raise ValueError("Repository token must differ from the infrastructure HF_TOKEN")
         secrets.append(self.token)
         self.api = HfApi(endpoint="https://huggingface.co", token=self.token)
         self.metadata = {}

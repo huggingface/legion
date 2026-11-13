@@ -3,14 +3,20 @@
 import importlib.metadata
 import json
 import os
+import random
 import re
 import subprocess
 import tempfile
+import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from itertools import islice
 from pathlib import Path
 from typing import Literal
 
 import httpx
 from huggingface_hub import HfApi, set_client_factory
+from huggingface_hub.community import deserialize_event
 
 # PR APIs need no native Xet transfer client. Package SDK/YAML Python files and
 # metadata, rather than their native optional dependencies. Metadata is retained
@@ -28,7 +34,9 @@ BUNDLE_FILES = {
     name: [
         str(p)
         for p in (importlib.metadata.files(name) or [])
-        if str(p).endswith(".py") or ".dist-info/" in str(p)
+        if str(p).endswith(".py") or (
+            ".dist-info/" in str(p) and (p.name == "METADATA" or "licenses" in p.parts)
+        )
     ]
     for name in ("huggingface_hub", "PyYAML", "tomli")
 }
@@ -50,15 +58,39 @@ def _api():
     return HfApi(endpoint="https://huggingface.co", token=_settings()[2])
 
 
+def _retry(operation, label):
+    for attempt in range(4):
+        try:
+            return operation()
+        except Exception as exc:
+            response = getattr(exc, "response", None)
+            code = getattr(response, "status_code", None)
+            if code != 429 or attempt == 3:
+                raise RuntimeError(
+                    f"HF {label} failed (HTTP {code or 'unknown'}); inspect state before retrying"
+                ) from None
+            delay = 2 ** attempt
+            header = response.headers.get("Retry-After")
+            if header:
+                try:
+                    delay = max(delay, float(header))
+                except ValueError:
+                    try:
+                        delay = max(delay, (parsedate_to_datetime(header)
+                                            - datetime.now(timezone.utc)).total_seconds())
+                    except (TypeError, ValueError, OverflowError):
+                        pass
+            # Do not tie up an agent indefinitely or retry sooner than requested.
+            if delay > 60:
+                raise RuntimeError(f"HF {label} rate limited; retry after {delay:.0f}s") from None
+            time.sleep(delay + random.uniform(0, 1))
+
+
 def _call(method, **kwargs):
-    try:
-        return getattr(_api(), method)(_settings()[0], repo_type="dataset", **kwargs)
-    except Exception as exc:
-        # Provider exceptions may include request headers or remotely supplied text.
-        code = getattr(getattr(exc, "response", None), "status_code", None)
-        raise RuntimeError(
-            f"HF {method} failed (HTTP {code or 'unknown'}); inspect state before retrying"
-        ) from None
+    return _retry(
+        lambda: getattr(_api(), method)(_settings()[0], repo_type="dataset", **kwargs),
+        method,
+    )
 
 
 def _url():
@@ -115,7 +147,7 @@ def _git(path, *args):
             ) from None
     if proc.returncode:
         raise RuntimeError(
-            "Git operation failed; inspect status, conflicts and remote state before retrying"
+            "Git operation failed: " + proc.stderr.decode(errors="replace").replace(token, "[REDACTED]")[-800:]
         )
     return proc.stdout.decode(errors="replace").strip()
 
@@ -125,8 +157,8 @@ def _checkout(path, clean=False):
     if _git(root, "rev-parse", "--show-toplevel") != str(root):
         raise ValueError("path must be the root of a collaboration checkout")
     if (
-        _git(root, "remote", "get-url", "origin") != _url()
-        or _git(root, "remote", "get-url", "--push", "origin") != _url()
+        _git(root, "remote", "get-url", "--all", "origin") != _url()
+        or _git(root, "remote", "get-url", "--push", "--all", "origin") != _url()
     ):
         raise ValueError("Checkout origin does not match this run's repository")
     if clean and _git(root, "status", "--porcelain"):
@@ -141,18 +173,28 @@ def _bounded(text):
 def _pr(pr):
     if pr < 1:
         raise ValueError("PR number must be positive")
-    detail = _call("get_discussion_details", discussion_num=pr)
-    if not detail.is_pull_request:
+
+    def read():
+        # The SDK always requests diff=1. Read metadata directly to avoid full Hub diffs.
+        with httpx.Client(timeout=30) as client:
+            response = client.get(
+                f"https://huggingface.co/api/datasets/{_settings()[0]}/discussions/{pr}",
+                headers={"Authorization": f"Bearer {_settings()[2]}"},
+            )
+            response.raise_for_status()
+            return response.json()
+
+    detail = _retry(read, "get_discussion_details")
+    if not detail["isPullRequest"]:
         raise ValueError("Discussion is not a pull request")
     return detail
 
 
 def _head(pr):
-    refs = _call("list_repo_refs", include_pull_requests=True)
-    return next(
-        (r.target_commit for r in refs.pull_requests or [] if r.ref == f"refs/pr/{pr}"),
-        None,
-    )
+    # Target just this PR rather than enumerating every repository ref.
+    with tempfile.TemporaryDirectory(prefix="flock-ref-") as temp:
+        result = _git(temp, "ls-remote", "--", _url(), f"refs/pr/{pr}")
+    return result.split()[0] if result else None
 
 
 def clone(path: str) -> dict:
@@ -220,6 +262,8 @@ def open_pr(path: str, title: str, description: str) -> dict:
     if not 3 <= len(title.strip()) <= 200 or not description.strip():
         raise ValueError("Provide a 3–200 character title and nonempty description")
     _git(root, "fetch", "origin", "refs/heads/main:refs/remotes/origin/main")
+    if _git(root, "merge-base", "origin/main", "HEAD") != _git(root, "rev-parse", "origin/main"):
+        raise ValueError("Branch is behind main; merge origin/main first")
     if not _git(root, "diff", "--name-only", "origin/main...HEAD"):
         raise ValueError("No changes relative to main")
     pr = _call(
@@ -245,7 +289,7 @@ def update_pr(path: str, pr: int) -> dict:
     """Publish committed changes to a PR. Uses an observed-head lease; rejects non-fast-forward updates."""
     root = _checkout(path, clean=True)
     detail = _pr(pr)
-    if detail.status not in ("open", "draft"):
+    if detail["status"] not in ("open", "draft"):
         raise ValueError("PR is already closed or merged")
     ref = f"refs/pr/{pr}"
     observed = f"refs/flock/pr/{pr}"
@@ -253,7 +297,7 @@ def update_pr(path: str, pr: int) -> dict:
     previous = _git(root, "rev-parse", observed)
     _git(root, "merge-base", "--is-ancestor", previous, "HEAD")
     _git(root, "push", f"--force-with-lease={ref}:{previous}", "origin", f"HEAD:{ref}")
-    if detail.status == "draft":
+    if detail["status"] == "draft":
         _call("change_discussion_status", discussion_num=pr, new_status="open")
     return {
         "pr": pr,
@@ -265,46 +309,62 @@ def update_pr(path: str, pr: int) -> dict:
 
 def list_prs(
     state: Literal["all", "open", "draft", "closed", "merged"] = "open",
+    limit: int = 100,
 ) -> dict:
-    """List native HF PRs; author is the shared HF account, agent attribution is in the description."""
-    # Consume the SDK iterator here so failures are sanitized as well.
-    try:
-        prs = list(_call("get_repo_discussions"))
-    except Exception:
-        raise RuntimeError("Unable to list HF PRs") from None
+    """List at most limit native HF PRs, filtered on the Hub. Author is the shared account."""
+    if not 1 <= limit <= 100:
+        raise ValueError("limit must be between 1 and 100")
+
+    def read():
+        return list(islice(_api().get_repo_discussions(
+            _settings()[0], repo_type="dataset", discussion_type="pull_request",
+            discussion_status=state if state in ("open", "closed") else "all",
+        ), limit + 1))
+
+    prs = _retry(read, "get_repo_discussions")
     return {
         "pull_requests": [
-            {
-                "pr": p.num,
-                "title": p.title,
-                "author": p.author,
-                "state": p.status,
-                "url": f"{_url()}/discussions/{p.num}",
-            }
-            for p in prs
-            if p.is_pull_request and (state == "all" or p.status == state)
-        ]
+            {"pr": p.num, "title": p.title, "author": p.author, "state": p.status,
+             "url": f"{_url()}/discussions/{p.num}"}
+            for p in prs[:limit] if state == "all" or p.status == state
+        ],
+        "truncated": len(prs) > limit,
     }
 
 
-def inspect_pr(pr: int) -> dict:
-    """Inspect description/comments, current head and bounded diff. Reviews apply only to their recorded SHA."""
+def inspect_pr(path: str, pr: int, paths: list[str] | None = None) -> dict:
+    """Inspect metadata, file statistics and a bounded local merge-base diff for one exact SHA."""
+    root = _checkout(path)
     p = _pr(pr)
+    _git(root, "fetch", "origin", "refs/heads/main:refs/remotes/origin/main")
+    _git(root, "fetch", "origin", f"refs/pr/{pr}")
+    # Resolve the fetched ref once: metadata and concurrent remote updates cannot relabel this diff.
+    sha = _git(root, "rev-parse", "FETCH_HEAD")
     comments = [
         {"author": e.author, **_bounded(e.content)}
-        for e in p.events
+        for e in (deserialize_event(event) for event in p["events"])
         if e.type == "comment"
     ]
+    args = ("--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv")
     return {
-        "pr": pr,
-        "title": p.title,
-        "state": p.status,
-        "head_sha": _head(pr),
-        "comments": comments[-30:],
-        "comments_truncated": len(comments) > 30,
-        "diff": _bounded(p.diff or ""),
+        "pr": pr, "title": p["title"], "state": p["status"], "head_sha": sha,
+        "comments": comments[-30:], "comments_truncated": len(comments) > 30,
+        "stat": _bounded(_git(root, *args, "--stat", f"origin/main...{sha}", "--", *(paths or []))),
+        "diff": _bounded(_git(root, *args, f"origin/main...{sha}", "--", *(paths or []))),
         "url": f"{_url()}/discussions/{pr}",
     }
+
+
+def close_pr(pr: int, comment: str) -> dict:
+    """Close an abandoned PR with an explanation; never deletes its history."""
+    p = _pr(pr)
+    if not comment.strip():
+        raise ValueError("Provide a reason for closing the PR")
+    if p["status"] == "merged":
+        raise ValueError("Cannot close a merged PR")
+    if p["status"] != "closed":
+        _call("change_discussion_status", discussion_num=pr, new_status="closed", comment=comment)
+    return {"pr": pr, "state": "closed"}
 
 
 def checkout_pr(path: str, pr: int) -> dict:
@@ -341,9 +401,9 @@ def review_pr(
 def merge_pr(pr: int) -> dict:
     """Merge through HF. Reviews are advisory; inspect current changes before invoking. Conflicts are returned, not auto-resolved."""
     p = _pr(pr)
-    if p.status == "merged":
+    if p["status"] == "merged":
         return {"pr": pr, "state": "merged"}
-    if p.status != "open":
+    if p["status"] != "open":
         raise ValueError("Only open PRs can be merged")
     _call(
         "merge_pull_request",
@@ -354,12 +414,11 @@ def merge_pr(pr: int) -> dict:
 
 
 def sync(path: str) -> dict:
-    """Fetch and fast-forward local main. Requires a clean checkout already on main; never switches away from agent work."""
+    """Refresh origin/main from any clean branch; fast-forward local main only when checked out."""
     root = _checkout(path, clean=True)
-    if _git(root, "branch", "--show-current") != "main":
-        raise ValueError("Switch to main explicitly before syncing")
     _git(root, "fetch", "origin", "refs/heads/main:refs/remotes/origin/main")
-    _git(root, "merge", "--ff-only", "origin/main")
+    if _git(root, "branch", "--show-current") == "main":
+        _git(root, "merge", "--ff-only", "origin/main")
     return {"head_sha": _git(root, "rev-parse", "HEAD")}
 
 
@@ -377,6 +436,7 @@ TOOLS = {
         checkout_pr,
         review_pr,
         merge_pr,
+        close_pr,
         sync,
     )
 }
