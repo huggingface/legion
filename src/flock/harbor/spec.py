@@ -424,8 +424,8 @@ def pack_folders(tools_dir, resources_dir):
 
 def resource_secrets(spec: Spec) -> list[str]:
     """The env names resources read a token from on the worker: a plugin's `token_env` (its
-    default too) when it connects to a `url`, HF_TOKEN when it deploys a Space (`space_id`). A
-    missing module is refused here, before any worker or sandbox starts."""
+    default too) when it connects to a `url` or `repo_id`, HF_TOKEN when it deploys
+    a Space (`space_id`). Missing modules are refused before workers or sandboxes start."""
     from .resources import load_module
 
     names = []
@@ -435,7 +435,8 @@ def resource_secrets(spec: Spec) -> list[str]:
             raise ValueError(f"resources.{name}: no resource module {path}")
         schema = getattr(load_module(path), "Options", None)
         settings = schema.model_validate(options) if schema is not None else None
-        if getattr(settings, "url", None) and getattr(settings, "token_env", None):
+        if (getattr(settings, "url", None) or getattr(settings, "repo_id", None)) and getattr(
+                settings, "token_env", None):
             names.append(settings.token_env)
         if getattr(settings, "space_id", None):
             names.append("HF_TOKEN")

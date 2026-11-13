@@ -232,3 +232,6 @@ No network, no real jobs: the Hub client and Harbor are faked (tiny real runs: t
   replicas come back from the spec, spawned agents do not.
 
 Design and contracts: [docs/design.md](docs/design.md).
+
+Repository collaboration: [HF Git and pull-request tools](docs/hf-repo.md), with a
+[ProgramBench example](experiments/programbench/README.md).
