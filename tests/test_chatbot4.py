@@ -3158,6 +3158,31 @@ def test_open_pr_and_run_bot_through_a_v2_patch(setup):
         submit_v2(world, clone, branch="big")
 
 
+
+def test_an_over_limit_file_may_shrink_but_not_grow(setup, monkeypatch):
+    world, clone, _ = setup
+    data = clone / "bot/modules/data.py"
+    data.write_text("X = 1\n" + "#" * 200)
+    rec = submit(world, clone, branch="data")
+    approve(world, rec)
+    merge(world, Agent("cedar"), rec["pr"])
+    assert world.get_pr(rec["pr"])["state"] == "merged"
+    monkeypatch.setattr("chatbot4.MAX_FILE_BYTES", 100)  # main's data.py is now over the limit
+    git(clone, "fetch", "origin")
+    git(clone, "reset", "--hard", "origin/main")
+    (clone / "bot/modules/new.py").write_text("Y = 1\n" + "#" * 200)
+    with pytest.raises(ToolError, match=r"new.py is 206 bytes, over the 100 byte limit.*do not delete"):
+        submit(world, clone, branch="new")
+    (clone / "bot/modules/new.py").unlink()
+    for n, send in enumerate((submit, submit_v2)):
+        data.write_text("X = 1\n" + "#" * 150)  # smaller, still over the limit: accepted
+        assert send(world, clone, ("cedar", "oak")[n], f"shrink{n}")["pr"]
+        data.write_text("X = 1\n" + "#" * 250)
+        with pytest.raises(ToolError, match="data.py is 256 bytes") as exc:
+            send(world, clone, ("cedar", "oak")[n], f"grow{n}")
+        assert exc.value.code == "file_too_large"
+
+
 def test_v2_with_an_unknown_base_asks_for_the_full_tree(setup, monkeypatch):
     world, clone, _ = setup
     (clone / "bot/modules/topic.py").write_text('def respond(text, memory):\n    return None\n')

@@ -38,7 +38,7 @@ UPLOAD = contextvars.ContextVar("workspace", default=None)
 FIXED = ("bot/__init__.py", "bot/__main__.py", "bot/runtime.py", "bot/modules/__init__.py")
 # A module the loader finds: bot/modules/<name>.py or a package bot/modules/<name>/__init__.py.
 MODULE_FILE = re.compile(r"bot/modules/(?:[^/]+\.py|[^/]+/__init__\.py)")
-MAX_FILE_BYTES = int(os.environ.get("CHATBOT_MAX_FILE_BYTES", str(1 << 20)))
+MAX_FILE_BYTES = int(os.environ.get("CHATBOT_MAX_FILE_BYTES", str(2 << 20)))
 # A PR upload deleting more files than this is refused: usually a clone restored incompletely.
 MAX_DELETED_FILES = int(os.environ.get("CHATBOT_MAX_DELETED_FILES", "1000"))
 EXCLUDE = ("__pycache__/", "*.pyc", ".venv/", ".pytest_cache/", ".mypy_cache/", ".ruff_cache/",
@@ -96,6 +96,13 @@ LANDER = ("merge-queue", "merge-queue@world.flock.invalid")
 STATUS_QUEUE_MAX = 50  # entries per list in world_status (the counts give the totals)
 log = logging.getLogger(__name__)
 _LIVE: dict[str, Chatbot4World] = {}  # one world per state directory: a restart replaces it
+
+
+def _too_large(name, size):
+    return ToolError(f"file too large: {name[:200]} is {size} bytes, over the {MAX_FILE_BYTES} "
+                     "byte limit for files a PR changes. Split it into smaller files (move parts "
+                     "into new modules) so each stays under the limit; do not delete it. A change "
+                     "that makes an over-limit file smaller is accepted.", "file_too_large")
 
 
 def _key(key):
@@ -1061,9 +1068,12 @@ class Chatbot4World(World):
                 raise ToolError(f"invalid workspace upload: {exc}"[:300], "bad_workspace") from exc
             for name in names:
                 f = tree / name
-                if f.is_file() and f.stat().st_size > MAX_FILE_BYTES:
-                    raise ToolError(f"file too large: {name[:200]} is over {MAX_FILE_BYTES} bytes; "
-                                    "remove it from the clone or add it to .gitignore", "file_too_large")
+                if f.is_file() and (size := f.stat().st_size) > MAX_FILE_BYTES:
+                    # HEAD is still the base: apply_patch writes only the worktree
+                    base = self.repo.git("cat-file", "--batch-check", at=tree,
+                                         data=f"HEAD:{name}\n".encode()).split()
+                    if size > (int(base[2]) if base[1:2] == ["blob"] else 0):
+                        raise _too_large(name, size)
             return names
         files = snapshot.get("files")
         if not isinstance(files, dict):
@@ -1074,17 +1084,19 @@ class Chatbot4World(World):
             if (rel is None or rel.is_absolute() or ".." in rel.parts or ".git" in rel.parts
                     or "\\" in name or not isinstance(encoded, str)):
                 raise ToolError("invalid workspace upload", "bad_workspace")
-            if len(encoded) > (MAX_FILE_BYTES + 2) // 3 * 4:
-                raise ToolError(f"file too large: {name[:200]} is over {MAX_FILE_BYTES} bytes; "
-                                "remove it from the clone or add it to .gitignore", "file_too_large")
             target = tree / rel
+            limit = MAX_FILE_BYTES
+            if len(encoded) > (limit + 2) // 3 * 4:  # may stay as large as on the base (tree)
+                if target.is_file() and not target.is_symlink():
+                    limit = max(limit, target.stat().st_size)
+                if len(encoded) > (limit + 2) // 3 * 4:
+                    raise _too_large(name, len(encoded) // 4 * 3 - encoded[-2:].count("="))
             try:
                 data = base64.b64decode(encoded, validate=True)
             except ValueError as exc:
                 raise ToolError("invalid workspace upload", "bad_workspace") from exc
-            if len(data) > MAX_FILE_BYTES:
-                raise ToolError(f"file too large: {name[:200]} is over {MAX_FILE_BYTES} bytes; "
-                                "remove it from the clone or add it to .gitignore", "file_too_large")
+            if len(data) > limit:
+                raise _too_large(name, len(data))
             if target.is_file() and not target.is_symlink() and target.read_bytes() == data:
                 continue
             changed[name] = encoded
