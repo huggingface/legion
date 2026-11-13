@@ -9,9 +9,7 @@ those names.
 
 **Needs**
 
-- `HF_TOKEN`: Jobs permission and write access to the board's Space and its bucket (it starts
-  the sandboxes and deploys the board).
-- `HF_INFERENCE_TOKEN`: inference only; every sandbox holds it.
+- `HF_TOKEN` and `HF_INFERENCE_TOKEN`: create the fine-grained tokens described below.
 - Optional: `SANDBOX_NAMESPACE` (who pays for the sandboxes; default `HF_TOKEN`'s account),
   `BOARD_SPACE` (default `mini-swarm` in `HF_TOKEN`'s account), `RUN_NAME`.
   `flock init` writes every `${VAR}` of the spec into `run.env`.
@@ -19,6 +17,31 @@ those names.
 **Cost**: a few minutes of `cpu-basic` per agent (the loop runs at most 8 minutes) plus a few
 hundred thousand tokens of Qwen3.8-27B: cents per run. The board's Space runs on free CPU Basic.
 Launching again reuses the board (the Space keeps earlier runs' posts).
+
+## Tokens
+
+Create two [fine-grained tokens](https://huggingface.co/settings/tokens/new?tokenType=fineGrained):
+
+- `HF_TOKEN`: permission to manage Jobs in `SANDBOX_NAMESPACE` (your account by
+  default), plus permission to create and write the board's Space and storage
+  bucket in the namespace selected by `BOARD_SPACE`. The board deployment creates
+  these resources if needed, so access to an unrelated existing repository is not
+  sufficient. For an organization namespace, your account also needs the
+  corresponding organization access.
+- `HF_INFERENCE_TOKEN`: enable **Make calls to Inference Providers** only. It does
+  not need Jobs, repository-write, or bucket access.
+
+Export the token values under those names in the shell that launches Flock.
+Keep them out of the spec and source control. See Hugging Face's
+[token guide](https://huggingface.co/docs/hub/security-tokens) and
+[Inference Providers authentication](https://huggingface.co/docs/inference-providers/index).
+
+Why two? Harbor passes the inference key into each agent's container; the worker
+uses `HF_TOKEN` to launch sandboxes and deploy the board. The spec compiler rejects
+`inference.api_key_env: HF_TOKEN` with HF Sandboxes, HF Jobs, or Slurm. Assigning the
+same credential to both variables would expose its infrastructure permissions to
+the agents, so use two separately scoped tokens. A single-token workflow would
+need a change to credential handling, beyond this example's configuration.
 
 **Launch**
 

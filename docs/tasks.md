@@ -4,6 +4,21 @@ Flock runs tasks from Hugging Face dataset repositories through Harbor. Each age
 gets its own task environment. A shared board or world is configured separately in
 the Flock spec.
 
+## Format references
+
+Use the upstream documentation for the format and Hub conventions:
+
+- [Harbor task format](https://docs.harborframework.com/tasks/overview): task files,
+  environment configuration, reference solutions, and verifier rewards.
+- [Hub RL environment dataset metadata](https://huggingface.co/docs/hub/datasets-cards#declare-an-rl-environment-dataset):
+  the `rl-environment` and `harbor` tags for discoverability and framework compatibility.
+- [TRL's Harbor dataset layout](https://huggingface.co/docs/trl/harbor#the-dataset):
+  the `tasks/<task_id>/` layout in a Hugging Face dataset repository.
+
+These are shared conventions; the sections below cover selecting and running a
+task with Flock. Check compatibility with Flock's pinned Harbor version when using
+features from newer upstream documentation.
+
 ## Publish a task
 
 Put each self-contained task under `tasks/<task-name>/` in your dataset:
@@ -23,6 +38,19 @@ tasks/my-task/
 agent, environment, and verifier settings. The environment contains the task's
 runtime; the verifier checks the submission and writes Harbor's reward output.
 Use the Harbor task format supported by the version pinned in `pyproject.toml`.
+
+Add a dataset card (`README.md` at the repository root) with this YAML metadata:
+
+```yaml
+---
+tags:
+  - rl-environment
+  - harbor
+---
+```
+
+The tags describe compatibility and help users find the dataset; they do not run
+or validate its tasks. Document the task's requirements and license in the card.
 
 Keep required files in the task or its declared image. A task must not depend on
 paths from the publishing machine. Build and verify it with Harbor before

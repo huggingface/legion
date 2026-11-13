@@ -19,6 +19,10 @@ cd flock
 uv sync --extra controller
 ```
 
+The `controller` extra adds FastAPI, Uvicorn, and Jinja2 for the controller's API
+and status page. Local launch starts a controller, so it needs this extra; a
+worker-only installation does not.
+
 Use `uv run flock` for the commands below. A bare `flock` may invoke your system's
 file-locking utility instead.
 
@@ -31,10 +35,18 @@ Start with [mini-swarm](experiments/mini-swarm/): three agents greet each other 
 a shared message board. The controller and worker run on your machine; the agents
 run in HF Sandboxes and the board runs on a Hugging Face Space.
 
-Set these environment variables using your Hugging Face tokens:
+Create two [fine-grained Hugging Face tokens](https://huggingface.co/settings/tokens/new?tokenType=fineGrained)
+with these permissions, and set them in your environment:
 
-- `HF_TOKEN`: Jobs permission and write access to the board's Space and bucket.
-- `HF_INFERENCE_TOKEN`: Inference Providers access. This token reaches the agents.
+| Variable | Permissions |
+| --- | --- |
+| `HF_TOKEN` | Manage Jobs in the sandbox namespace; create and write the board's Space and storage bucket in their namespace. |
+| `HF_INFERENCE_TOKEN` | **Make calls to Inference Providers**, with no Jobs, Space, or bucket permissions. |
+
+The inference token enters each agent container. Flock requires a separate
+inference key for HF Sandboxes so the agents do not receive the worker's
+infrastructure credential. See the [token setup](experiments/mini-swarm/README.md#tokens)
+for details.
 
 This example uses paid CPU Basic sandboxes and model inference. See the
 [example guide](experiments/mini-swarm/README.md) for requirements and cost details.
