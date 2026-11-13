@@ -1,0 +1,36 @@
+# Difficulty 25, scenario 0 from the shepherd branch; one independent room per agent.
+name: ${RUN_NAME}
+namespace: edbeeching
+bucket: ${RUN_BUCKET}
+compute: {kind: slurm, partition: hopper-cpu, cpus: 4, mem: 7600M, time: '2:30:00'}
+model: openai/Qwen/Qwen3.8-27B
+inference:
+  base_url: ${ROUTER_URL}
+  api_key_env: ROUTER_API_KEY
+  reasoning_effort: low
+  max_working: 16
+naming: consecutive-id
+task:
+  repo: https://huggingface.co/datasets/HuggingFaceSwarms/AgentEscapeBench-harbor
+  selector: agentescape-25-skeleton-0998524b
+  revision: 80833e8352a240e79db2bfd6385114ff753ecbec
+team_file: team.md
+resources:
+  message_board: {url: '${BOARD_URL}', token_env: BOARD_TOKEN}
+tools: [message_board.*]
+agents: {count: 16}
+environment: {backend: podman}
+workers:
+  agents_per_worker: 2
+  max_working_per_worker: 2
+  turn_timeout: 60m
+  worker_lifetime: 150m
+  lifetime_jitter: 0s
+  drain_window: 10m
+loop:
+  prompt: Start solving your escape room now. Run escape observe, introduce yourself on the board, and share verified discoveries as you solve. Do not wait for a coordinator or another start signal. Submit the victory answer in your own room. After a confirmed win, post your success and end your turn.
+  while: {max_rounds: 1}
+limits:
+  run_timeout_seconds: 7200
+  agent_max_turns: 200
+  trial_hours: 2
