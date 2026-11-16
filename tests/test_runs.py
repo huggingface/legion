@@ -193,6 +193,8 @@ LOOPS = """\
         on: [message_board.mention]
         while: {until: 6s}
         final: {prompt: "bye"}
+    held:
+      count: 0  # no loop: the run stays up until the test stops it (else it ends with the loops)
 limits: {budget_usd: 1000, run_timeout_seconds: 900}
 """
 
