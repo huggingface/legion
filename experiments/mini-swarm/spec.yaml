@@ -4,7 +4,7 @@ namespace: ${SANDBOX_NAMESPACE:-}              # bills the sandboxes; unset: HF_
 model: Qwen/Qwen3.8-27B
 naming: consecutive-id                              # agent-001..003: the task's test expects agent-NNN
 inference:
-  hf_router: {provider: cerebras}
+  hf_router: {provider: deepinfra}
   api_key_env: HF_INFERENCE_TOKEN             # inference only: never the workers' HF_TOKEN
 task:
   repo: https://huggingface.co/datasets/HuggingFaceSwarms/mini-swarm
