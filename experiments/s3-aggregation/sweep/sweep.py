@@ -280,7 +280,7 @@ def main(argv=None) -> int:
     if not api.bucket_info(args.bucket).private:
         raise SystemExit(f"bucket {args.bucket} is public: refusing")
     token = os.environ.get("HF_TOKEN") or get_token()
-    secrets = root / "secrets.env"
+    secrets = root / f"secrets-{os.getpid()}.env"  # per driver: two may share a root
     old = os.umask(0o077)
     secrets.write_text(f"HF_TOKEN={token}\nNAMESPACE={args.namespace}\n"
                        f"BUCKET=hf://buckets/{args.bucket}\n")
