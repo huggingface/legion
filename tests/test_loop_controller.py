@@ -901,3 +901,51 @@ async def test_a_loop_hashed_before_the_field_deletions_resumes_quietly(sim):
     assert await sim.commands() == []
     assert "loop_updated" not in [k for k, _ in sim.swarm_events()[before:]]
     assert sim.store.get_loops("demo")["researcher"]["hv"] == 1
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_success_heartbeat_stops_once_and_survives_restart(sim, enabled):
+    from flock.controller.loop import LoopEngine
+
+    await sim.apply({"prompt": "work", "while": {"max_rounds": 3}})
+    spec = sim.store.get_swarm("demo")["spec"]
+    spec.stop_on_success = enabled
+    spec.types["researcher"].harbor.config["success_check"] = {
+        "service": "puzzle", "command": "check"}
+    response = await sim.c.put("/swarms/demo", json=spec.model_dump(mode="json"))
+    assert response.status_code == 200
+    sim.tick()
+    await sim.heartbeat(working=(A0, A1))
+    await sim.commands()
+    # A transcript claim must never invoke the policy.
+    await sim.events(A0, ("task_success", {"success": True}))
+    assert sim.store.get_control("demo", "success") is None
+    evidence = {"trial_id": "trial-1", "observed_at": sim.clock().isoformat(),
+                "evidence": {"won": True}, "verification": "pending"}
+    report = AgentHeartbeat(name=A0, state="working", trial={"id": "trial-1", "success": evidence})
+    body = hb_body(sim.clock, W0, [report, AgentHeartbeat(name=A1, state="working")])
+    # Old workers cannot stop a new incarnation.
+    r = await sim.c.post(f"/workers/{W0}/heartbeat", params={"incarnation": "stale"}, json=body)
+    assert r.status_code == 409
+    for _ in range(2):
+        r = await sim.c.post(f"/workers/{W0}/heartbeat", json=body)
+        assert r.status_code == 200
+    winner = sim.store.get_control("demo", "success")
+    assert bool(winner) is enabled
+    if not enabled:
+        return
+    assert winner["agent"] == A0
+    assert sim.store.swarm_flags("demo")["released"]["reason"] == "task_success"
+    commands = await sim.commands()
+    assert {c["agent"] for c in commands if c["kind"] == "stop"} == {A0, A1}
+    assert not sim.store.pending_counts("demo")
+    events = [e for e in sim.swarm_events() if e[0] == "task_success"]
+    assert len(events) == 1
+    # A new engine replays the persisted decision rather than starting more loops.
+    restarted = LoopEngine(sim.store, clock=sim.clock, send=sim.loops.send)
+    restarted.tick()
+    assert restarted.hard_stopped("demo")
+    body["agents"][0]["trial"]["success"].update(verification="passed", rewards={"reward": 1})
+    assert (await sim.c.post(f"/workers/{W0}/heartbeat", json=body)).status_code == 200
+    status = (await sim.c.get("/swarms/demo")).json()["status"]
+    assert status["success"]["verification"] == "passed"

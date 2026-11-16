@@ -325,3 +325,25 @@ Final-round spend is exempt from `agent_usd` and bounded only by the reserve and
 booking to tighten the budget overshoot, a `loop.start: manual` switch, and a swarm-level
 `limits.final_reserve_usd` (the reserve is `final.reserve_usd` per type, summed for the swarm
 threshold).
+
+
+## Stop on task success
+
+Set `stop_on_success: true` in a Harbor experiment and provide an operator-owned
+`success_check: {service: puzzle, command: ...}`. The command runs in a trusted
+Docker/Podman sidecar (not `main`) and returns JSON with a boolean `success` and
+optional `evidence`. Commands must be read-only, bounded, and independent of agent-owned files.
+A task with no check cannot use this policy.
+
+Workers check every five seconds, with a five-second timeout, even between model turns.
+Errors never count as success. The next authenticated heartbeat reports the first positive
+result; the controller records `task_success`, interrupts active turns, blocks new work,
+and releases workers. There are no final model turns. The decision survives restarts and
+cannot be resumed; launch a new run to repeat the experiment. Default: disabled.
+
+Status includes `success` (winner, trial, observation and acceptance times, evidence,
+and verification). Environment success is distinct from native verification: trials close,
+collect artifacts and run Harbor's verifier within the existing five-minute cleanup budget.
+The winner passes verification only with native `reward == 1` and no trial exception.
+Failures or missing verification are shown explicitly; release reports failed artifact syncs.
+Actual usage includes detection delay and cleanup; interrupted requests can lack returned usage.
