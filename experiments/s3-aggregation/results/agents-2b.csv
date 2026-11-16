@@ -1,0 +1,993 @@
+run,task,agents,team_success,agent,reward,answer,tool_calls,tool_errors,posts,used_flock_tool,called_util_flock,session
+q2b-agg-p03-n01,agg-p03-n01,1,True,agent-001,1.0,right,27,18,0,True,False,True
+q2b-agg-p05-n01,agg-p05-n01,1,True,agent-001,1.0,right,4,1,0,False,False,True
+q2b-agg-p04-n01,agg-p04-n01,1,True,agent-001,1.0,right,84,15,0,False,False,True
+q2b-agg-p03-n02,agg-p03-n02,2,True,agent-001,1.0,right,26,9,0,True,False,True
+q2b-agg-p03-n02,agg-p03-n02,2,True,agent-002,0.0,malformed,83,24,12,True,False,True
+q2b-agg-p01-n01,agg-p01-n01,1,False,agent-001,0.0,wrong count,133,32,0,True,True,True
+q2b-agg-p06-n01,agg-p06-n01,1,True,agent-001,1.0,right,67,12,0,False,True,True
+q2b-agg-p06-n02,agg-p06-n02,2,True,agent-001,0.0,malformed,21,7,2,True,False,True
+q2b-agg-p06-n02,agg-p06-n02,2,True,agent-002,1.0,right,20,3,1,True,False,True
+q2b-agg-p02-n04,agg-p02-n04,4,False,agent-001,0.0,wrong numbers,88,44,0,True,False,True
+q2b-agg-p02-n04,agg-p02-n04,4,False,agent-002,0.0,wrong numbers,61,22,7,True,False,True
+q2b-agg-p02-n04,agg-p02-n04,4,False,agent-003,0.0,malformed,117,22,0,False,True,True
+q2b-agg-p02-n04,agg-p02-n04,4,False,agent-004,0.0,malformed,105,38,11,True,False,True
+q2b-agg-p03-n04,agg-p03-n04,4,False,agent-001,0.0,wrong numbers,121,19,0,False,True,True
+q2b-agg-p03-n04,agg-p03-n04,4,False,agent-002,0.0,wrong numbers,16,3,0,True,False,True
+q2b-agg-p03-n04,agg-p03-n04,4,False,agent-003,0.0,wrong count,168,75,0,True,True,True
+q2b-agg-p03-n04,agg-p03-n04,4,False,agent-004,0.0,wrong count,51,11,3,True,False,True
+q2b-agg-p04-n02,agg-p04-n02,2,False,agent-001,0.0,wrong numbers,145,50,2,True,True,True
+q2b-agg-p04-n02,agg-p04-n02,2,False,agent-002,0.0,wrong numbers,61,12,8,True,True,True
+q2b-agg-p05-n02,agg-p05-n02,2,False,agent-001,0.0,wrong numbers,151,48,0,True,True,True
+q2b-agg-p05-n02,agg-p05-n02,2,False,agent-002,0.0,no answer,240,80,2,True,True,True
+q2b-agg-p05-n04,agg-p05-n04,4,False,agent-001,0.0,wrong numbers,70,21,1,True,False,True
+q2b-agg-p05-n04,agg-p05-n04,4,False,agent-002,0.0,wrong numbers,86,21,2,True,False,True
+q2b-agg-p05-n04,agg-p05-n04,4,False,agent-003,0.0,wrong numbers,115,10,0,True,False,True
+q2b-agg-p05-n04,agg-p05-n04,4,False,agent-004,0.0,wrong count,78,11,3,True,False,True
+q2b-agg-p08-n01,agg-p08-n01,1,False,agent-001,0.0,malformed,18,6,2,True,False,True
+q2b-agg-p03-n08,agg-p03-n08,8,False,agent-001,0.0,wrong count,54,11,4,True,False,True
+q2b-agg-p03-n08,agg-p03-n08,8,False,agent-002,0.0,wrong numbers,64,9,0,True,False,True
+q2b-agg-p03-n08,agg-p03-n08,8,False,agent-003,0.0,wrong numbers,110,21,0,True,True,True
+q2b-agg-p03-n08,agg-p03-n08,8,False,agent-004,0.0,wrong count,53,3,4,True,False,True
+q2b-agg-p03-n08,agg-p03-n08,8,False,agent-005,0.0,malformed,94,25,9,True,False,True
+q2b-agg-p03-n08,agg-p03-n08,8,False,agent-006,0.0,malformed,240,6,0,False,False,True
+q2b-agg-p03-n08,agg-p03-n08,8,False,agent-007,0.0,wrong numbers,133,64,10,True,True,True
+q2b-agg-p03-n08,agg-p03-n08,8,False,agent-008,0.0,wrong numbers,62,19,5,True,False,True
+q2b-agg-p09-n01,agg-p09-n01,1,True,agent-001,1.0,right,47,5,0,False,False,True
+q2b-agg-p07-n01,agg-p07-n01,1,False,agent-001,0.0,wrong numbers,28,8,0,False,False,True
+q2b-agg-p11-n01,agg-p11-n01,1,False,agent-001,0.0,malformed,8,0,0,False,False,True
+q2b-agg-p02-n02,agg-p02-n02,2,False,agent-001,0.0,wrong count,99,37,6,True,False,True
+q2b-agg-p02-n02,agg-p02-n02,2,False,agent-002,0.0,wrong count,179,52,1,True,True,True
+q2b-agg-p10-n01,agg-p10-n01,1,True,agent-001,1.0,right,55,12,0,True,True,True
+q2b-agg-p08-n02,agg-p08-n02,2,False,agent-001,0.0,malformed,13,2,0,True,True,True
+q2b-agg-p08-n02,agg-p08-n02,2,False,agent-002,0.0,wrong numbers,36,6,2,True,False,True
+q2b-agg-p04-n08,agg-p04-n08,8,False,agent-001,0.0,wrong numbers,18,1,3,True,False,True
+q2b-agg-p04-n08,agg-p04-n08,8,False,agent-002,0.0,wrong numbers,75,18,4,True,True,True
+q2b-agg-p04-n08,agg-p04-n08,8,False,agent-003,0.0,malformed,54,7,2,True,False,True
+q2b-agg-p04-n08,agg-p04-n08,8,False,agent-004,0.0,wrong count,87,15,0,True,False,True
+q2b-agg-p04-n08,agg-p04-n08,8,False,agent-005,0.0,wrong count,163,26,1,True,False,True
+q2b-agg-p04-n08,agg-p04-n08,8,False,agent-006,0.0,wrong numbers,47,14,7,True,False,True
+q2b-agg-p04-n08,agg-p04-n08,8,False,agent-007,0.0,no answer,110,39,8,True,False,True
+q2b-agg-p04-n08,agg-p04-n08,8,False,agent-008,0.0,malformed,187,66,0,True,False,True
+q2b-agg-p13-n01,agg-p13-n01,1,True,agent-001,1.0,right,2,0,0,False,False,True
+q2b-agg-p04-n04,agg-p04-n04,4,False,agent-001,0.0,wrong numbers,49,7,0,True,False,True
+q2b-agg-p04-n04,agg-p04-n04,4,False,agent-002,0.0,malformed,35,6,1,True,False,True
+q2b-agg-p04-n04,agg-p04-n04,4,False,agent-003,0.0,no answer,201,49,0,True,True,True
+q2b-agg-p04-n04,agg-p04-n04,4,False,agent-004,0.0,wrong numbers,38,8,2,True,False,True
+q2b-agg-p02-n01,agg-p02-n01,1,False,agent-001,0.0,malformed,108,34,3,True,True,True
+q2b-agg-p12-n02,agg-p12-n02,2,False,agent-001,0.0,wrong numbers,25,4,3,True,False,True
+q2b-agg-p12-n02,agg-p12-n02,2,False,agent-002,0.0,wrong numbers,103,21,0,False,True,True
+q2b-agg-p02-n08,agg-p02-n08,8,False,agent-001,0.0,wrong numbers,103,32,1,True,False,True
+q2b-agg-p02-n08,agg-p02-n08,8,False,agent-002,0.0,wrong numbers,111,24,0,True,False,True
+q2b-agg-p02-n08,agg-p02-n08,8,False,agent-003,0.0,malformed,71,13,2,True,False,True
+q2b-agg-p02-n08,agg-p02-n08,8,False,agent-004,0.0,wrong count,77,24,1,True,False,True
+q2b-agg-p02-n08,agg-p02-n08,8,False,agent-005,0.0,wrong count,128,42,1,True,False,True
+q2b-agg-p02-n08,agg-p02-n08,8,False,agent-006,0.0,wrong count,55,15,0,True,False,True
+q2b-agg-p02-n08,agg-p02-n08,8,False,agent-007,0.0,wrong count,73,23,1,True,False,True
+q2b-agg-p02-n08,agg-p02-n08,8,False,agent-008,0.0,wrong count,130,55,11,True,False,True
+q2b-agg-p15-n01,agg-p15-n01,1,True,agent-001,1.0,right,6,0,0,False,False,True
+q2b-agg-p14-n01,agg-p14-n01,1,True,agent-001,1.0,right,57,21,2,True,True,True
+q2b-agg-p01-n04,agg-p01-n04,4,False,agent-001,0.0,wrong count,201,89,1,True,True,True
+q2b-agg-p01-n04,agg-p01-n04,4,False,agent-002,0.0,wrong count,63,28,1,True,False,True
+q2b-agg-p01-n04,agg-p01-n04,4,False,agent-003,0.0,wrong count,56,10,1,True,False,True
+q2b-agg-p01-n04,agg-p01-n04,4,False,agent-004,0.0,wrong numbers,117,31,3,True,False,True
+q2b-agg-p13-n02,agg-p13-n02,2,False,agent-001,0.0,wrong numbers,47,10,0,True,False,True
+q2b-agg-p13-n02,agg-p13-n02,2,False,agent-002,0.0,wrong numbers,62,25,0,True,False,True
+q2b-agg-p07-n02,agg-p07-n02,2,False,agent-001,0.0,wrong numbers,84,17,4,True,True,True
+q2b-agg-p07-n02,agg-p07-n02,2,False,agent-002,0.0,malformed,120,22,0,False,True,True
+q2b-agg-p10-n02,agg-p10-n02,2,False,agent-001,0.0,wrong count,123,48,0,True,True,True
+q2b-agg-p10-n02,agg-p10-n02,2,False,agent-002,0.0,wrong numbers,123,48,6,True,False,True
+q2b-agg-p06-n04,agg-p06-n04,4,False,agent-001,0.0,wrong numbers,109,32,3,True,True,True
+q2b-agg-p06-n04,agg-p06-n04,4,False,agent-002,0.0,wrong numbers,81,11,0,True,False,True
+q2b-agg-p06-n04,agg-p06-n04,4,False,agent-003,0.0,no answer,180,72,15,True,False,True
+q2b-agg-p06-n04,agg-p06-n04,4,False,agent-004,0.0,wrong numbers,185,65,3,True,True,True
+q2b-agg-p10-n04,agg-p10-n04,4,False,agent-001,0.0,wrong numbers,56,19,5,True,False,True
+q2b-agg-p10-n04,agg-p10-n04,4,False,agent-002,0.0,malformed,240,87,1,True,True,True
+q2b-agg-p10-n04,agg-p10-n04,4,False,agent-003,0.0,wrong numbers,26,5,0,True,False,True
+q2b-agg-p10-n04,agg-p10-n04,4,False,agent-004,0.0,wrong numbers,35,4,2,True,False,True
+q2b-agg-p09-n04,agg-p09-n04,4,False,agent-001,0.0,malformed,129,46,0,True,True,True
+q2b-agg-p09-n04,agg-p09-n04,4,False,agent-002,0.0,malformed,104,30,5,True,True,True
+q2b-agg-p09-n04,agg-p09-n04,4,False,agent-003,0.0,malformed,108,17,1,True,False,True
+q2b-agg-p09-n04,agg-p09-n04,4,False,agent-004,0.0,wrong count,157,37,1,True,False,True
+q2b-agg-p11-n04,agg-p11-n04,4,False,agent-001,0.0,wrong count,5,0,1,True,False,True
+q2b-agg-p11-n04,agg-p11-n04,4,False,agent-002,0.0,no answer,60,20,0,False,False,True
+q2b-agg-p11-n04,agg-p11-n04,4,False,agent-003,0.0,no answer,240,87,0,True,True,True
+q2b-agg-p11-n04,agg-p11-n04,4,False,agent-004,0.0,wrong count,202,36,2,True,False,True
+q2b-agg-p07-n08,agg-p07-n08,8,False,agent-001,0.0,wrong numbers,68,22,6,True,False,True
+q2b-agg-p07-n08,agg-p07-n08,8,False,agent-002,0.0,wrong count,45,18,0,True,True,True
+q2b-agg-p07-n08,agg-p07-n08,8,False,agent-003,0.0,no answer,240,78,0,False,True,True
+q2b-agg-p07-n08,agg-p07-n08,8,False,agent-004,0.0,wrong count,69,15,3,True,True,True
+q2b-agg-p07-n08,agg-p07-n08,8,False,agent-005,0.0,no answer,90,15,1,True,True,True
+q2b-agg-p07-n08,agg-p07-n08,8,False,agent-006,0.0,wrong count,51,7,1,True,False,True
+q2b-agg-p07-n08,agg-p07-n08,8,False,agent-007,0.0,wrong count,62,7,6,True,True,True
+q2b-agg-p07-n08,agg-p07-n08,8,False,agent-008,0.0,wrong count,55,26,2,True,False,True
+q2b-agg-p01-n16,agg-p01-n16,16,False,agent-001,0.0,no answer,60,20,0,True,True,True
+q2b-agg-p01-n16,agg-p01-n16,16,False,agent-002,0.0,wrong numbers,139,40,0,True,False,True
+q2b-agg-p01-n16,agg-p01-n16,16,False,agent-003,0.0,wrong numbers,224,64,0,True,True,True
+q2b-agg-p01-n16,agg-p01-n16,16,False,agent-004,0.0,wrong count,184,53,1,True,True,True
+q2b-agg-p01-n16,agg-p01-n16,16,False,agent-005,0.0,wrong numbers,109,30,15,True,False,True
+q2b-agg-p01-n16,agg-p01-n16,16,False,agent-006,0.0,wrong count,58,18,5,True,False,True
+q2b-agg-p01-n16,agg-p01-n16,16,False,agent-007,0.0,no answer,182,101,1,True,True,True
+q2b-agg-p01-n16,agg-p01-n16,16,False,agent-008,0.0,wrong count,129,55,2,True,True,True
+q2b-agg-p01-n16,agg-p01-n16,16,False,agent-009,0.0,wrong numbers,92,21,0,False,False,True
+q2b-agg-p01-n16,agg-p01-n16,16,False,agent-010,0.0,wrong count,79,8,1,True,False,True
+q2b-agg-p01-n16,agg-p01-n16,16,False,agent-011,0.0,malformed,179,64,1,True,False,True
+q2b-agg-p01-n16,agg-p01-n16,16,False,agent-012,0.0,wrong numbers,66,3,1,True,False,True
+q2b-agg-p01-n16,agg-p01-n16,16,False,agent-013,0.0,wrong count,49,8,0,True,False,True
+q2b-agg-p01-n16,agg-p01-n16,16,False,agent-014,0.0,malformed,172,57,0,False,False,True
+q2b-agg-p01-n16,agg-p01-n16,16,False,agent-015,0.0,wrong count,125,59,0,True,False,True
+q2b-agg-p01-n16,agg-p01-n16,16,False,agent-016,0.0,malformed,159,63,16,True,False,True
+q2b-agg-p12-n01,agg-p12-n01,1,True,agent-001,1.0,right,31,6,0,True,False,True
+q2b-agg-p12-n04,agg-p12-n04,4,False,agent-001,0.0,wrong numbers,112,21,0,True,False,True
+q2b-agg-p12-n04,agg-p12-n04,4,False,agent-002,0.0,malformed,75,18,9,True,False,True
+q2b-agg-p12-n04,agg-p12-n04,4,False,agent-003,0.0,wrong numbers,124,38,3,True,True,True
+q2b-agg-p12-n04,agg-p12-n04,4,False,agent-004,0.0,wrong numbers,130,54,15,True,False,True
+q2b-agg-p10-n08,agg-p10-n08,8,False,agent-001,0.0,wrong count,82,16,3,True,False,True
+q2b-agg-p10-n08,agg-p10-n08,8,False,agent-002,0.0,malformed,185,99,0,True,True,True
+q2b-agg-p10-n08,agg-p10-n08,8,False,agent-003,0.0,wrong numbers,150,58,0,True,True,True
+q2b-agg-p10-n08,agg-p10-n08,8,False,agent-004,0.0,no answer,195,96,1,True,True,True
+q2b-agg-p10-n08,agg-p10-n08,8,False,agent-005,0.0,wrong count,240,54,1,True,False,True
+q2b-agg-p10-n08,agg-p10-n08,8,False,agent-006,0.0,wrong numbers,218,97,0,True,True,True
+q2b-agg-p10-n08,agg-p10-n08,8,False,agent-007,0.0,malformed,42,1,1,True,False,True
+q2b-agg-p10-n08,agg-p10-n08,8,False,agent-008,0.0,wrong count,64,20,0,True,True,True
+q2b-agg-p13-n04,agg-p13-n04,4,False,agent-001,0.0,wrong numbers,102,42,1,True,True,True
+q2b-agg-p13-n04,agg-p13-n04,4,False,agent-002,0.0,wrong count,129,37,0,True,False,True
+q2b-agg-p13-n04,agg-p13-n04,4,False,agent-003,0.0,wrong count,73,9,0,True,False,True
+q2b-agg-p13-n04,agg-p13-n04,4,False,agent-004,0.0,wrong numbers,150,26,1,True,True,True
+q2b-agg-p13-n08,agg-p13-n08,8,False,agent-001,0.0,malformed,180,98,1,True,True,True
+q2b-agg-p13-n08,agg-p13-n08,8,False,agent-002,0.0,wrong numbers,46,17,2,True,True,True
+q2b-agg-p13-n08,agg-p13-n08,8,False,agent-003,0.0,wrong numbers,95,46,1,True,False,True
+q2b-agg-p13-n08,agg-p13-n08,8,False,agent-004,0.0,malformed,70,11,6,True,False,True
+q2b-agg-p13-n08,agg-p13-n08,8,False,agent-005,0.0,malformed,50,11,12,True,True,True
+q2b-agg-p13-n08,agg-p13-n08,8,False,agent-006,0.0,wrong numbers,117,40,1,True,True,True
+q2b-agg-p13-n08,agg-p13-n08,8,False,agent-007,0.0,malformed,140,37,0,True,True,True
+q2b-agg-p13-n08,agg-p13-n08,8,False,agent-008,0.0,wrong count,100,18,0,False,True,True
+q2b-agg-p09-n02,agg-p09-n02,2,False,agent-001,0.0,no answer,228,103,0,True,True,True
+q2b-agg-p09-n02,agg-p09-n02,2,False,agent-002,0.0,wrong numbers,51,17,2,True,False,True
+q2b-agg-p14-n02,agg-p14-n02,2,False,agent-001,0.0,malformed,150,43,0,True,True,True
+q2b-agg-p14-n02,agg-p14-n02,2,False,agent-002,0.0,wrong numbers,213,163,6,True,False,True
+q2b-agg-p14-n04,agg-p14-n04,4,True,agent-001,0.0,malformed,58,12,2,True,False,True
+q2b-agg-p14-n04,agg-p14-n04,4,True,agent-002,0.0,wrong numbers,31,4,1,True,False,True
+q2b-agg-p14-n04,agg-p14-n04,4,True,agent-003,1.0,right,36,10,1,True,False,True
+q2b-agg-p14-n04,agg-p14-n04,4,True,agent-004,0.0,wrong numbers,93,42,5,True,False,True
+q2b-agg-p14-n08,agg-p14-n08,8,False,agent-001,0.0,wrong numbers,49,15,2,True,False,True
+q2b-agg-p14-n08,agg-p14-n08,8,False,agent-002,0.0,wrong numbers,162,70,0,True,False,True
+q2b-agg-p14-n08,agg-p14-n08,8,False,agent-003,0.0,no answer,240,91,1,True,True,True
+q2b-agg-p14-n08,agg-p14-n08,8,False,agent-004,0.0,wrong count,134,60,34,True,False,True
+q2b-agg-p14-n08,agg-p14-n08,8,False,agent-005,0.0,wrong count,52,6,1,True,False,True
+q2b-agg-p14-n08,agg-p14-n08,8,False,agent-006,0.0,malformed,141,50,0,True,True,True
+q2b-agg-p14-n08,agg-p14-n08,8,False,agent-007,0.0,no answer,240,42,0,True,True,True
+q2b-agg-p14-n08,agg-p14-n08,8,False,agent-008,0.0,wrong numbers,61,11,2,True,False,True
+q2b-agg-p16-n02,agg-p16-n02,2,False,agent-001,0.0,wrong numbers,187,76,0,True,False,True
+q2b-agg-p16-n02,agg-p16-n02,2,False,agent-002,0.0,wrong numbers,87,31,2,True,False,True
+q2b-agg-p16-n01,agg-p16-n01,1,True,agent-001,1.0,right,65,11,0,False,False,True
+q2b-agg-p15-n04,agg-p15-n04,4,False,agent-001,0.0,malformed,163,57,3,True,True,True
+q2b-agg-p15-n04,agg-p15-n04,4,False,agent-002,0.0,wrong numbers,241,120,0,True,True,True
+q2b-agg-p15-n04,agg-p15-n04,4,False,agent-003,0.0,wrong numbers,37,6,3,True,False,True
+q2b-agg-p15-n04,agg-p15-n04,4,False,agent-004,0.0,wrong numbers,92,18,0,False,False,True
+q2b-agg-p09-n08-r1,agg-p09-n08,8,False,agent-001,0.0,wrong numbers,74,9,2,True,False,True
+q2b-agg-p09-n08-r1,agg-p09-n08,8,False,agent-002,0.0,wrong numbers,36,3,0,True,False,True
+q2b-agg-p09-n08-r1,agg-p09-n08,8,False,agent-003,0.0,wrong count,52,16,2,True,False,True
+q2b-agg-p09-n08-r1,agg-p09-n08,8,False,agent-004,0.0,wrong count,52,16,13,True,False,True
+q2b-agg-p09-n08-r1,agg-p09-n08,8,False,agent-005,0.0,malformed,54,3,1,True,False,True
+q2b-agg-p09-n08-r1,agg-p09-n08,8,False,agent-006,0.0,malformed,59,12,3,True,False,True
+q2b-agg-p09-n08-r1,agg-p09-n08,8,False,agent-007,0.0,wrong numbers,65,14,2,True,False,True
+q2b-agg-p09-n08-r1,agg-p09-n08,8,False,agent-008,0.0,malformed,178,61,0,True,True,True
+q2b-agg-p07-n04-r1,agg-p07-n04,4,False,agent-001,0.0,wrong numbers,29,4,6,True,False,True
+q2b-agg-p07-n04-r1,agg-p07-n04,4,False,agent-002,0.0,wrong numbers,71,7,1,True,False,True
+q2b-agg-p07-n04-r1,agg-p07-n04,4,False,agent-003,0.0,no answer,76,56,0,False,True,True
+q2b-agg-p07-n04-r1,agg-p07-n04,4,False,agent-004,0.0,wrong numbers,98,12,0,True,False,True
+q2b-agg-p18-n01,agg-p18-n01,1,True,agent-001,1.0,right,41,11,0,False,False,True
+q2b-agg-p17-n01,agg-p17-n01,1,False,agent-001,0.0,malformed,42,7,2,True,False,True
+q2b-agg-p08-n04-r1,agg-p08-n04,4,False,agent-001,0.0,wrong numbers,232,109,0,True,True,True
+q2b-agg-p08-n04-r1,agg-p08-n04,4,False,agent-002,0.0,malformed,97,14,16,True,False,True
+q2b-agg-p08-n04-r1,agg-p08-n04,4,False,agent-003,0.0,malformed,180,48,2,True,True,True
+q2b-agg-p08-n04-r1,agg-p08-n04,4,False,agent-004,0.0,wrong numbers,50,3,4,True,False,True
+q2b-agg-p06-n16-r2,agg-p06-n16,16,False,agent-001,0.0,wrong count,71,20,1,True,False,True
+q2b-agg-p06-n16-r2,agg-p06-n16,16,False,agent-002,0.0,no answer,180,74,0,True,True,True
+q2b-agg-p06-n16-r2,agg-p06-n16,16,False,agent-003,0.0,malformed,66,16,0,True,False,True
+q2b-agg-p06-n16-r2,agg-p06-n16,16,False,agent-004,0.0,wrong count,92,54,0,True,True,True
+q2b-agg-p06-n16-r2,agg-p06-n16,16,False,agent-005,0.0,wrong count,58,25,2,True,False,True
+q2b-agg-p06-n16-r2,agg-p06-n16,16,False,agent-006,0.0,malformed,184,52,0,True,True,True
+q2b-agg-p06-n16-r2,agg-p06-n16,16,False,agent-007,0.0,wrong numbers,112,17,0,False,True,True
+q2b-agg-p06-n16-r2,agg-p06-n16,16,False,agent-008,0.0,wrong count,51,15,2,True,False,True
+q2b-agg-p06-n16-r2,agg-p06-n16,16,False,agent-009,0.0,no answer,240,94,15,True,True,True
+q2b-agg-p06-n16-r2,agg-p06-n16,16,False,agent-010,0.0,wrong count,179,62,0,True,True,True
+q2b-agg-p06-n16-r2,agg-p06-n16,16,False,agent-011,0.0,wrong count,84,17,1,True,False,True
+q2b-agg-p06-n16-r2,agg-p06-n16,16,False,agent-012,0.0,malformed,37,5,1,True,False,True
+q2b-agg-p06-n16-r2,agg-p06-n16,16,False,agent-013,0.0,wrong count,70,18,1,True,False,True
+q2b-agg-p06-n16-r2,agg-p06-n16,16,False,agent-014,0.0,wrong count,60,5,3,True,False,True
+q2b-agg-p06-n16-r2,agg-p06-n16,16,False,agent-015,0.0,wrong count,43,18,0,True,False,True
+q2b-agg-p06-n16-r2,agg-p06-n16,16,False,agent-016,0.0,wrong count,56,11,4,True,True,True
+q2b-agg-p18-n02,agg-p18-n02,2,True,agent-001,1.0,right,66,25,3,True,False,True
+q2b-agg-p18-n02,agg-p18-n02,2,True,agent-002,1.0,right,87,26,2,True,False,True
+q2b-agg-p02-n16-r2,agg-p02-n16,16,False,agent-001,0.0,no answer,136,68,1,True,True,True
+q2b-agg-p02-n16-r2,agg-p02-n16,16,False,agent-002,0.0,wrong numbers,23,6,1,True,False,True
+q2b-agg-p02-n16-r2,agg-p02-n16,16,False,agent-003,0.0,wrong count,23,7,0,True,False,True
+q2b-agg-p02-n16-r2,agg-p02-n16,16,False,agent-004,0.0,malformed,90,14,2,True,False,True
+q2b-agg-p02-n16-r2,agg-p02-n16,16,False,agent-005,0.0,wrong count,38,12,5,True,False,True
+q2b-agg-p02-n16-r2,agg-p02-n16,16,False,agent-006,0.0,wrong numbers,123,32,0,True,True,True
+q2b-agg-p02-n16-r2,agg-p02-n16,16,False,agent-007,0.0,malformed,94,30,4,True,False,True
+q2b-agg-p02-n16-r2,agg-p02-n16,16,False,agent-008,0.0,wrong count,56,18,2,True,False,True
+q2b-agg-p02-n16-r2,agg-p02-n16,16,False,agent-009,0.0,malformed,22,10,1,True,False,True
+q2b-agg-p02-n16-r2,agg-p02-n16,16,False,agent-010,0.0,no answer,41,4,1,True,False,True
+q2b-agg-p02-n16-r2,agg-p02-n16,16,False,agent-011,0.0,wrong count,163,38,1,True,True,True
+q2b-agg-p02-n16-r2,agg-p02-n16,16,False,agent-012,0.0,malformed,129,26,0,False,True,True
+q2b-agg-p02-n16-r2,agg-p02-n16,16,False,agent-013,0.0,wrong count,63,24,0,True,False,True
+q2b-agg-p02-n16-r2,agg-p02-n16,16,False,agent-014,0.0,malformed,67,18,8,True,False,True
+q2b-agg-p02-n16-r2,agg-p02-n16,16,False,agent-015,0.0,wrong count,151,16,0,True,True,True
+q2b-agg-p02-n16-r2,agg-p02-n16,16,False,agent-016,0.0,malformed,76,34,1,True,False,True
+q2b-agg-p11-n16-r2,agg-p11-n16,16,False,agent-001,0.0,wrong numbers,29,4,1,True,True,True
+q2b-agg-p11-n16-r2,agg-p11-n16,16,False,agent-002,0.0,wrong numbers,48,10,6,True,True,True
+q2b-agg-p11-n16-r2,agg-p11-n16,16,False,agent-003,0.0,wrong count,168,28,0,False,True,True
+q2b-agg-p11-n16-r2,agg-p11-n16,16,False,agent-004,0.0,wrong count,157,72,0,True,True,True
+q2b-agg-p11-n16-r2,agg-p11-n16,16,False,agent-005,0.0,wrong numbers,85,28,3,True,True,True
+q2b-agg-p11-n16-r2,agg-p11-n16,16,False,agent-006,0.0,no answer,180,71,1,False,True,True
+q2b-agg-p11-n16-r2,agg-p11-n16,16,False,agent-007,0.0,wrong numbers,52,6,0,True,False,True
+q2b-agg-p11-n16-r2,agg-p11-n16,16,False,agent-008,0.0,wrong count,48,19,0,True,False,True
+q2b-agg-p11-n16-r2,agg-p11-n16,16,False,agent-009,0.0,wrong numbers,21,5,0,True,False,True
+q2b-agg-p11-n16-r2,agg-p11-n16,16,False,agent-010,0.0,wrong numbers,47,15,0,True,True,True
+q2b-agg-p11-n16-r2,agg-p11-n16,16,False,agent-011,0.0,wrong count,58,18,0,True,True,True
+q2b-agg-p11-n16-r2,agg-p11-n16,16,False,agent-012,0.0,wrong count,120,45,0,True,True,True
+q2b-agg-p11-n16-r2,agg-p11-n16,16,False,agent-013,0.0,no answer,180,64,0,True,True,True
+q2b-agg-p11-n16-r2,agg-p11-n16,16,False,agent-014,0.0,malformed,159,37,0,False,True,True
+q2b-agg-p11-n16-r2,agg-p11-n16,16,False,agent-015,0.0,no answer,82,5,0,True,True,True
+q2b-agg-p11-n16-r2,agg-p11-n16,16,False,agent-016,0.0,wrong count,72,4,3,True,False,True
+q2b-agg-p18-n04,agg-p18-n04,4,True,agent-001,0.0,malformed,72,26,14,True,False,True
+q2b-agg-p18-n04,agg-p18-n04,4,True,agent-002,0.0,wrong numbers,43,6,5,True,False,True
+q2b-agg-p18-n04,agg-p18-n04,4,True,agent-003,1.0,right,40,8,0,True,False,True
+q2b-agg-p18-n04,agg-p18-n04,4,True,agent-004,0.0,malformed,23,4,1,True,False,True
+q2b-agg-p04-n16-r2,agg-p04-n16,16,False,agent-001,0.0,malformed,74,6,0,True,False,True
+q2b-agg-p04-n16-r2,agg-p04-n16,16,False,agent-002,0.0,wrong count,38,7,1,True,False,True
+q2b-agg-p04-n16-r2,agg-p04-n16,16,False,agent-003,0.0,malformed,71,17,1,True,False,True
+q2b-agg-p04-n16-r2,agg-p04-n16,16,False,agent-004,0.0,wrong count,112,58,0,True,False,True
+q2b-agg-p04-n16-r2,agg-p04-n16,16,False,agent-005,0.0,wrong numbers,130,21,1,True,False,True
+q2b-agg-p04-n16-r2,agg-p04-n16,16,False,agent-006,0.0,wrong count,180,53,1,True,True,True
+q2b-agg-p04-n16-r2,agg-p04-n16,16,False,agent-007,0.0,malformed,60,15,0,True,False,True
+q2b-agg-p04-n16-r2,agg-p04-n16,16,False,agent-008,0.0,wrong numbers,57,11,1,True,True,True
+q2b-agg-p04-n16-r2,agg-p04-n16,16,False,agent-009,0.0,wrong count,62,17,3,True,False,True
+q2b-agg-p04-n16-r2,agg-p04-n16,16,False,agent-010,0.0,wrong count,32,9,1,True,False,True
+q2b-agg-p04-n16-r2,agg-p04-n16,16,False,agent-011,0.0,wrong numbers,80,19,0,True,True,True
+q2b-agg-p04-n16-r2,agg-p04-n16,16,False,agent-012,0.0,wrong count,54,11,5,True,False,True
+q2b-agg-p04-n16-r2,agg-p04-n16,16,False,agent-013,0.0,malformed,91,24,2,True,False,True
+q2b-agg-p04-n16-r2,agg-p04-n16,16,False,agent-014,0.0,malformed,22,2,0,True,False,True
+q2b-agg-p04-n16-r2,agg-p04-n16,16,False,agent-015,0.0,wrong count,69,22,2,True,False,True
+q2b-agg-p04-n16-r2,agg-p04-n16,16,False,agent-016,0.0,wrong numbers,145,33,0,False,False,True
+q2b-agg-p17-n02,agg-p17-n02,2,True,agent-001,1.0,right,29,5,1,True,False,True
+q2b-agg-p17-n02,agg-p17-n02,2,True,agent-002,0.0,wrong numbers,40,10,4,True,False,True
+q2b-agg-p01-n08,agg-p01-n08,8,False,agent-001,0.0,wrong count,84,25,0,True,True,True
+q2b-agg-p01-n08,agg-p01-n08,8,False,agent-002,0.0,wrong numbers,148,33,0,True,True,True
+q2b-agg-p01-n08,agg-p01-n08,8,False,agent-003,0.0,no answer,176,42,1,True,True,True
+q2b-agg-p01-n08,agg-p01-n08,8,False,agent-004,0.0,wrong count,117,40,1,True,False,True
+q2b-agg-p01-n08,agg-p01-n08,8,False,agent-005,0.0,wrong count,73,19,1,True,True,True
+q2b-agg-p01-n08,agg-p01-n08,8,False,agent-006,0.0,no answer,240,98,18,True,False,True
+q2b-agg-p01-n08,agg-p01-n08,8,False,agent-007,0.0,wrong count,118,43,1,True,False,True
+q2b-agg-p01-n08,agg-p01-n08,8,False,agent-008,0.0,wrong count,42,4,0,True,False,True
+q2b-agg-p10-n16-r2,agg-p10-n16,16,False,agent-001,0.0,malformed,126,28,0,True,True,True
+q2b-agg-p10-n16-r2,agg-p10-n16,16,False,agent-002,0.0,malformed,61,12,0,True,True,True
+q2b-agg-p10-n16-r2,agg-p10-n16,16,False,agent-003,0.0,malformed,107,28,1,True,False,True
+q2b-agg-p10-n16-r2,agg-p10-n16,16,False,agent-004,0.0,wrong count,49,3,6,True,False,True
+q2b-agg-p10-n16-r2,agg-p10-n16,16,False,agent-005,0.0,no answer,180,81,6,True,True,True
+q2b-agg-p10-n16-r2,agg-p10-n16,16,False,agent-006,0.0,no answer,180,57,0,True,True,True
+q2b-agg-p10-n16-r2,agg-p10-n16,16,False,agent-007,0.0,wrong count,61,25,0,True,True,True
+q2b-agg-p10-n16-r2,agg-p10-n16,16,False,agent-008,0.0,no answer,113,55,0,True,False,True
+q2b-agg-p10-n16-r2,agg-p10-n16,16,False,agent-009,0.0,wrong count,48,7,1,True,False,True
+q2b-agg-p10-n16-r2,agg-p10-n16,16,False,agent-010,0.0,wrong count,62,10,0,True,False,True
+q2b-agg-p10-n16-r2,agg-p10-n16,16,False,agent-011,0.0,malformed,123,18,0,True,True,True
+q2b-agg-p10-n16-r2,agg-p10-n16,16,False,agent-012,0.0,wrong count,79,32,1,True,False,True
+q2b-agg-p10-n16-r2,agg-p10-n16,16,False,agent-013,0.0,no answer,180,53,14,True,True,True
+q2b-agg-p10-n16-r2,agg-p10-n16,16,False,agent-014,0.0,no answer,120,49,5,True,False,True
+q2b-agg-p10-n16-r2,agg-p10-n16,16,False,agent-015,0.0,malformed,75,28,11,True,False,True
+q2b-agg-p10-n16-r2,agg-p10-n16,16,False,agent-016,0.0,no answer,180,59,7,True,True,True
+q2b-agg-p08-n16-r2,agg-p08-n16,16,False,agent-001,0.0,malformed,46,6,3,True,False,True
+q2b-agg-p08-n16-r2,agg-p08-n16,16,False,agent-002,0.0,no answer,180,79,0,False,True,True
+q2b-agg-p08-n16-r2,agg-p08-n16,16,False,agent-003,0.0,malformed,57,18,1,True,False,True
+q2b-agg-p08-n16-r2,agg-p08-n16,16,False,agent-004,0.0,malformed,150,31,2,True,True,True
+q2b-agg-p08-n16-r2,agg-p08-n16,16,False,agent-005,0.0,wrong numbers,94,21,4,True,True,True
+q2b-agg-p08-n16-r2,agg-p08-n16,16,False,agent-006,0.0,wrong count,43,3,1,True,False,True
+q2b-agg-p08-n16-r2,agg-p08-n16,16,False,agent-007,0.0,wrong count,68,16,0,True,False,True
+q2b-agg-p08-n16-r2,agg-p08-n16,16,False,agent-008,0.0,wrong numbers,31,4,1,True,False,True
+q2b-agg-p08-n16-r2,agg-p08-n16,16,False,agent-009,0.0,wrong numbers,118,26,0,True,False,True
+q2b-agg-p08-n16-r2,agg-p08-n16,16,False,agent-010,0.0,wrong count,101,35,0,True,True,True
+q2b-agg-p08-n16-r2,agg-p08-n16,16,False,agent-011,0.0,wrong count,97,14,3,False,True,True
+q2b-agg-p08-n16-r2,agg-p08-n16,16,False,agent-012,0.0,wrong count,39,5,10,True,False,True
+q2b-agg-p08-n16-r2,agg-p08-n16,16,False,agent-013,0.0,wrong numbers,123,39,0,True,True,True
+q2b-agg-p08-n16-r2,agg-p08-n16,16,False,agent-014,0.0,wrong numbers,42,4,0,True,False,True
+q2b-agg-p08-n16-r2,agg-p08-n16,16,False,agent-015,0.0,no answer,240,85,0,True,True,True
+q2b-agg-p08-n16-r2,agg-p08-n16,16,False,agent-016,0.0,wrong count,127,25,0,True,False,True
+q2b-agg-p20-n01,agg-p20-n01,1,True,agent-001,1.0,right,62,27,1,True,False,True
+q2b-agg-p09-n16-r2,agg-p09-n16,16,False,agent-001,0.0,wrong count,155,40,0,True,True,True
+q2b-agg-p09-n16-r2,agg-p09-n16,16,False,agent-002,0.0,no answer,180,64,2,True,True,True
+q2b-agg-p09-n16-r2,agg-p09-n16,16,False,agent-003,0.0,no answer,240,75,0,True,True,True
+q2b-agg-p09-n16-r2,agg-p09-n16,16,False,agent-004,0.0,wrong count,86,12,13,True,False,True
+q2b-agg-p09-n16-r2,agg-p09-n16,16,False,agent-005,0.0,no answer,240,81,0,True,True,True
+q2b-agg-p09-n16-r2,agg-p09-n16,16,False,agent-006,0.0,wrong count,240,81,0,True,True,True
+q2b-agg-p09-n16-r2,agg-p09-n16,16,False,agent-007,0.0,malformed,48,8,1,True,False,True
+q2b-agg-p09-n16-r2,agg-p09-n16,16,False,agent-008,0.0,wrong count,132,26,1,True,True,True
+q2b-agg-p09-n16-r2,agg-p09-n16,16,False,agent-009,0.0,malformed,109,33,1,True,True,True
+q2b-agg-p09-n16-r2,agg-p09-n16,16,False,agent-010,0.0,wrong count,91,38,3,True,True,True
+q2b-agg-p09-n16-r2,agg-p09-n16,16,False,agent-011,0.0,malformed,54,30,4,True,False,True
+q2b-agg-p09-n16-r2,agg-p09-n16,16,False,agent-012,0.0,no answer,180,52,0,False,True,True
+q2b-agg-p09-n16-r2,agg-p09-n16,16,False,agent-013,0.0,malformed,137,76,1,True,True,True
+q2b-agg-p09-n16-r2,agg-p09-n16,16,False,agent-014,0.0,no answer,180,49,0,True,False,True
+q2b-agg-p09-n16-r2,agg-p09-n16,16,False,agent-015,0.0,wrong count,56,8,13,True,False,True
+q2b-agg-p09-n16-r2,agg-p09-n16,16,False,agent-016,0.0,wrong count,97,33,0,True,False,True
+q2b-agg-p17-n08,agg-p17-n08,8,False,agent-001,0.0,no answer,180,61,0,True,True,True
+q2b-agg-p17-n08,agg-p17-n08,8,False,agent-002,0.0,wrong numbers,43,19,6,True,False,True
+q2b-agg-p17-n08,agg-p17-n08,8,False,agent-003,0.0,wrong numbers,63,8,1,True,False,True
+q2b-agg-p17-n08,agg-p17-n08,8,False,agent-004,0.0,wrong numbers,84,23,0,True,True,True
+q2b-agg-p17-n08,agg-p17-n08,8,False,agent-005,0.0,malformed,51,4,0,True,False,True
+q2b-agg-p17-n08,agg-p17-n08,8,False,agent-006,0.0,wrong numbers,94,38,2,True,True,True
+q2b-agg-p17-n08,agg-p17-n08,8,False,agent-007,0.0,wrong count,93,34,6,True,False,True
+q2b-agg-p17-n08,agg-p17-n08,8,False,agent-008,0.0,wrong count,120,27,0,True,True,True
+q2b-agg-p19-n01,agg-p19-n01,1,False,agent-001,0.0,no answer,110,71,17,True,False,True
+q2b-agg-p19-n02,agg-p19-n02,2,False,agent-001,0.0,wrong numbers,72,20,3,True,False,True
+q2b-agg-p19-n02,agg-p19-n02,2,False,agent-002,0.0,wrong numbers,174,79,0,True,True,True
+q2b-agg-p20-n02,agg-p20-n02,2,False,agent-001,0.0,malformed,122,22,0,True,False,True
+q2b-agg-p20-n02,agg-p20-n02,2,False,agent-002,0.0,malformed,66,22,5,True,True,True
+q2b-agg-p19-n08,agg-p19-n08,8,False,agent-001,0.0,wrong numbers,63,26,9,True,False,True
+q2b-agg-p19-n08,agg-p19-n08,8,False,agent-002,0.0,wrong numbers,52,5,3,True,False,True
+q2b-agg-p19-n08,agg-p19-n08,8,False,agent-003,0.0,malformed,77,13,0,False,True,True
+q2b-agg-p19-n08,agg-p19-n08,8,False,agent-004,0.0,no answer,180,80,9,True,True,True
+q2b-agg-p19-n08,agg-p19-n08,8,False,agent-005,0.0,wrong numbers,63,11,1,True,False,True
+q2b-agg-p19-n08,agg-p19-n08,8,False,agent-006,0.0,no answer,145,54,1,True,True,True
+q2b-agg-p19-n08,agg-p19-n08,8,False,agent-007,0.0,wrong numbers,86,12,0,True,True,True
+q2b-agg-p19-n08,agg-p19-n08,8,False,agent-008,0.0,no answer,120,26,0,True,True,True
+q2b-agg-p14-n16-r1,agg-p14-n16,16,False,agent-001,0.0,wrong count,151,55,0,True,False,True
+q2b-agg-p14-n16-r1,agg-p14-n16,16,False,agent-002,0.0,no answer,180,58,0,True,True,True
+q2b-agg-p14-n16-r1,agg-p14-n16,16,False,agent-003,0.0,wrong count,117,51,0,True,True,True
+q2b-agg-p14-n16-r1,agg-p14-n16,16,False,agent-004,0.0,wrong numbers,132,66,2,True,True,True
+q2b-agg-p14-n16-r1,agg-p14-n16,16,False,agent-005,0.0,wrong count,73,21,0,True,False,True
+q2b-agg-p14-n16-r1,agg-p14-n16,16,False,agent-006,0.0,no answer,120,66,0,True,False,True
+q2b-agg-p14-n16-r1,agg-p14-n16,16,False,agent-007,0.0,malformed,35,3,1,True,False,True
+q2b-agg-p14-n16-r1,agg-p14-n16,16,False,agent-008,0.0,wrong count,72,18,4,True,False,True
+q2b-agg-p14-n16-r1,agg-p14-n16,16,False,agent-009,0.0,wrong count,156,38,3,True,False,True
+q2b-agg-p14-n16-r1,agg-p14-n16,16,False,agent-010,0.0,wrong count,68,17,2,True,False,True
+q2b-agg-p14-n16-r1,agg-p14-n16,16,False,agent-011,0.0,wrong count,180,58,0,True,True,True
+q2b-agg-p14-n16-r1,agg-p14-n16,16,False,agent-012,0.0,malformed,62,3,0,True,False,True
+q2b-agg-p14-n16-r1,agg-p14-n16,16,False,agent-013,0.0,wrong count,74,13,3,True,False,True
+q2b-agg-p14-n16-r1,agg-p14-n16,16,False,agent-014,0.0,malformed,125,36,0,True,False,True
+q2b-agg-p14-n16-r1,agg-p14-n16,16,False,agent-015,0.0,no answer,180,63,0,True,True,True
+q2b-agg-p14-n16-r1,agg-p14-n16,16,False,agent-016,0.0,wrong numbers,165,36,0,False,True,True
+q2b-agg-p11-n02,agg-p11-n02,2,False,agent-001,0.0,wrong count,178,37,0,True,True,True
+q2b-agg-p11-n02,agg-p11-n02,2,False,agent-002,0.0,malformed,34,5,1,True,True,True
+q2b-agg-p07-n16,agg-p07-n16,16,False,agent-001,0.0,no answer,60,6,6,True,False,True
+q2b-agg-p07-n16,agg-p07-n16,16,False,agent-002,0.0,no answer,136,41,0,True,False,True
+q2b-agg-p07-n16,agg-p07-n16,16,False,agent-003,0.0,no answer,122,48,2,True,True,True
+q2b-agg-p07-n16,agg-p07-n16,16,False,agent-004,0.0,wrong count,41,5,0,True,True,True
+q2b-agg-p07-n16,agg-p07-n16,16,False,agent-005,0.0,malformed,45,10,0,True,False,True
+q2b-agg-p07-n16,agg-p07-n16,16,False,agent-006,0.0,wrong count,51,4,1,True,True,True
+q2b-agg-p07-n16,agg-p07-n16,16,False,agent-007,0.0,malformed,44,4,0,True,False,True
+q2b-agg-p07-n16,agg-p07-n16,16,False,agent-008,0.0,wrong numbers,41,11,0,True,False,True
+q2b-agg-p07-n16,agg-p07-n16,16,False,agent-009,0.0,wrong count,120,43,0,True,True,True
+q2b-agg-p07-n16,agg-p07-n16,16,False,agent-010,0.0,malformed,120,45,1,True,False,True
+q2b-agg-p07-n16,agg-p07-n16,16,False,agent-011,0.0,wrong numbers,56,9,1,True,False,True
+q2b-agg-p07-n16,agg-p07-n16,16,False,agent-012,0.0,wrong count,41,19,4,True,False,True
+q2b-agg-p07-n16,agg-p07-n16,16,False,agent-013,0.0,malformed,38,4,1,True,False,True
+q2b-agg-p07-n16,agg-p07-n16,16,False,agent-014,0.0,wrong count,49,3,0,True,False,True
+q2b-agg-p07-n16,agg-p07-n16,16,False,agent-015,0.0,no answer,60,15,10,True,False,True
+q2b-agg-p07-n16,agg-p07-n16,16,False,agent-016,0.0,no answer,104,37,0,False,True,True
+q2b-agg-p21-n04,agg-p21-n04,4,False,agent-001,0.0,wrong numbers,46,11,2,True,False,True
+q2b-agg-p21-n04,agg-p21-n04,4,False,agent-002,0.0,wrong numbers,46,7,1,True,False,True
+q2b-agg-p21-n04,agg-p21-n04,4,False,agent-003,0.0,wrong numbers,60,27,0,True,False,True
+q2b-agg-p21-n04,agg-p21-n04,4,False,agent-004,0.0,wrong numbers,94,43,1,True,False,True
+q2b-agg-p17-n16,agg-p17-n16,16,False,agent-001,0.0,malformed,40,3,1,True,True,True
+q2b-agg-p17-n16,agg-p17-n16,16,False,agent-002,0.0,malformed,80,20,1,True,False,True
+q2b-agg-p17-n16,agg-p17-n16,16,False,agent-003,0.0,wrong count,77,27,0,True,True,True
+q2b-agg-p17-n16,agg-p17-n16,16,False,agent-004,0.0,wrong count,58,6,1,True,False,True
+q2b-agg-p17-n16,agg-p17-n16,16,False,agent-005,0.0,wrong numbers,51,11,2,True,False,True
+q2b-agg-p17-n16,agg-p17-n16,16,False,agent-006,0.0,no answer,72,33,2,True,False,True
+q2b-agg-p17-n16,agg-p17-n16,16,False,agent-007,0.0,wrong count,62,6,4,True,False,True
+q2b-agg-p17-n16,agg-p17-n16,16,False,agent-008,0.0,wrong numbers,82,22,8,True,False,True
+q2b-agg-p17-n16,agg-p17-n16,16,False,agent-009,0.0,wrong count,45,12,2,True,False,True
+q2b-agg-p17-n16,agg-p17-n16,16,False,agent-010,0.0,wrong count,79,44,1,True,True,True
+q2b-agg-p17-n16,agg-p17-n16,16,False,agent-011,0.0,wrong numbers,35,15,1,True,True,True
+q2b-agg-p17-n16,agg-p17-n16,16,False,agent-012,0.0,wrong numbers,35,3,15,True,False,True
+q2b-agg-p17-n16,agg-p17-n16,16,False,agent-013,0.0,wrong count,11,2,0,True,False,True
+q2b-agg-p17-n16,agg-p17-n16,16,False,agent-014,0.0,no answer,120,51,1,True,True,True
+q2b-agg-p17-n16,agg-p17-n16,16,False,agent-015,0.0,malformed,108,17,0,True,True,True
+q2b-agg-p17-n16,agg-p17-n16,16,False,agent-016,0.0,wrong numbers,50,13,0,True,False,True
+q2b-agg-p17-n04,agg-p17-n04,4,False,agent-001,0.0,wrong numbers,59,6,1,True,False,True
+q2b-agg-p17-n04,agg-p17-n04,4,False,agent-002,0.0,wrong numbers,103,13,6,True,False,True
+q2b-agg-p17-n04,agg-p17-n04,4,False,agent-003,0.0,no answer,72,17,0,True,True,True
+q2b-agg-p17-n04,agg-p17-n04,4,False,agent-004,0.0,no answer,240,9,0,False,False,True
+q2b-agg-p25-n01,agg-p25-n01,1,True,agent-001,1.0,right,4,0,0,False,False,True
+q2b-agg-p16-n08,agg-p16-n08,8,False,agent-001,0.0,no answer,180,52,0,True,True,True
+q2b-agg-p16-n08,agg-p16-n08,8,False,agent-002,0.0,no answer,180,77,0,True,False,True
+q2b-agg-p16-n08,agg-p16-n08,8,False,agent-003,0.0,wrong count,59,11,3,True,False,True
+q2b-agg-p16-n08,agg-p16-n08,8,False,agent-004,0.0,no answer,120,36,0,False,False,True
+q2b-agg-p16-n08,agg-p16-n08,8,False,agent-005,0.0,malformed,101,21,2,True,True,True
+q2b-agg-p16-n08,agg-p16-n08,8,False,agent-006,0.0,no answer,191,80,0,True,True,True
+q2b-agg-p16-n08,agg-p16-n08,8,False,agent-007,0.0,no answer,120,59,0,True,False,True
+q2b-agg-p16-n08,agg-p16-n08,8,False,agent-008,0.0,no answer,180,77,0,True,False,True
+q2b-agg-p20-n04,agg-p20-n04,4,False,agent-001,0.0,malformed,180,105,5,True,True,True
+q2b-agg-p20-n04,agg-p20-n04,4,False,agent-002,0.0,wrong numbers,135,30,1,True,False,True
+q2b-agg-p20-n04,agg-p20-n04,4,False,agent-003,0.0,malformed,104,32,0,True,True,True
+q2b-agg-p20-n04,agg-p20-n04,4,False,agent-004,0.0,malformed,116,36,10,True,False,True
+q2b-agg-p25-n02,agg-p25-n02,2,True,agent-001,1.0,right,26,1,1,True,False,True
+q2b-agg-p25-n02,agg-p25-n02,2,True,agent-002,1.0,right,18,3,2,True,False,True
+q2b-agg-p22-n01,agg-p22-n01,1,True,agent-001,1.0,right,184,40,0,False,True,True
+q2b-agg-p21-n02,agg-p21-n02,2,False,agent-001,0.0,malformed,37,10,3,True,False,True
+q2b-agg-p21-n02,agg-p21-n02,2,False,agent-002,0.0,wrong numbers,178,42,0,False,True,True
+q2b-agg-p21-n01,agg-p21-n01,1,True,agent-001,1.0,right,223,98,0,True,True,True
+q2b-agg-p26-n01,agg-p26-n01,1,True,agent-001,1.0,right,24,5,3,True,False,True
+q2b-agg-p23-n08,agg-p23-n08,8,False,agent-001,0.0,malformed,72,26,5,True,False,True
+q2b-agg-p23-n08,agg-p23-n08,8,False,agent-002,0.0,wrong numbers,40,7,0,True,False,True
+q2b-agg-p23-n08,agg-p23-n08,8,False,agent-003,0.0,wrong numbers,55,24,0,True,False,True
+q2b-agg-p23-n08,agg-p23-n08,8,False,agent-004,0.0,wrong numbers,48,4,3,True,True,True
+q2b-agg-p23-n08,agg-p23-n08,8,False,agent-005,0.0,no answer,60,14,0,True,False,True
+q2b-agg-p23-n08,agg-p23-n08,8,False,agent-006,0.0,wrong numbers,80,19,3,True,True,True
+q2b-agg-p23-n08,agg-p23-n08,8,False,agent-007,0.0,malformed,130,24,1,False,False,True
+q2b-agg-p23-n08,agg-p23-n08,8,False,agent-008,0.0,wrong numbers,69,5,1,True,False,True
+q2b-agg-p18-n08,agg-p18-n08,8,False,agent-001,0.0,malformed,49,9,1,True,False,True
+q2b-agg-p18-n08,agg-p18-n08,8,False,agent-002,0.0,malformed,79,23,0,True,False,True
+q2b-agg-p18-n08,agg-p18-n08,8,False,agent-003,0.0,wrong count,62,12,3,True,False,True
+q2b-agg-p18-n08,agg-p18-n08,8,False,agent-004,0.0,malformed,122,37,0,False,True,True
+q2b-agg-p18-n08,agg-p18-n08,8,False,agent-005,0.0,wrong count,105,21,2,True,True,True
+q2b-agg-p18-n08,agg-p18-n08,8,False,agent-006,0.0,wrong count,164,49,0,True,True,True
+q2b-agg-p18-n08,agg-p18-n08,8,False,agent-007,0.0,wrong count,73,24,2,True,True,True
+q2b-agg-p18-n08,agg-p18-n08,8,False,agent-008,0.0,malformed,81,32,2,True,False,True
+q2b-agg-p23-n02,agg-p23-n02,2,True,agent-001,0.0,malformed,107,46,1,True,False,True
+q2b-agg-p23-n02,agg-p23-n02,2,True,agent-002,1.0,right,16,1,1,True,False,True
+q2b-agg-p26-n02,agg-p26-n02,2,False,agent-001,0.0,wrong numbers,49,8,9,True,False,True
+q2b-agg-p26-n02,agg-p26-n02,2,False,agent-002,0.0,malformed,79,3,0,True,False,True
+q2b-agg-p27-n01,agg-p27-n01,1,False,agent-001,0.0,malformed,16,7,0,False,False,True
+q2b-agg-p23-n01,agg-p23-n01,1,True,agent-001,1.0,right,12,1,0,False,False,True
+q2b-agg-p22-n02,agg-p22-n02,2,False,agent-001,0.0,wrong count,131,53,6,True,True,True
+q2b-agg-p22-n02,agg-p22-n02,2,False,agent-002,0.0,malformed,142,37,0,False,False,True
+q2b-agg-p20-n08,agg-p20-n08,8,False,agent-001,0.0,no answer,122,31,0,True,False,True
+q2b-agg-p20-n08,agg-p20-n08,8,False,agent-002,0.0,wrong numbers,240,67,0,True,True,True
+q2b-agg-p20-n08,agg-p20-n08,8,False,agent-003,0.0,wrong numbers,55,21,3,True,False,True
+q2b-agg-p20-n08,agg-p20-n08,8,False,agent-004,0.0,malformed,68,31,13,True,False,True
+q2b-agg-p20-n08,agg-p20-n08,8,False,agent-005,0.0,malformed,193,48,0,False,True,True
+q2b-agg-p20-n08,agg-p20-n08,8,False,agent-006,0.0,malformed,36,10,1,True,False,True
+q2b-agg-p20-n08,agg-p20-n08,8,False,agent-007,0.0,no answer,170,85,2,True,True,True
+q2b-agg-p20-n08,agg-p20-n08,8,False,agent-008,0.0,malformed,63,8,2,True,False,True
+q2b-agg-p16-n16,agg-p16-n16,16,False,agent-001,0.0,no answer,168,56,2,True,True,True
+q2b-agg-p16-n16,agg-p16-n16,16,False,agent-002,0.0,wrong count,93,10,0,True,False,True
+q2b-agg-p16-n16,agg-p16-n16,16,False,agent-003,0.0,no answer,120,35,6,True,True,True
+q2b-agg-p16-n16,agg-p16-n16,16,False,agent-004,0.0,wrong count,74,10,0,True,False,True
+q2b-agg-p16-n16,agg-p16-n16,16,False,agent-005,0.0,no answer,128,126,0,True,False,True
+q2b-agg-p16-n16,agg-p16-n16,16,False,agent-006,0.0,no answer,180,75,0,True,True,True
+q2b-agg-p16-n16,agg-p16-n16,16,False,agent-007,0.0,wrong count,171,22,0,True,True,True
+q2b-agg-p16-n16,agg-p16-n16,16,False,agent-008,0.0,wrong numbers,101,12,0,True,False,True
+q2b-agg-p16-n16,agg-p16-n16,16,False,agent-009,0.0,no answer,85,23,0,True,True,True
+q2b-agg-p16-n16,agg-p16-n16,16,False,agent-010,0.0,wrong numbers,69,20,0,True,False,True
+q2b-agg-p16-n16,agg-p16-n16,16,False,agent-011,0.0,no answer,180,99,5,True,True,True
+q2b-agg-p16-n16,agg-p16-n16,16,False,agent-012,0.0,malformed,229,56,0,True,True,True
+q2b-agg-p16-n16,agg-p16-n16,16,False,agent-013,0.0,malformed,127,63,0,True,True,True
+q2b-agg-p16-n16,agg-p16-n16,16,False,agent-014,0.0,wrong count,66,33,1,True,False,True
+q2b-agg-p16-n16,agg-p16-n16,16,False,agent-015,0.0,wrong numbers,56,6,0,True,False,True
+q2b-agg-p16-n16,agg-p16-n16,16,False,agent-016,0.0,wrong count,47,4,1,True,False,True
+q2b-agg-p24-n01,agg-p24-n01,1,False,agent-001,0.0,no answer,185,90,1,True,True,True
+q2b-agg-p18-n16,agg-p18-n16,16,False,agent-001,0.0,wrong count,47,38,0,True,False,True
+q2b-agg-p18-n16,agg-p18-n16,16,False,agent-002,0.0,no answer,120,70,2,True,False,True
+q2b-agg-p18-n16,agg-p18-n16,16,False,agent-003,0.0,wrong numbers,26,5,6,True,False,True
+q2b-agg-p18-n16,agg-p18-n16,16,False,agent-004,0.0,wrong numbers,180,49,2,True,True,True
+q2b-agg-p18-n16,agg-p18-n16,16,False,agent-005,0.0,no answer,75,31,0,True,False,True
+q2b-agg-p18-n16,agg-p18-n16,16,False,agent-006,0.0,no answer,87,39,0,False,False,True
+q2b-agg-p18-n16,agg-p18-n16,16,False,agent-007,0.0,wrong count,61,14,6,True,False,True
+q2b-agg-p18-n16,agg-p18-n16,16,False,agent-008,0.0,wrong count,53,13,1,True,True,True
+q2b-agg-p18-n16,agg-p18-n16,16,False,agent-009,0.0,malformed,25,3,1,True,False,True
+q2b-agg-p18-n16,agg-p18-n16,16,False,agent-010,0.0,wrong count,33,11,3,True,False,True
+q2b-agg-p18-n16,agg-p18-n16,16,False,agent-011,0.0,no answer,180,44,0,True,True,True
+q2b-agg-p18-n16,agg-p18-n16,16,False,agent-012,0.0,malformed,57,7,1,True,False,True
+q2b-agg-p18-n16,agg-p18-n16,16,False,agent-013,0.0,wrong count,120,31,0,False,False,True
+q2b-agg-p18-n16,agg-p18-n16,16,False,agent-014,0.0,wrong numbers,33,10,1,True,False,True
+q2b-agg-p18-n16,agg-p18-n16,16,False,agent-015,0.0,wrong numbers,139,30,0,True,True,True
+q2b-agg-p18-n16,agg-p18-n16,16,False,agent-016,0.0,no answer,105,66,0,True,True,True
+q2b-agg-p29-n01,agg-p29-n01,1,True,agent-001,1.0,right,2,0,0,False,False,True
+q2b-agg-p23-n04,agg-p23-n04,4,False,agent-001,0.0,wrong count,240,90,2,True,True,True
+q2b-agg-p23-n04,agg-p23-n04,4,False,agent-002,0.0,no answer,60,10,1,True,False,True
+q2b-agg-p23-n04,agg-p23-n04,4,False,agent-003,0.0,wrong numbers,50,8,0,True,False,True
+q2b-agg-p23-n04,agg-p23-n04,4,False,agent-004,0.0,wrong numbers,91,16,4,True,True,True
+q2b-agg-p28-n01,agg-p28-n01,1,True,agent-001,1.0,right,33,7,0,False,True,True
+q2b-agg-p03-n16-r3,agg-p03-n16,16,False,agent-001,0.0,wrong count,90,21,5,True,True,True
+q2b-agg-p03-n16-r3,agg-p03-n16,16,False,agent-002,0.0,wrong numbers,164,64,0,True,True,True
+q2b-agg-p03-n16-r3,agg-p03-n16,16,False,agent-003,0.0,wrong count,68,17,8,True,False,True
+q2b-agg-p03-n16-r3,agg-p03-n16,16,False,agent-004,0.0,wrong numbers,110,45,0,True,True,True
+q2b-agg-p03-n16-r3,agg-p03-n16,16,False,agent-005,0.0,no answer,180,40,0,False,False,True
+q2b-agg-p03-n16-r3,agg-p03-n16,16,False,agent-006,0.0,wrong count,55,10,2,True,False,True
+q2b-agg-p03-n16-r3,agg-p03-n16,16,False,agent-007,0.0,wrong numbers,126,53,0,True,True,True
+q2b-agg-p03-n16-r3,agg-p03-n16,16,False,agent-008,0.0,wrong count,53,6,0,True,False,True
+q2b-agg-p03-n16-r3,agg-p03-n16,16,False,agent-009,0.0,malformed,34,11,0,True,False,True
+q2b-agg-p03-n16-r3,agg-p03-n16,16,False,agent-010,0.0,wrong count,168,53,0,True,True,True
+q2b-agg-p03-n16-r3,agg-p03-n16,16,False,agent-011,0.0,wrong count,61,5,1,True,False,True
+q2b-agg-p03-n16-r3,agg-p03-n16,16,False,agent-012,0.0,wrong count,37,13,0,True,False,True
+q2b-agg-p03-n16-r3,agg-p03-n16,16,False,agent-013,0.0,no answer,60,8,0,True,False,True
+q2b-agg-p03-n16-r3,agg-p03-n16,16,False,agent-014,0.0,malformed,99,22,28,True,False,True
+q2b-agg-p03-n16-r3,agg-p03-n16,16,False,agent-015,0.0,wrong count,55,8,6,True,False,True
+q2b-agg-p03-n16-r3,agg-p03-n16,16,False,agent-016,0.0,wrong numbers,120,30,0,False,True,True
+q2b-agg-p24-n02,agg-p24-n02,2,False,agent-001,0.0,no answer,120,55,9,True,True,True
+q2b-agg-p24-n02,agg-p24-n02,2,False,agent-002,0.0,wrong numbers,36,7,0,True,False,True
+q2b-agg-p24-n04,agg-p24-n04,4,False,agent-001,0.0,no answer,240,101,0,True,True,True
+q2b-agg-p24-n04,agg-p24-n04,4,False,agent-002,0.0,wrong numbers,111,38,2,True,True,True
+q2b-agg-p24-n04,agg-p24-n04,4,False,agent-003,0.0,wrong numbers,132,38,1,True,True,True
+q2b-agg-p24-n04,agg-p24-n04,4,False,agent-004,0.0,no answer,123,48,0,True,False,True
+q2b-agg-p27-n02,agg-p27-n02,2,False,agent-001,0.0,wrong numbers,115,64,4,True,True,True
+q2b-agg-p27-n02,agg-p27-n02,2,False,agent-002,0.0,wrong numbers,160,39,0,False,True,True
+q2b-agg-p26-n04,agg-p26-n04,4,False,agent-001,0.0,no answer,222,79,2,True,True,True
+q2b-agg-p26-n04,agg-p26-n04,4,False,agent-002,0.0,wrong numbers,66,14,6,True,False,True
+q2b-agg-p26-n04,agg-p26-n04,4,False,agent-003,0.0,malformed,108,25,0,False,True,True
+q2b-agg-p26-n04,agg-p26-n04,4,False,agent-004,0.0,malformed,74,29,2,True,False,True
+q2b-agg-p30-n01,agg-p30-n01,1,True,agent-001,1.0,right,85,27,0,True,False,True
+q2b-agg-p28-n02,agg-p28-n02,2,True,agent-001,0.0,wrong numbers,27,6,1,True,False,True
+q2b-agg-p28-n02,agg-p28-n02,2,True,agent-002,1.0,right,191,81,5,True,True,True
+q2b-agg-p30-n02,agg-p30-n02,2,False,agent-001,0.0,malformed,60,18,2,True,False,True
+q2b-agg-p30-n02,agg-p30-n02,2,False,agent-002,0.0,wrong numbers,100,20,0,False,False,True
+q2b-agg-p05-n16-r3,agg-p05-n16,16,False,agent-001,0.0,wrong count,111,19,1,True,True,True
+q2b-agg-p05-n16-r3,agg-p05-n16,16,False,agent-002,0.0,malformed,180,52,0,True,True,True
+q2b-agg-p05-n16-r3,agg-p05-n16,16,False,agent-003,0.0,malformed,131,40,6,True,False,True
+q2b-agg-p05-n16-r3,agg-p05-n16,16,False,agent-004,0.0,wrong count,87,29,0,True,True,True
+q2b-agg-p05-n16-r3,agg-p05-n16,16,False,agent-005,0.0,wrong count,194,40,1,False,True,True
+q2b-agg-p05-n16-r3,agg-p05-n16,16,False,agent-006,0.0,wrong numbers,40,7,0,True,False,True
+q2b-agg-p05-n16-r3,agg-p05-n16,16,False,agent-007,0.0,wrong count,57,23,2,True,True,True
+q2b-agg-p05-n16-r3,agg-p05-n16,16,False,agent-008,0.0,wrong count,50,14,0,True,False,True
+q2b-agg-p05-n16-r3,agg-p05-n16,16,False,agent-009,0.0,malformed,50,2,1,True,False,True
+q2b-agg-p05-n16-r3,agg-p05-n16,16,False,agent-010,0.0,wrong count,96,31,1,True,True,True
+q2b-agg-p05-n16-r3,agg-p05-n16,16,False,agent-011,0.0,wrong count,147,79,1,True,True,True
+q2b-agg-p05-n16-r3,agg-p05-n16,16,False,agent-012,0.0,wrong count,52,19,4,True,False,True
+q2b-agg-p05-n16-r3,agg-p05-n16,16,False,agent-013,0.0,wrong count,76,26,1,True,True,True
+q2b-agg-p05-n16-r3,agg-p05-n16,16,False,agent-014,0.0,wrong numbers,59,5,3,True,False,True
+q2b-agg-p05-n16-r3,agg-p05-n16,16,False,agent-015,0.0,wrong count,101,24,0,False,False,True
+q2b-agg-p05-n16-r3,agg-p05-n16,16,False,agent-016,0.0,wrong count,62,8,1,True,True,True
+q2b-agg-p28-n04,agg-p28-n04,4,False,agent-001,0.0,malformed,169,62,5,True,False,True
+q2b-agg-p28-n04,agg-p28-n04,4,False,agent-002,0.0,malformed,72,6,3,True,False,True
+q2b-agg-p28-n04,agg-p28-n04,4,False,agent-003,0.0,wrong numbers,63,7,3,True,False,True
+q2b-agg-p28-n04,agg-p28-n04,4,False,agent-004,0.0,wrong numbers,169,68,0,True,True,True
+q2b-agg-p29-n02,agg-p29-n02,2,False,agent-001,0.0,no answer,77,21,0,True,True,True
+q2b-agg-p29-n02,agg-p29-n02,2,False,agent-002,0.0,wrong numbers,202,51,0,True,True,True
+q2b-agg-p32-n01,agg-p32-n01,1,True,agent-001,1.0,right,14,9,0,False,False,True
+q2b-agg-p08-n08,agg-p08-n08,8,False,agent-001,0.0,wrong numbers,60,15,1,True,False,True
+q2b-agg-p08-n08,agg-p08-n08,8,False,agent-002,0.0,malformed,74,28,0,True,False,True
+q2b-agg-p08-n08,agg-p08-n08,8,False,agent-003,0.0,malformed,104,36,0,True,True,True
+q2b-agg-p08-n08,agg-p08-n08,8,False,agent-004,0.0,wrong count,155,44,2,True,True,True
+q2b-agg-p08-n08,agg-p08-n08,8,False,agent-005,0.0,wrong numbers,102,42,0,True,True,True
+q2b-agg-p08-n08,agg-p08-n08,8,False,agent-006,0.0,malformed,125,30,1,True,False,True
+q2b-agg-p08-n08,agg-p08-n08,8,False,agent-007,0.0,wrong count,60,5,1,True,False,True
+q2b-agg-p08-n08,agg-p08-n08,8,False,agent-008,0.0,malformed,64,15,1,True,True,True
+q2b-agg-p31-n01,agg-p31-n01,1,True,agent-001,1.0,right,120,37,0,True,True,True
+q2b-agg-p29-n08,agg-p29-n08,8,False,agent-001,0.0,wrong numbers,66,18,0,True,False,True
+q2b-agg-p29-n08,agg-p29-n08,8,False,agent-002,0.0,wrong count,125,56,1,True,True,True
+q2b-agg-p29-n08,agg-p29-n08,8,False,agent-003,0.0,malformed,66,17,0,True,False,True
+q2b-agg-p29-n08,agg-p29-n08,8,False,agent-004,0.0,malformed,86,14,3,True,True,True
+q2b-agg-p29-n08,agg-p29-n08,8,False,agent-005,0.0,wrong numbers,52,14,0,True,False,True
+q2b-agg-p29-n08,agg-p29-n08,8,False,agent-006,0.0,malformed,63,26,8,True,False,True
+q2b-agg-p29-n08,agg-p29-n08,8,False,agent-007,0.0,malformed,52,4,2,True,False,True
+q2b-agg-p29-n08,agg-p29-n08,8,False,agent-008,0.0,wrong numbers,58,11,0,True,False,True
+q2b-agg-p31-n02,agg-p31-n02,2,False,agent-001,0.0,malformed,107,45,1,True,True,True
+q2b-agg-p31-n02,agg-p31-n02,2,False,agent-002,0.0,wrong numbers,72,31,0,True,True,True
+q2b-agg-p21-n08,agg-p21-n08,8,False,agent-001,0.0,wrong numbers,110,64,0,True,False,True
+q2b-agg-p21-n08,agg-p21-n08,8,False,agent-002,0.0,malformed,124,33,0,True,True,True
+q2b-agg-p21-n08,agg-p21-n08,8,False,agent-003,0.0,wrong count,22,1,1,True,False,True
+q2b-agg-p21-n08,agg-p21-n08,8,False,agent-004,0.0,wrong count,170,64,0,True,True,True
+q2b-agg-p21-n08,agg-p21-n08,8,False,agent-005,0.0,wrong numbers,96,23,1,True,True,True
+q2b-agg-p21-n08,agg-p21-n08,8,False,agent-006,0.0,malformed,227,119,8,True,True,True
+q2b-agg-p21-n08,agg-p21-n08,8,False,agent-007,0.0,wrong numbers,45,9,12,True,True,True
+q2b-agg-p21-n08,agg-p21-n08,8,False,agent-008,0.0,wrong numbers,137,31,0,True,False,True
+q2b-agg-p27-n08,agg-p27-n08,8,False,agent-001,0.0,wrong count,45,15,1,True,False,True
+q2b-agg-p27-n08,agg-p27-n08,8,False,agent-002,0.0,no answer,240,64,0,False,True,True
+q2b-agg-p27-n08,agg-p27-n08,8,False,agent-003,0.0,no answer,233,74,0,True,True,True
+q2b-agg-p27-n08,agg-p27-n08,8,False,agent-004,0.0,wrong numbers,61,23,5,True,True,True
+q2b-agg-p27-n08,agg-p27-n08,8,False,agent-005,0.0,wrong count,220,61,0,True,True,True
+q2b-agg-p27-n08,agg-p27-n08,8,False,agent-006,0.0,wrong numbers,55,19,1,True,False,True
+q2b-agg-p27-n08,agg-p27-n08,8,False,agent-007,0.0,malformed,70,32,7,True,False,True
+q2b-agg-p27-n08,agg-p27-n08,8,False,agent-008,0.0,malformed,65,12,1,True,False,True
+q2b-agg-p13-n16-r1,agg-p13-n16,16,False,agent-001,0.0,wrong count,88,31,6,True,False,True
+q2b-agg-p13-n16-r1,agg-p13-n16,16,False,agent-002,0.0,wrong count,30,1,2,True,False,True
+q2b-agg-p13-n16-r1,agg-p13-n16,16,False,agent-003,0.0,wrong count,105,26,0,True,True,True
+q2b-agg-p13-n16-r1,agg-p13-n16,16,False,agent-004,0.0,malformed,108,19,0,True,False,True
+q2b-agg-p13-n16-r1,agg-p13-n16,16,False,agent-005,0.0,wrong count,167,66,0,False,True,True
+q2b-agg-p13-n16-r1,agg-p13-n16,16,False,agent-006,0.0,wrong numbers,104,38,0,True,False,True
+q2b-agg-p13-n16-r1,agg-p13-n16,16,False,agent-007,0.0,wrong numbers,66,15,0,True,False,True
+q2b-agg-p13-n16-r1,agg-p13-n16,16,False,agent-008,0.0,malformed,70,19,1,True,True,True
+q2b-agg-p13-n16-r1,agg-p13-n16,16,False,agent-009,0.0,wrong count,144,58,0,True,False,True
+q2b-agg-p13-n16-r1,agg-p13-n16,16,False,agent-010,0.0,wrong numbers,69,29,2,True,False,True
+q2b-agg-p13-n16-r1,agg-p13-n16,16,False,agent-011,0.0,no answer,101,44,0,True,False,True
+q2b-agg-p13-n16-r1,agg-p13-n16,16,False,agent-012,0.0,wrong count,89,39,3,True,False,True
+q2b-agg-p13-n16-r1,agg-p13-n16,16,False,agent-013,0.0,no answer,180,65,0,True,False,True
+q2b-agg-p13-n16-r1,agg-p13-n16,16,False,agent-014,0.0,no answer,180,78,3,True,False,True
+q2b-agg-p13-n16-r1,agg-p13-n16,16,False,agent-015,0.0,malformed,138,46,0,True,True,True
+q2b-agg-p13-n16-r1,agg-p13-n16,16,False,agent-016,0.0,wrong numbers,78,14,0,True,False,True
+q2b-agg-p11-n08,agg-p11-n08,8,False,agent-001,0.0,no answer,147,49,0,True,True,True
+q2b-agg-p11-n08,agg-p11-n08,8,False,agent-002,0.0,wrong count,206,74,1,True,True,True
+q2b-agg-p11-n08,agg-p11-n08,8,False,agent-003,0.0,malformed,93,27,2,True,False,True
+q2b-agg-p11-n08,agg-p11-n08,8,False,agent-004,0.0,wrong numbers,62,23,0,True,True,True
+q2b-agg-p11-n08,agg-p11-n08,8,False,agent-005,0.0,wrong count,141,89,6,True,False,True
+q2b-agg-p11-n08,agg-p11-n08,8,False,agent-006,0.0,wrong count,160,40,0,True,True,True
+q2b-agg-p11-n08,agg-p11-n08,8,False,agent-007,0.0,wrong count,180,73,2,True,True,True
+q2b-agg-p11-n08,agg-p11-n08,8,False,agent-008,0.0,no answer,253,96,1,True,True,True
+q2b-agg-p25-n04,agg-p25-n04,4,False,agent-001,0.0,wrong numbers,62,6,8,True,False,True
+q2b-agg-p25-n04,agg-p25-n04,4,False,agent-002,0.0,wrong numbers,61,9,1,True,False,True
+q2b-agg-p25-n04,agg-p25-n04,4,False,agent-003,0.0,wrong numbers,89,38,5,True,False,True
+q2b-agg-p25-n04,agg-p25-n04,4,False,agent-004,0.0,wrong count,132,38,0,True,True,True
+q2b-agg-p30-n08,agg-p30-n08,8,False,agent-001,0.0,wrong numbers,53,6,3,True,False,True
+q2b-agg-p30-n08,agg-p30-n08,8,False,agent-002,0.0,wrong numbers,26,9,1,True,False,True
+q2b-agg-p30-n08,agg-p30-n08,8,False,agent-003,0.0,malformed,65,13,7,True,True,True
+q2b-agg-p30-n08,agg-p30-n08,8,False,agent-004,0.0,wrong count,168,50,0,False,True,True
+q2b-agg-p30-n08,agg-p30-n08,8,False,agent-005,0.0,malformed,45,9,1,True,False,True
+q2b-agg-p30-n08,agg-p30-n08,8,False,agent-006,0.0,wrong numbers,77,27,3,True,True,True
+q2b-agg-p30-n08,agg-p30-n08,8,False,agent-007,0.0,wrong numbers,82,19,0,True,False,True
+q2b-agg-p30-n08,agg-p30-n08,8,False,agent-008,0.0,malformed,16,1,0,True,False,True
+q2b-agg-p28-n08,agg-p28-n08,8,False,agent-001,0.0,wrong numbers,66,9,0,False,False,True
+q2b-agg-p28-n08,agg-p28-n08,8,False,agent-002,0.0,wrong count,105,12,2,True,False,True
+q2b-agg-p28-n08,agg-p28-n08,8,False,agent-003,0.0,wrong numbers,129,54,2,True,False,True
+q2b-agg-p28-n08,agg-p28-n08,8,False,agent-004,0.0,wrong numbers,64,9,1,True,True,True
+q2b-agg-p28-n08,agg-p28-n08,8,False,agent-005,0.0,wrong count,77,14,1,True,True,True
+q2b-agg-p28-n08,agg-p28-n08,8,False,agent-006,0.0,wrong numbers,110,27,0,True,False,True
+q2b-agg-p28-n08,agg-p28-n08,8,False,agent-007,0.0,malformed,108,51,1,True,False,True
+q2b-agg-p28-n08,agg-p28-n08,8,False,agent-008,0.0,malformed,101,28,2,True,False,True
+q2b-agg-p32-n04,agg-p32-n04,4,False,agent-001,0.0,wrong numbers,151,53,0,True,True,True
+q2b-agg-p32-n04,agg-p32-n04,4,False,agent-002,0.0,wrong numbers,62,20,1,True,False,True
+q2b-agg-p32-n04,agg-p32-n04,4,False,agent-003,0.0,malformed,96,21,5,True,True,True
+q2b-agg-p32-n04,agg-p32-n04,4,False,agent-004,0.0,wrong numbers,129,33,9,True,True,True
+q2b-agg-p31-n04,agg-p31-n04,4,False,agent-001,0.0,wrong count,239,98,2,True,True,True
+q2b-agg-p31-n04,agg-p31-n04,4,False,agent-002,0.0,wrong numbers,59,16,3,True,False,True
+q2b-agg-p31-n04,agg-p31-n04,4,False,agent-003,0.0,wrong numbers,62,13,0,False,False,True
+q2b-agg-p31-n04,agg-p31-n04,4,False,agent-004,0.0,malformed,157,43,2,True,False,True
+q2b-agg-p27-n04,agg-p27-n04,4,False,agent-001,0.0,no answer,280,141,0,True,True,True
+q2b-agg-p27-n04,agg-p27-n04,4,False,agent-002,0.0,wrong count,171,38,0,True,True,True
+q2b-agg-p27-n04,agg-p27-n04,4,False,agent-003,0.0,no answer,113,52,2,True,True,True
+q2b-agg-p27-n04,agg-p27-n04,4,False,agent-004,0.0,wrong count,89,25,4,True,True,True
+q2b-agg-p22-n16,agg-p22-n16,16,False,agent-001,0.0,malformed,62,13,6,True,False,True
+q2b-agg-p22-n16,agg-p22-n16,16,False,agent-002,0.0,wrong numbers,164,53,0,False,True,True
+q2b-agg-p22-n16,agg-p22-n16,16,False,agent-003,0.0,malformed,69,9,0,True,True,True
+q2b-agg-p22-n16,agg-p22-n16,16,False,agent-004,0.0,malformed,72,0,0,True,False,True
+q2b-agg-p22-n16,agg-p22-n16,16,False,agent-005,0.0,wrong count,135,68,7,True,True,True
+q2b-agg-p22-n16,agg-p22-n16,16,False,agent-006,0.0,wrong numbers,39,13,1,True,False,True
+q2b-agg-p22-n16,agg-p22-n16,16,False,agent-007,0.0,malformed,43,13,0,True,True,True
+q2b-agg-p22-n16,agg-p22-n16,16,False,agent-008,0.0,wrong count,41,16,0,True,False,True
+q2b-agg-p22-n16,agg-p22-n16,16,False,agent-009,0.0,wrong count,31,7,2,True,False,True
+q2b-agg-p22-n16,agg-p22-n16,16,False,agent-010,0.0,wrong numbers,40,7,2,True,False,True
+q2b-agg-p22-n16,agg-p22-n16,16,False,agent-011,0.0,wrong count,35,13,3,True,False,True
+q2b-agg-p22-n16,agg-p22-n16,16,False,agent-012,0.0,malformed,46,11,0,True,False,True
+q2b-agg-p22-n16,agg-p22-n16,16,False,agent-013,0.0,wrong numbers,120,23,3,True,False,True
+q2b-agg-p22-n16,agg-p22-n16,16,False,agent-014,0.0,wrong count,139,65,1,True,False,True
+q2b-agg-p22-n16,agg-p22-n16,16,False,agent-015,0.0,malformed,75,27,1,True,True,True
+q2b-agg-p22-n16,agg-p22-n16,16,False,agent-016,0.0,wrong numbers,237,73,0,True,True,True
+q2b-agg-p25-n08-r1,agg-p25-n08,8,False,agent-001,0.0,malformed,42,14,2,True,False,True
+q2b-agg-p25-n08-r1,agg-p25-n08,8,False,agent-002,0.0,wrong numbers,45,12,0,True,False,True
+q2b-agg-p25-n08-r1,agg-p25-n08,8,False,agent-003,0.0,no answer,60,14,0,False,False,True
+q2b-agg-p25-n08-r1,agg-p25-n08,8,False,agent-004,0.0,wrong numbers,87,20,1,True,False,True
+q2b-agg-p25-n08-r1,agg-p25-n08,8,False,agent-005,0.0,malformed,42,4,1,True,False,True
+q2b-agg-p25-n08-r1,agg-p25-n08,8,False,agent-006,0.0,wrong numbers,47,11,7,True,False,True
+q2b-agg-p25-n08-r1,agg-p25-n08,8,False,agent-007,0.0,wrong numbers,66,19,16,True,False,True
+q2b-agg-p25-n08-r1,agg-p25-n08,8,False,agent-008,0.0,no answer,60,15,0,True,False,True
+q2b-agg-p15-n16-r2,agg-p15-n16,16,False,agent-001,0.0,no answer,119,42,1,True,True,True
+q2b-agg-p15-n16-r2,agg-p15-n16,16,False,agent-002,0.0,wrong count,77,26,1,True,False,True
+q2b-agg-p15-n16-r2,agg-p15-n16,16,False,agent-003,0.0,wrong count,75,15,2,True,False,True
+q2b-agg-p15-n16-r2,agg-p15-n16,16,False,agent-004,0.0,wrong count,48,5,4,True,False,True
+q2b-agg-p15-n16-r2,agg-p15-n16,16,False,agent-005,0.0,malformed,135,52,1,True,True,True
+q2b-agg-p15-n16-r2,agg-p15-n16,16,False,agent-006,0.0,wrong count,49,8,2,True,False,True
+q2b-agg-p15-n16-r2,agg-p15-n16,16,False,agent-007,0.0,wrong count,35,4,4,True,False,True
+q2b-agg-p15-n16-r2,agg-p15-n16,16,False,agent-008,0.0,wrong count,69,11,0,True,False,True
+q2b-agg-p15-n16-r2,agg-p15-n16,16,False,agent-009,0.0,malformed,88,29,6,True,False,True
+q2b-agg-p15-n16-r2,agg-p15-n16,16,False,agent-010,0.0,wrong count,64,19,1,True,False,True
+q2b-agg-p15-n16-r2,agg-p15-n16,16,False,agent-011,0.0,no answer,161,59,0,True,True,True
+q2b-agg-p15-n16-r2,agg-p15-n16,16,False,agent-012,0.0,wrong numbers,121,25,0,False,False,True
+q2b-agg-p15-n16-r2,agg-p15-n16,16,False,agent-013,0.0,wrong count,42,1,0,True,False,True
+q2b-agg-p15-n16-r2,agg-p15-n16,16,False,agent-014,0.0,wrong count,136,60,1,True,True,True
+q2b-agg-p15-n16-r2,agg-p15-n16,16,False,agent-015,0.0,wrong count,66,4,0,True,False,True
+q2b-agg-p15-n16-r2,agg-p15-n16,16,False,agent-016,0.0,wrong count,168,54,0,False,True,True
+q2b-agg-p16-n04-r1,agg-p16-n04,4,False,agent-001,0.0,wrong numbers,53,12,2,True,False,True
+q2b-agg-p16-n04-r1,agg-p16-n04,4,False,agent-002,0.0,no answer,180,105,4,True,True,True
+q2b-agg-p16-n04-r1,agg-p16-n04,4,False,agent-003,0.0,no answer,120,37,0,True,True,True
+q2b-agg-p16-n04-r1,agg-p16-n04,4,False,agent-004,0.0,malformed,84,32,4,True,False,True
+q2b-agg-p01-n02,agg-p01-n02,2,False,agent-001,0.0,wrong numbers,116,35,0,False,True,True
+q2b-agg-p01-n02,agg-p01-n02,2,False,agent-002,0.0,wrong numbers,122,49,2,True,False,True
+q2b-agg-p12-n08,agg-p12-n08,8,False,agent-001,0.0,malformed,222,79,2,True,True,True
+q2b-agg-p12-n08,agg-p12-n08,8,False,agent-002,0.0,wrong count,62,20,1,True,False,True
+q2b-agg-p12-n08,agg-p12-n08,8,False,agent-003,0.0,wrong count,76,21,21,True,False,True
+q2b-agg-p12-n08,agg-p12-n08,8,False,agent-004,0.0,wrong count,76,8,2,True,False,True
+q2b-agg-p12-n08,agg-p12-n08,8,False,agent-005,0.0,wrong numbers,47,19,2,True,False,True
+q2b-agg-p12-n08,agg-p12-n08,8,False,agent-006,0.0,no answer,180,50,0,False,True,True
+q2b-agg-p12-n08,agg-p12-n08,8,False,agent-007,0.0,no answer,240,80,1,True,True,True
+q2b-agg-p12-n08,agg-p12-n08,8,False,agent-008,0.0,wrong numbers,94,38,6,True,False,True
+q2b-agg-p22-n04,agg-p22-n04,4,False,agent-001,0.0,malformed,165,71,1,True,True,True
+q2b-agg-p22-n04,agg-p22-n04,4,False,agent-002,0.0,no answer,127,44,1,True,True,True
+q2b-agg-p22-n04,agg-p22-n04,4,False,agent-003,0.0,no answer,180,113,0,True,True,True
+q2b-agg-p22-n04,agg-p22-n04,4,False,agent-004,0.0,wrong count,199,66,0,True,False,True
+q2b-agg-p22-n08,agg-p22-n08,8,False,agent-001,0.0,no answer,75,23,0,True,True,True
+q2b-agg-p22-n08,agg-p22-n08,8,False,agent-002,0.0,malformed,145,36,0,True,False,True
+q2b-agg-p22-n08,agg-p22-n08,8,False,agent-003,0.0,wrong count,93,18,3,True,False,True
+q2b-agg-p22-n08,agg-p22-n08,8,False,agent-004,0.0,wrong numbers,138,52,3,True,True,True
+q2b-agg-p22-n08,agg-p22-n08,8,False,agent-005,0.0,malformed,182,87,0,True,False,True
+q2b-agg-p22-n08,agg-p22-n08,8,False,agent-006,0.0,malformed,180,49,0,False,False,True
+q2b-agg-p22-n08,agg-p22-n08,8,False,agent-007,0.0,malformed,160,47,0,True,True,True
+q2b-agg-p22-n08,agg-p22-n08,8,False,agent-008,0.0,wrong count,120,22,2,True,False,True
+q2b-agg-p05-n08-r1,agg-p05-n08,8,False,agent-001,0.0,wrong count,94,24,5,True,False,True
+q2b-agg-p05-n08-r1,agg-p05-n08,8,False,agent-002,0.0,wrong count,58,10,0,False,False,True
+q2b-agg-p05-n08-r1,agg-p05-n08,8,False,agent-003,0.0,no answer,69,22,0,True,False,True
+q2b-agg-p05-n08-r1,agg-p05-n08,8,False,agent-004,0.0,wrong count,140,48,8,True,False,True
+q2b-agg-p05-n08-r1,agg-p05-n08,8,False,agent-005,0.0,wrong count,102,34,2,True,False,True
+q2b-agg-p05-n08-r1,agg-p05-n08,8,False,agent-006,0.0,wrong numbers,67,9,0,True,True,True
+q2b-agg-p05-n08-r1,agg-p05-n08,8,False,agent-007,0.0,no answer,19,1,1,True,False,True
+q2b-agg-p05-n08-r1,agg-p05-n08,8,False,agent-008,0.0,wrong count,158,48,0,True,True,True
+q2b-agg-p31-n08,agg-p31-n08,8,False,agent-001,0.0,malformed,48,14,2,True,False,True
+q2b-agg-p31-n08,agg-p31-n08,8,False,agent-002,0.0,wrong numbers,47,8,2,True,False,True
+q2b-agg-p31-n08,agg-p31-n08,8,False,agent-003,0.0,wrong count,60,10,5,True,False,True
+q2b-agg-p31-n08,agg-p31-n08,8,False,agent-004,0.0,no answer,40,6,0,True,False,True
+q2b-agg-p31-n08,agg-p31-n08,8,False,agent-005,0.0,no answer,120,33,0,False,True,True
+q2b-agg-p31-n08,agg-p31-n08,8,False,agent-006,0.0,wrong count,120,29,0,False,False,True
+q2b-agg-p31-n08,agg-p31-n08,8,False,agent-007,0.0,wrong numbers,71,26,1,True,False,True
+q2b-agg-p31-n08,agg-p31-n08,8,False,agent-008,0.0,malformed,65,13,4,True,False,True
+q2b-agg-p19-n04,agg-p19-n04,4,False,agent-001,0.0,no answer,164,27,0,True,True,True
+q2b-agg-p19-n04,agg-p19-n04,4,False,agent-002,0.0,no answer,145,43,0,True,False,True
+q2b-agg-p19-n04,agg-p19-n04,4,False,agent-003,0.0,wrong numbers,76,19,0,True,False,True
+q2b-agg-p19-n04,agg-p19-n04,4,False,agent-004,0.0,malformed,127,40,0,False,True,True
+q2b-agg-p30-n04,agg-p30-n04,4,False,agent-001,0.0,no answer,297,118,0,True,True,True
+q2b-agg-p30-n04,agg-p30-n04,4,False,agent-002,0.0,wrong numbers,69,24,2,True,False,True
+q2b-agg-p30-n04,agg-p30-n04,4,False,agent-003,0.0,wrong numbers,68,19,9,True,True,True
+q2b-agg-p30-n04,agg-p30-n04,4,False,agent-004,0.0,wrong numbers,22,5,0,True,False,True
+q2b-agg-p20-n16,agg-p20-n16,16,False,agent-001,0.0,wrong numbers,158,86,2,True,False,True
+q2b-agg-p20-n16,agg-p20-n16,16,False,agent-002,0.0,wrong numbers,180,59,1,True,True,True
+q2b-agg-p20-n16,agg-p20-n16,16,False,agent-003,0.0,wrong count,77,7,7,True,False,True
+q2b-agg-p20-n16,agg-p20-n16,16,False,agent-004,0.0,wrong count,86,16,7,True,True,True
+q2b-agg-p20-n16,agg-p20-n16,16,False,agent-005,0.0,wrong numbers,58,23,0,True,False,True
+q2b-agg-p20-n16,agg-p20-n16,16,False,agent-006,0.0,wrong numbers,45,6,16,True,False,True
+q2b-agg-p20-n16,agg-p20-n16,16,False,agent-007,0.0,malformed,71,24,0,True,False,True
+q2b-agg-p20-n16,agg-p20-n16,16,False,agent-008,0.0,wrong count,80,24,0,True,True,True
+q2b-agg-p20-n16,agg-p20-n16,16,False,agent-009,0.0,malformed,109,14,0,False,True,True
+q2b-agg-p20-n16,agg-p20-n16,16,False,agent-010,0.0,wrong count,120,32,1,True,True,True
+q2b-agg-p20-n16,agg-p20-n16,16,False,agent-011,0.0,wrong count,66,1,0,True,False,True
+q2b-agg-p20-n16,agg-p20-n16,16,False,agent-012,0.0,wrong count,97,18,0,True,False,True
+q2b-agg-p20-n16,agg-p20-n16,16,False,agent-013,0.0,wrong count,48,7,7,True,False,True
+q2b-agg-p20-n16,agg-p20-n16,16,False,agent-014,0.0,wrong count,97,16,1,True,True,True
+q2b-agg-p20-n16,agg-p20-n16,16,False,agent-015,0.0,wrong numbers,73,30,5,True,False,True
+q2b-agg-p20-n16,agg-p20-n16,16,False,agent-016,0.0,malformed,169,85,1,True,True,True
+q2b-agg-p23-n16,agg-p23-n16,16,False,agent-001,0.0,wrong count,126,46,2,True,False,True
+q2b-agg-p23-n16,agg-p23-n16,16,False,agent-002,0.0,wrong numbers,181,31,0,True,False,True
+q2b-agg-p23-n16,agg-p23-n16,16,False,agent-003,0.0,malformed,67,20,1,True,True,True
+q2b-agg-p23-n16,agg-p23-n16,16,False,agent-004,0.0,malformed,28,7,1,True,True,True
+q2b-agg-p23-n16,agg-p23-n16,16,False,agent-005,0.0,wrong count,93,15,0,True,True,True
+q2b-agg-p23-n16,agg-p23-n16,16,False,agent-006,0.0,wrong count,42,13,2,True,True,True
+q2b-agg-p23-n16,agg-p23-n16,16,False,agent-007,0.0,wrong count,43,10,1,True,False,True
+q2b-agg-p23-n16,agg-p23-n16,16,False,agent-008,0.0,malformed,117,38,0,True,True,True
+q2b-agg-p23-n16,agg-p23-n16,16,False,agent-009,0.0,malformed,178,57,5,True,False,True
+q2b-agg-p23-n16,agg-p23-n16,16,False,agent-010,0.0,wrong count,84,33,0,True,True,True
+q2b-agg-p23-n16,agg-p23-n16,16,False,agent-011,0.0,wrong count,59,12,0,True,False,True
+q2b-agg-p23-n16,agg-p23-n16,16,False,agent-012,0.0,malformed,38,5,2,True,False,True
+q2b-agg-p23-n16,agg-p23-n16,16,False,agent-013,0.0,wrong count,124,35,0,False,True,True
+q2b-agg-p23-n16,agg-p23-n16,16,False,agent-014,0.0,wrong count,131,71,4,True,True,True
+q2b-agg-p23-n16,agg-p23-n16,16,False,agent-015,0.0,wrong count,57,7,3,True,False,True
+q2b-agg-p23-n16,agg-p23-n16,16,False,agent-016,0.0,malformed,81,23,1,True,False,True
+q2b-agg-p15-n02,agg-p15-n02,2,False,agent-001,0.0,no answer,72,27,0,False,True,True
+q2b-agg-p15-n02,agg-p15-n02,2,False,agent-002,0.0,wrong numbers,188,49,0,True,False,True
+q2b-agg-p26-n08-r1,agg-p26-n08,8,False,agent-001,0.0,wrong numbers,33,7,0,True,False,True
+q2b-agg-p26-n08-r1,agg-p26-n08,8,False,agent-002,0.0,wrong numbers,65,21,2,True,False,True
+q2b-agg-p26-n08-r1,agg-p26-n08,8,False,agent-003,0.0,wrong numbers,60,24,1,True,False,True
+q2b-agg-p26-n08-r1,agg-p26-n08,8,False,agent-004,0.0,wrong numbers,45,12,0,True,False,True
+q2b-agg-p26-n08-r1,agg-p26-n08,8,False,agent-005,0.0,wrong numbers,74,22,1,True,True,True
+q2b-agg-p26-n08-r1,agg-p26-n08,8,False,agent-006,0.0,wrong count,65,12,3,True,False,True
+q2b-agg-p26-n08-r1,agg-p26-n08,8,False,agent-007,0.0,wrong numbers,95,17,0,True,False,True
+q2b-agg-p26-n08-r1,agg-p26-n08,8,False,agent-008,0.0,wrong count,83,27,9,True,False,True
+q2b-agg-p19-n16-r1,agg-p19-n16,16,False,agent-001,0.0,wrong numbers,77,20,0,False,False,True
+q2b-agg-p19-n16-r1,agg-p19-n16,16,False,agent-002,0.0,wrong count,23,9,1,True,False,True
+q2b-agg-p19-n16-r1,agg-p19-n16,16,False,agent-003,0.0,no answer,120,71,3,True,False,True
+q2b-agg-p19-n16-r1,agg-p19-n16,16,False,agent-004,0.0,wrong count,70,24,2,True,False,True
+q2b-agg-p19-n16-r1,agg-p19-n16,16,False,agent-005,0.0,wrong count,122,32,0,True,False,True
+q2b-agg-p19-n16-r1,agg-p19-n16,16,False,agent-006,0.0,wrong count,35,7,0,True,False,True
+q2b-agg-p19-n16-r1,agg-p19-n16,16,False,agent-007,0.0,no answer,192,91,0,False,True,True
+q2b-agg-p19-n16-r1,agg-p19-n16,16,False,agent-008,0.0,wrong count,92,50,2,True,False,True
+q2b-agg-p19-n16-r1,agg-p19-n16,16,False,agent-009,0.0,wrong numbers,100,47,0,True,False,True
+q2b-agg-p19-n16-r1,agg-p19-n16,16,False,agent-010,0.0,wrong count,58,5,2,True,False,True
+q2b-agg-p19-n16-r1,agg-p19-n16,16,False,agent-011,0.0,wrong count,76,24,2,True,False,True
+q2b-agg-p19-n16-r1,agg-p19-n16,16,False,agent-012,0.0,no answer,180,73,15,True,True,True
+q2b-agg-p19-n16-r1,agg-p19-n16,16,False,agent-013,0.0,malformed,98,25,0,True,False,True
+q2b-agg-p19-n16-r1,agg-p19-n16,16,False,agent-014,0.0,wrong count,221,63,0,True,True,True
+q2b-agg-p19-n16-r1,agg-p19-n16,16,False,agent-015,0.0,wrong count,52,12,2,True,True,True
+q2b-agg-p19-n16-r1,agg-p19-n16,16,False,agent-016,0.0,wrong count,33,7,1,True,False,True
+q2b-agg-p32-n16,agg-p32-n16,16,False,agent-001,0.0,wrong numbers,48,15,2,True,False,True
+q2b-agg-p32-n16,agg-p32-n16,16,False,agent-002,0.0,wrong numbers,70,17,0,True,False,True
+q2b-agg-p32-n16,agg-p32-n16,16,False,agent-003,0.0,wrong count,50,4,0,True,False,True
+q2b-agg-p32-n16,agg-p32-n16,16,False,agent-004,0.0,wrong count,90,16,1,False,True,True
+q2b-agg-p32-n16,agg-p32-n16,16,False,agent-005,0.0,no answer,60,12,1,True,False,True
+q2b-agg-p32-n16,agg-p32-n16,16,False,agent-006,0.0,wrong count,126,27,25,True,False,True
+q2b-agg-p32-n16,agg-p32-n16,16,False,agent-007,0.0,wrong count,84,22,4,True,False,True
+q2b-agg-p32-n16,agg-p32-n16,16,False,agent-008,0.0,no answer,60,17,0,True,False,True
+q2b-agg-p32-n16,agg-p32-n16,16,False,agent-009,0.0,malformed,64,28,0,True,False,True
+q2b-agg-p32-n16,agg-p32-n16,16,False,agent-010,0.0,wrong count,110,24,0,True,True,True
+q2b-agg-p32-n16,agg-p32-n16,16,False,agent-011,0.0,wrong count,55,16,2,True,False,True
+q2b-agg-p32-n16,agg-p32-n16,16,False,agent-012,0.0,wrong count,60,16,3,False,True,True
+q2b-agg-p32-n16,agg-p32-n16,16,False,agent-013,0.0,no answer,180,49,0,True,True,True
+q2b-agg-p32-n16,agg-p32-n16,16,False,agent-014,0.0,no answer,121,64,0,True,True,True
+q2b-agg-p32-n16,agg-p32-n16,16,False,agent-015,0.0,wrong count,58,4,1,True,False,True
+q2b-agg-p32-n16,agg-p32-n16,16,False,agent-016,0.0,no answer,180,52,0,True,True,True
+q2b-agg-p24-n16,agg-p24-n16,16,False,agent-001,0.0,malformed,73,18,0,True,False,True
+q2b-agg-p24-n16,agg-p24-n16,16,False,agent-002,0.0,wrong count,26,7,1,True,False,True
+q2b-agg-p24-n16,agg-p24-n16,16,False,agent-003,0.0,wrong count,69,19,3,True,True,True
+q2b-agg-p24-n16,agg-p24-n16,16,False,agent-004,0.0,no answer,68,14,0,False,True,True
+q2b-agg-p24-n16,agg-p24-n16,16,False,agent-005,0.0,wrong count,38,4,3,True,False,True
+q2b-agg-p24-n16,agg-p24-n16,16,False,agent-006,0.0,wrong count,38,8,1,True,False,True
+q2b-agg-p24-n16,agg-p24-n16,16,False,agent-007,0.0,wrong numbers,46,6,1,True,False,True
+q2b-agg-p24-n16,agg-p24-n16,16,False,agent-008,0.0,wrong count,59,26,2,True,True,True
+q2b-agg-p24-n16,agg-p24-n16,16,False,agent-009,0.0,wrong count,90,32,14,True,False,True
+q2b-agg-p24-n16,agg-p24-n16,16,False,agent-010,0.0,malformed,95,29,3,True,False,True
+q2b-agg-p24-n16,agg-p24-n16,16,False,agent-011,0.0,wrong count,120,45,0,True,True,True
+q2b-agg-p24-n16,agg-p24-n16,16,False,agent-012,0.0,no answer,128,44,2,True,False,True
+q2b-agg-p24-n16,agg-p24-n16,16,False,agent-013,0.0,malformed,122,19,1,True,False,True
+q2b-agg-p24-n16,agg-p24-n16,16,False,agent-014,0.0,wrong count,60,17,0,True,False,True
+q2b-agg-p24-n16,agg-p24-n16,16,False,agent-015,0.0,no answer,180,86,0,True,True,True
+q2b-agg-p24-n16,agg-p24-n16,16,False,agent-016,0.0,wrong count,52,16,1,True,False,True
+q2b-agg-p29-n16,agg-p29-n16,16,False,agent-001,0.0,malformed,39,10,5,True,False,True
+q2b-agg-p29-n16,agg-p29-n16,16,False,agent-002,0.0,no answer,180,73,5,True,True,True
+q2b-agg-p29-n16,agg-p29-n16,16,False,agent-003,0.0,wrong count,24,10,1,True,False,True
+q2b-agg-p29-n16,agg-p29-n16,16,False,agent-004,0.0,wrong numbers,54,13,3,True,True,True
+q2b-agg-p29-n16,agg-p29-n16,16,False,agent-005,0.0,malformed,106,20,0,True,False,True
+q2b-agg-p29-n16,agg-p29-n16,16,False,agent-006,0.0,wrong numbers,48,11,6,True,False,True
+q2b-agg-p29-n16,agg-p29-n16,16,False,agent-007,0.0,no answer,112,37,0,True,True,True
+q2b-agg-p29-n16,agg-p29-n16,16,False,agent-008,0.0,wrong numbers,42,25,0,True,False,True
+q2b-agg-p29-n16,agg-p29-n16,16,False,agent-009,0.0,wrong count,53,3,1,True,False,True
+q2b-agg-p29-n16,agg-p29-n16,16,False,agent-010,0.0,no answer,120,23,0,True,True,True
+q2b-agg-p29-n16,agg-p29-n16,16,False,agent-011,0.0,wrong numbers,62,27,5,True,False,True
+q2b-agg-p29-n16,agg-p29-n16,16,False,agent-012,0.0,no answer,180,83,14,True,True,True
+q2b-agg-p29-n16,agg-p29-n16,16,False,agent-013,0.0,wrong numbers,89,15,1,True,False,True
+q2b-agg-p29-n16,agg-p29-n16,16,False,agent-014,0.0,malformed,46,10,1,True,False,True
+q2b-agg-p29-n16,agg-p29-n16,16,False,agent-015,0.0,no answer,181,40,0,True,False,True
+q2b-agg-p29-n16,agg-p29-n16,16,False,agent-016,0.0,malformed,87,15,1,True,True,True
+q2b-agg-p15-n08-r1,agg-p15-n08,8,False,agent-001,0.0,malformed,57,5,0,True,False,True
+q2b-agg-p15-n08-r1,agg-p15-n08,8,False,agent-002,0.0,wrong numbers,78,29,3,True,False,True
+q2b-agg-p15-n08-r1,agg-p15-n08,8,False,agent-003,0.0,wrong numbers,43,17,3,True,False,True
+q2b-agg-p15-n08-r1,agg-p15-n08,8,False,agent-004,0.0,wrong numbers,55,10,6,True,False,True
+q2b-agg-p15-n08-r1,agg-p15-n08,8,False,agent-005,0.0,wrong count,76,7,1,True,False,True
+q2b-agg-p15-n08-r1,agg-p15-n08,8,False,agent-006,0.0,wrong numbers,60,20,1,True,False,True
+q2b-agg-p15-n08-r1,agg-p15-n08,8,False,agent-007,0.0,wrong count,217,64,0,True,True,True
+q2b-agg-p15-n08-r1,agg-p15-n08,8,False,agent-008,0.0,no answer,98,36,0,False,False,True
+q2b-agg-p29-n04-r1,agg-p29-n04,4,False,agent-001,0.0,malformed,82,15,16,True,False,True
+q2b-agg-p29-n04-r1,agg-p29-n04,4,False,agent-002,0.0,wrong count,75,28,0,True,False,True
+q2b-agg-p29-n04-r1,agg-p29-n04,4,False,agent-003,0.0,malformed,151,62,4,True,True,True
+q2b-agg-p29-n04-r1,agg-p29-n04,4,False,agent-004,0.0,malformed,113,18,0,False,False,True
+q2b-agg-p26-n16,agg-p26-n16,16,False,agent-001,0.0,wrong count,12,2,0,True,False,True
+q2b-agg-p26-n16,agg-p26-n16,16,False,agent-002,0.0,wrong count,121,30,0,True,False,True
+q2b-agg-p26-n16,agg-p26-n16,16,False,agent-003,0.0,wrong numbers,55,13,1,True,False,True
+q2b-agg-p26-n16,agg-p26-n16,16,False,agent-004,0.0,wrong count,49,9,2,True,False,True
+q2b-agg-p26-n16,agg-p26-n16,16,False,agent-005,0.0,wrong numbers,85,22,4,True,False,True
+q2b-agg-p26-n16,agg-p26-n16,16,False,agent-006,0.0,malformed,14,7,1,True,False,True
+q2b-agg-p26-n16,agg-p26-n16,16,False,agent-007,0.0,wrong count,70,30,1,True,True,True
+q2b-agg-p26-n16,agg-p26-n16,16,False,agent-008,0.0,wrong count,34,3,0,True,False,True
+q2b-agg-p26-n16,agg-p26-n16,16,False,agent-009,0.0,malformed,178,55,0,True,True,True
+q2b-agg-p26-n16,agg-p26-n16,16,False,agent-010,0.0,wrong count,51,32,1,True,True,True
+q2b-agg-p26-n16,agg-p26-n16,16,False,agent-011,0.0,no answer,166,59,0,True,True,True
+q2b-agg-p26-n16,agg-p26-n16,16,False,agent-012,0.0,wrong count,34,1,1,True,False,True
+q2b-agg-p26-n16,agg-p26-n16,16,False,agent-013,0.0,wrong count,31,8,1,True,False,True
+q2b-agg-p26-n16,agg-p26-n16,16,False,agent-014,0.0,wrong numbers,57,14,3,True,False,True
+q2b-agg-p26-n16,agg-p26-n16,16,False,agent-015,0.0,wrong numbers,144,46,0,True,True,True
+q2b-agg-p26-n16,agg-p26-n16,16,False,agent-016,0.0,no answer,180,88,0,True,False,True
+q2b-agg-p24-n08-r1,agg-p24-n08,8,False,agent-001,0.0,wrong numbers,27,3,3,True,False,True
+q2b-agg-p24-n08-r1,agg-p24-n08,8,False,agent-002,0.0,wrong numbers,16,0,1,True,False,True
+q2b-agg-p24-n08-r1,agg-p24-n08,8,False,agent-003,0.0,malformed,50,7,9,True,False,True
+q2b-agg-p24-n08-r1,agg-p24-n08,8,False,agent-004,0.0,wrong numbers,85,29,1,True,True,True
+q2b-agg-p24-n08-r1,agg-p24-n08,8,False,agent-005,0.0,wrong count,186,87,1,True,True,True
+q2b-agg-p24-n08-r1,agg-p24-n08,8,False,agent-006,0.0,wrong numbers,60,12,1,True,True,True
+q2b-agg-p24-n08-r1,agg-p24-n08,8,False,agent-007,0.0,wrong count,103,16,0,False,False,True
+q2b-agg-p24-n08-r1,agg-p24-n08,8,False,agent-008,0.0,no answer,241,134,0,True,True,True
+q2b-agg-p06-n08-r1,agg-p06-n08,8,False,agent-001,0.0,malformed,154,32,0,False,True,True
+q2b-agg-p06-n08-r1,agg-p06-n08,8,False,agent-002,0.0,wrong numbers,68,28,3,True,True,True
+q2b-agg-p06-n08-r1,agg-p06-n08,8,False,agent-003,0.0,wrong numbers,143,74,0,True,False,True
+q2b-agg-p06-n08-r1,agg-p06-n08,8,False,agent-004,0.0,wrong count,63,17,2,True,False,True
+q2b-agg-p06-n08-r1,agg-p06-n08,8,False,agent-005,0.0,malformed,224,109,12,True,True,True
+q2b-agg-p06-n08-r1,agg-p06-n08,8,False,agent-006,0.0,wrong numbers,37,11,0,False,False,True
+q2b-agg-p06-n08-r1,agg-p06-n08,8,False,agent-007,0.0,malformed,82,28,14,True,False,True
+q2b-agg-p06-n08-r1,agg-p06-n08,8,False,agent-008,0.0,no answer,121,49,0,True,False,True
+q2b-agg-p32-n08-r1,agg-p32-n08,8,False,agent-001,0.0,wrong count,126,53,6,True,False,True
+q2b-agg-p32-n08-r1,agg-p32-n08,8,False,agent-002,0.0,wrong numbers,185,67,0,True,True,True
+q2b-agg-p32-n08-r1,agg-p32-n08,8,False,agent-003,0.0,wrong count,41,5,6,True,False,True
+q2b-agg-p32-n08-r1,agg-p32-n08,8,False,agent-004,0.0,wrong count,68,9,5,True,False,True
+q2b-agg-p32-n08-r1,agg-p32-n08,8,False,agent-005,0.0,no answer,196,73,0,False,True,True
+q2b-agg-p32-n08-r1,agg-p32-n08,8,False,agent-006,0.0,wrong count,63,21,3,True,False,True
+q2b-agg-p32-n08-r1,agg-p32-n08,8,False,agent-007,0.0,malformed,88,17,2,True,True,True
+q2b-agg-p32-n08-r1,agg-p32-n08,8,False,agent-008,0.0,wrong numbers,70,26,0,True,False,True
+q2b-agg-p30-n16-r1,agg-p30-n16,16,False,agent-001,0.0,wrong count,177,65,0,True,True,True
+q2b-agg-p30-n16-r1,agg-p30-n16,16,False,agent-002,0.0,wrong count,174,44,0,False,False,True
+q2b-agg-p30-n16-r1,agg-p30-n16,16,False,agent-003,0.0,wrong count,67,10,1,True,False,True
+q2b-agg-p30-n16-r1,agg-p30-n16,16,False,agent-004,0.0,wrong count,141,52,4,True,True,True
+q2b-agg-p30-n16-r1,agg-p30-n16,16,False,agent-005,0.0,malformed,67,18,1,True,False,True
+q2b-agg-p30-n16-r1,agg-p30-n16,16,False,agent-006,0.0,no answer,241,41,1,True,True,True
+q2b-agg-p30-n16-r1,agg-p30-n16,16,False,agent-007,0.0,wrong count,157,31,0,True,True,True
+q2b-agg-p30-n16-r1,agg-p30-n16,16,False,agent-008,0.0,wrong count,83,27,1,True,False,True
+q2b-agg-p30-n16-r1,agg-p30-n16,16,False,agent-009,0.0,malformed,47,10,2,True,True,True
+q2b-agg-p30-n16-r1,agg-p30-n16,16,False,agent-010,0.0,wrong numbers,168,40,0,False,True,True
+q2b-agg-p30-n16-r1,agg-p30-n16,16,False,agent-011,0.0,wrong numbers,83,28,0,True,False,True
+q2b-agg-p30-n16-r1,agg-p30-n16,16,False,agent-012,0.0,wrong numbers,141,32,0,True,True,True
+q2b-agg-p30-n16-r1,agg-p30-n16,16,False,agent-013,0.0,malformed,131,31,0,True,False,True
+q2b-agg-p30-n16-r1,agg-p30-n16,16,False,agent-014,0.0,malformed,81,20,4,True,False,True
+q2b-agg-p30-n16-r1,agg-p30-n16,16,False,agent-015,0.0,malformed,123,34,3,True,False,True
+q2b-agg-p30-n16-r1,agg-p30-n16,16,False,agent-016,0.0,wrong count,66,15,7,True,False,True
+q2b-agg-p12-n16-r2,agg-p12-n16,16,False,agent-001,0.0,malformed,194,58,0,True,True,True
+q2b-agg-p12-n16-r2,agg-p12-n16,16,False,agent-002,0.0,malformed,72,17,2,True,False,True
+q2b-agg-p12-n16-r2,agg-p12-n16,16,False,agent-003,0.0,wrong count,55,8,0,True,False,True
+q2b-agg-p12-n16-r2,agg-p12-n16,16,False,agent-004,0.0,no answer,210,68,0,True,True,True
+q2b-agg-p12-n16-r2,agg-p12-n16,16,False,agent-005,0.0,wrong numbers,73,20,0,False,True,True
+q2b-agg-p12-n16-r2,agg-p12-n16,16,False,agent-006,0.0,malformed,132,72,41,True,False,True
+q2b-agg-p12-n16-r2,agg-p12-n16,16,False,agent-007,0.0,malformed,99,37,0,True,False,True
+q2b-agg-p12-n16-r2,agg-p12-n16,16,False,agent-008,0.0,malformed,115,22,0,False,False,True
+q2b-agg-p12-n16-r2,agg-p12-n16,16,False,agent-009,0.0,wrong numbers,57,12,6,True,False,True
+q2b-agg-p12-n16-r2,agg-p12-n16,16,False,agent-010,0.0,wrong count,72,14,0,True,True,True
+q2b-agg-p12-n16-r2,agg-p12-n16,16,False,agent-011,0.0,wrong count,101,31,1,True,True,True
+q2b-agg-p12-n16-r2,agg-p12-n16,16,False,agent-012,0.0,malformed,53,16,4,True,False,True
+q2b-agg-p12-n16-r2,agg-p12-n16,16,False,agent-013,0.0,wrong numbers,37,11,0,True,False,True
+q2b-agg-p12-n16-r2,agg-p12-n16,16,False,agent-014,0.0,wrong count,84,30,3,True,False,True
+q2b-agg-p12-n16-r2,agg-p12-n16,16,False,agent-015,0.0,no answer,21,6,0,False,True,True
+q2b-agg-p12-n16-r2,agg-p12-n16,16,False,agent-016,0.0,malformed,85,27,7,True,False,True
+q2b-agg-p21-n16-r1,agg-p21-n16,16,False,agent-001,0.0,wrong count,135,44,9,True,True,True
+q2b-agg-p21-n16-r1,agg-p21-n16,16,False,agent-002,0.0,malformed,46,13,4,True,False,True
+q2b-agg-p21-n16-r1,agg-p21-n16,16,False,agent-003,0.0,wrong count,113,45,2,True,False,True
+q2b-agg-p21-n16-r1,agg-p21-n16,16,False,agent-004,0.0,no answer,120,36,0,False,True,True
+q2b-agg-p21-n16-r1,agg-p21-n16,16,False,agent-005,0.0,wrong numbers,158,57,0,True,False,True
+q2b-agg-p21-n16-r1,agg-p21-n16,16,False,agent-006,0.0,wrong count,164,35,0,True,True,True
+q2b-agg-p21-n16-r1,agg-p21-n16,16,False,agent-007,0.0,wrong count,57,21,1,True,False,True
+q2b-agg-p21-n16-r1,agg-p21-n16,16,False,agent-008,0.0,malformed,190,46,2,True,True,True
+q2b-agg-p21-n16-r1,agg-p21-n16,16,False,agent-009,0.0,wrong count,75,21,1,True,False,True
+q2b-agg-p21-n16-r1,agg-p21-n16,16,False,agent-010,0.0,wrong numbers,229,82,0,True,True,True
+q2b-agg-p21-n16-r1,agg-p21-n16,16,False,agent-011,0.0,wrong count,71,10,3,True,False,True
+q2b-agg-p21-n16-r1,agg-p21-n16,16,False,agent-012,0.0,malformed,101,17,0,True,False,True
+q2b-agg-p21-n16-r1,agg-p21-n16,16,False,agent-013,0.0,wrong count,105,9,0,True,False,True
+q2b-agg-p21-n16-r1,agg-p21-n16,16,False,agent-014,0.0,wrong count,48,11,0,True,False,True
+q2b-agg-p21-n16-r1,agg-p21-n16,16,False,agent-015,0.0,wrong count,184,83,9,True,False,True
+q2b-agg-p21-n16-r1,agg-p21-n16,16,False,agent-016,0.0,wrong count,60,22,0,True,False,True
+q2b-agg-p32-n02-r1,agg-p32-n02,2,False,agent-001,0.0,wrong numbers,168,93,0,False,True,True
+q2b-agg-p32-n02-r1,agg-p32-n02,2,False,agent-002,0.0,wrong numbers,50,3,8,True,False,True
+q2b-agg-p31-n16,agg-p31-n16,16,False,agent-001,0.0,no answer,120,60,3,True,True,True
+q2b-agg-p31-n16,agg-p31-n16,16,False,agent-002,0.0,malformed,44,6,1,True,False,True
+q2b-agg-p31-n16,agg-p31-n16,16,False,agent-003,0.0,malformed,6,0,0,False,False,True
+q2b-agg-p31-n16,agg-p31-n16,16,False,agent-004,0.0,wrong numbers,63,7,0,False,True,True
+q2b-agg-p31-n16,agg-p31-n16,16,False,agent-005,0.0,no answer,60,12,1,True,False,True
+q2b-agg-p31-n16,agg-p31-n16,16,False,agent-006,0.0,wrong numbers,50,14,0,True,False,True
+q2b-agg-p31-n16,agg-p31-n16,16,False,agent-007,0.0,wrong numbers,30,5,1,True,False,True
+q2b-agg-p31-n16,agg-p31-n16,16,False,agent-008,0.0,wrong count,60,24,1,True,False,True
+q2b-agg-p31-n16,agg-p31-n16,16,False,agent-009,0.0,wrong numbers,57,7,2,True,False,True
+q2b-agg-p31-n16,agg-p31-n16,16,False,agent-010,0.0,wrong count,35,10,4,True,False,True
+q2b-agg-p31-n16,agg-p31-n16,16,False,agent-011,0.0,wrong numbers,124,16,0,True,False,True
+q2b-agg-p31-n16,agg-p31-n16,16,False,agent-012,0.0,wrong count,53,20,2,True,False,True
+q2b-agg-p31-n16,agg-p31-n16,16,False,agent-013,0.0,no answer,172,86,0,True,True,True
+q2b-agg-p31-n16,agg-p31-n16,16,False,agent-014,0.0,wrong numbers,77,17,19,True,False,True
+q2b-agg-p31-n16,agg-p31-n16,16,False,agent-015,0.0,no answer,124,48,0,True,True,True
+q2b-agg-p31-n16,agg-p31-n16,16,False,agent-016,0.0,wrong numbers,69,51,1,True,False,True
+q2b-agg-p27-n16-r3,agg-p27-n16,16,False,agent-001,0.0,malformed,183,77,0,True,True,True
+q2b-agg-p27-n16-r3,agg-p27-n16,16,False,agent-002,0.0,malformed,114,26,0,True,True,True
+q2b-agg-p27-n16-r3,agg-p27-n16,16,False,agent-003,0.0,wrong numbers,78,18,0,True,False,True
+q2b-agg-p27-n16-r3,agg-p27-n16,16,False,agent-004,0.0,wrong count,28,9,0,True,False,True
+q2b-agg-p27-n16-r3,agg-p27-n16,16,False,agent-005,0.0,wrong numbers,40,8,0,True,False,True
+q2b-agg-p27-n16-r3,agg-p27-n16,16,False,agent-006,0.0,wrong count,61,22,0,True,True,True
+q2b-agg-p27-n16-r3,agg-p27-n16,16,False,agent-007,0.0,malformed,57,15,1,True,False,True
+q2b-agg-p27-n16-r3,agg-p27-n16,16,False,agent-008,0.0,malformed,80,24,4,True,False,True
+q2b-agg-p27-n16-r3,agg-p27-n16,16,False,agent-009,0.0,wrong numbers,52,21,1,True,False,True
+q2b-agg-p27-n16-r3,agg-p27-n16,16,False,agent-010,0.0,wrong numbers,34,2,0,True,False,True
+q2b-agg-p27-n16-r3,agg-p27-n16,16,False,agent-011,0.0,malformed,180,65,0,True,False,True
+q2b-agg-p27-n16-r3,agg-p27-n16,16,False,agent-012,0.0,wrong numbers,46,11,2,True,False,True
+q2b-agg-p27-n16-r3,agg-p27-n16,16,False,agent-013,0.0,malformed,54,20,0,True,True,True
+q2b-agg-p27-n16-r3,agg-p27-n16,16,False,agent-014,0.0,malformed,129,40,1,True,True,True
+q2b-agg-p27-n16-r3,agg-p27-n16,16,False,agent-015,0.0,wrong numbers,240,70,1,True,False,True
+q2b-agg-p27-n16-r3,agg-p27-n16,16,False,agent-016,0.0,wrong numbers,35,3,0,True,False,True
+q2b-agg-p25-n16-r1,agg-p25-n16,16,False,agent-001,0.0,wrong count,84,27,2,True,False,True
+q2b-agg-p25-n16-r1,agg-p25-n16,16,False,agent-002,0.0,wrong count,103,18,1,True,True,True
+q2b-agg-p25-n16-r1,agg-p25-n16,16,False,agent-003,0.0,wrong numbers,147,42,0,True,True,True
+q2b-agg-p25-n16-r1,agg-p25-n16,16,False,agent-004,0.0,wrong count,195,56,0,False,True,True
+q2b-agg-p25-n16-r1,agg-p25-n16,16,False,agent-005,0.0,wrong numbers,181,66,0,True,True,True
+q2b-agg-p25-n16-r1,agg-p25-n16,16,False,agent-006,0.0,wrong count,39,8,1,True,False,True
+q2b-agg-p25-n16-r1,agg-p25-n16,16,False,agent-007,0.0,wrong count,51,6,3,True,False,True
+q2b-agg-p25-n16-r1,agg-p25-n16,16,False,agent-008,0.0,wrong count,146,45,0,True,False,True
+q2b-agg-p25-n16-r1,agg-p25-n16,16,False,agent-009,0.0,wrong count,88,30,1,True,False,True
+q2b-agg-p25-n16-r1,agg-p25-n16,16,False,agent-010,0.0,wrong count,59,11,1,True,True,True
+q2b-agg-p25-n16-r1,agg-p25-n16,16,False,agent-011,0.0,wrong numbers,102,29,2,True,False,True
+q2b-agg-p25-n16-r1,agg-p25-n16,16,False,agent-012,0.0,wrong count,92,36,0,True,False,True
+q2b-agg-p25-n16-r1,agg-p25-n16,16,False,agent-013,0.0,wrong count,62,18,5,True,True,True
+q2b-agg-p25-n16-r1,agg-p25-n16,16,False,agent-014,0.0,wrong count,107,7,1,True,False,True
+q2b-agg-p25-n16-r1,agg-p25-n16,16,False,agent-015,0.0,no answer,189,89,1,True,False,True
+q2b-agg-p25-n16-r1,agg-p25-n16,16,False,agent-016,0.0,wrong count,88,21,1,True,False,True
+q2b-agg-p28-n16,agg-p28-n16,16,False,agent-001,0.0,wrong numbers,63,16,1,True,False,True
+q2b-agg-p28-n16,agg-p28-n16,16,False,agent-002,0.0,wrong count,73,22,2,True,True,True
+q2b-agg-p28-n16,agg-p28-n16,16,False,agent-003,0.0,wrong numbers,53,15,7,True,False,True
+q2b-agg-p28-n16,agg-p28-n16,16,False,agent-004,0.0,wrong count,50,5,7,True,False,True
+q2b-agg-p28-n16,agg-p28-n16,16,False,agent-005,0.0,malformed,63,22,1,True,False,True
+q2b-agg-p28-n16,agg-p28-n16,16,False,agent-006,0.0,malformed,30,8,1,True,False,True
+q2b-agg-p28-n16,agg-p28-n16,16,False,agent-007,0.0,wrong count,57,15,3,True,False,True
+q2b-agg-p28-n16,agg-p28-n16,16,False,agent-008,0.0,no answer,180,60,0,True,True,True
+q2b-agg-p28-n16,agg-p28-n16,16,False,agent-009,0.0,wrong count,51,12,1,True,False,True
+q2b-agg-p28-n16,agg-p28-n16,16,False,agent-010,0.0,no answer,180,72,0,True,True,True
+q2b-agg-p28-n16,agg-p28-n16,16,False,agent-011,0.0,no answer,180,98,0,True,True,True
+q2b-agg-p28-n16,agg-p28-n16,16,False,agent-012,0.0,wrong count,37,7,0,True,False,True
+q2b-agg-p28-n16,agg-p28-n16,16,False,agent-013,0.0,wrong numbers,69,24,6,True,False,True
+q2b-agg-p28-n16,agg-p28-n16,16,False,agent-014,0.0,wrong count,100,23,0,True,True,True
+q2b-agg-p28-n16,agg-p28-n16,16,False,agent-015,0.0,no answer,77,19,0,True,True,True
+q2b-agg-p28-n16,agg-p28-n16,16,False,agent-016,0.0,wrong count,72,35,0,True,False,True
