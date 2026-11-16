@@ -213,9 +213,8 @@ class ModelSpec(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _no_request_fields(cls, v: Any) -> Any:
-        """Harbor's Pi sends no raw request-body fields, so a model cannot carry any. (A null
-        `extra` passes: specs stored before the field went have one on every alias.)"""
-        if isinstance(v, dict) and v.get("extra") is not None:
+        """Harbor's Pi sends no raw request-body fields, so a model cannot carry any."""
+        if isinstance(v, dict) and "extra" in v:
             raise ValueError("`extra` is not supported: flock sends no raw request-body fields "
                              "(Harbor's Pi cannot). Set request defaults such as "
                              "chat_template_kwargs on the server instead (docs/open-models.md)")

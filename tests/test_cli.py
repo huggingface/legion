@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 import yaml
 from typer.testing import CliRunner
 
@@ -180,18 +181,15 @@ def test_apply_reports_spec_errors_by_field(tmp_path, monkeypatch, app):
     assert "types.writer.model: harness 'harbor' needs a provider-backed model" in r.output
 
 
-def test_launch_refuses_model_extra(tmp_path, monkeypatch, app):
-    from flock.models import SwarmSpec
-
+@pytest.mark.parametrize("extra", [{"chat_template_kwargs": {"enable_thinking": False}}, None])
+def test_launch_refuses_model_extra(tmp_path, monkeypatch, app, extra):
     wire(monkeypatch, app)
     spec_file = tmp_path / "spec.yaml"
-    model = {"model": "gpu1:Qwen/Q", "extra": {"chat_template_kwargs": {"enable_thinking": False}}}
+    model = {"model": "gpu1:Qwen/Q", "extra": extra}
     spec_file.write_text(yaml.safe_dump({**PROVIDER_SPEC, "models": {"q": model}}))
     r = runner.invoke(cli.app, ["launch", str(spec_file)])
     assert r.exit_code == 1 and "models.q: " in r.output and "`extra` is not supported" in r.output
     assert "on the server" in r.output
-    # every alias of a spec stored before the field went carries `"extra": null`: that still parses
-    SwarmSpec.model_validate({**PROVIDER_SPEC, "models": {"q": {**model, "extra": None}}})
 
 
 def test_apply_sends_its_git_source(tmp_path, monkeypatch, app, store):
