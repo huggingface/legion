@@ -91,7 +91,9 @@ plus the run's name (`mini-swarm-hf-jobs-1`), so the board keeps the two runs ap
 **Tokens.** Here `HF_INFERENCE_TOKEN` is the agents' key to the jobs proxy, which wants an HF
 token that can read the job's namespace (`SANDBOX_NAMESPACE`, else `HF_TOKEN`'s account).
 `HF_TOKEN` also starts, probes and cancels the job, so it needs permission to run Jobs there.
-As for `spec.yaml`, never give the agents `HF_TOKEN`.
+As for `spec.yaml`, never give the agents `HF_TOKEN`. A fine-grained token with **Make calls to
+Inference Providers**, repository read and Jobs on your account works for both examples
+(tested); whether one without the Jobs permission passes the proxy has not been tested.
 
 **Cost.** `h200` is $5/h while the job runs: 3.5 to 8 minutes to start (the image, 56 GB of
 weights, `torch.compile`) and the run's ten minutes at most, about $1.50, plus the sandboxes as

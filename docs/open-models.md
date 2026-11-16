@@ -279,10 +279,11 @@ What a request to an exposed job gets, as tested with an echo server and with vL
   both modes, and vLLM's key check reads only `Authorization: Bearer`, so every request gets
   vLLM's 401. A key in another header gets through the proxy, but vLLM would need a shim in the
   job to check it. flock refuses `api_key` in `vllm_args`.
-- **The agents' token.** The narrowest token that should work is a fine-grained one with read
-  access to the job's namespace and nothing else (add **Make calls to Inference Providers** only
-  if the same token also serves `hf_router`). The table's working token was a write token of the
-  namespace's owner; a read-only fine-grained one has not been tried yet.
+- **The agents' token.** The Hub docs ask for "an HF token with read access to the job's
+  namespace". Tested: a fine-grained token of the namespace's user with `repo.content.read`,
+  `inference.serverless.write` and `job.write` passes; so does the user's write token. Not
+  tested: a token without `job.write` (whether repository read alone is enough), or an org's
+  namespace.
 
 ### `flock serve`
 
