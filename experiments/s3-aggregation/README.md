@@ -43,9 +43,28 @@ directory. The board's Space must be public while the run uses it (the sandboxes
 token), and the instruction has no run tag, so give each team a new Space and delete it, and its
 snapshot bucket, once the run directory has the export.
 
-`--where cluster` writes the HF cluster's spec: one Slurm worker running the team in rootless
-podman, with a local board on that worker (new each run). Set it up with `flock init` as in
-docs/slurm.md. It compiles but has not run yet.
+## Run one team on the HF cluster
+
+`--where cluster` writes the spec for one Slurm worker running the team in rootless podman
+(hopper-cpu has podman 4.9), with a local board on that worker, new each run, so no Space. The
+run directory goes on the shared disk (docs/slurm.md "Deploying"): a cluster profile with
+`SLURM_PARTITION=hopper-cpu`, `WORKER_CPUS` and `WORKER_MEM` (at most 2000 MB per CPU there)
+and `VENV`, and a mode-600 secrets file with `HF_TOKEN`, `HF_INFERENCE_TOKEN`, `NAMESPACE` and
+`BUCKET` (a private bucket for the run's state):
+
+```sh
+uv run experiments/s3-aggregation/team.py --problem 7 --agents 4 --where cluster --out runs/src/agg-p07-n04
+uv run flock init $PWD/runs/agg-p07-n04 --from runs/src/agg-p07-n04 --profile cluster.env --secrets secrets.env
+export FLOCK_RUN_DIR=$PWD/runs/agg-p07-n04
+uv run flock launch $FLOCK_RUN_DIR/experiment
+uv run flock status agg-p07-n04                  # until the loop is done and the agents idle
+uv run flock stop agg-p07-n04 --release          # drain: each Trial is graded, then the jobs end
+uv run experiments/s3/metrics.py $FLOCK_RUN_DIR
+```
+
+A Slurm run doesn't end by itself: `--release` drains its worker, which is when each Trial is
+graded. The worker copies the grading and the board export to `<run dir>/results/` (its own
+files are in the node's `/tmp`), and `metrics.py` reads them from there.
 
 ## The board rules
 
@@ -58,7 +77,9 @@ not enforced and each Trial records a `message_board.warning` event.
 ## Metrics
 
 `uv run experiments/s3/metrics.py RUN_DIR [RUN_DIR ...] [--out rows.jsonl]` writes one JSON line
-per run directory (one team):
+per run directory (one team): a local run's `.flock/<swarm>-<time>/`, or a Slurm run's directory.
+A Slurm run has no local bundle, so there the tokens come from Harbor's Trial results (no
+reasoning split) and `stop_reason`, `cost_usd` and the turns are `null`:
 
 | field | |
 | --- | --- |

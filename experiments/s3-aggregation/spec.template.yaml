@@ -52,7 +52,7 @@ where:
         space_id: ${BOARD_SPACE:-s3-TEAM}     # bare name: HF_TOKEN's account
         private: false                        # a private Space's gate needs HF_TOKEN in every sandbox
   # The HF cluster: a Slurm worker running the team in rootless podman, with a local board on
-  # that worker (a new one each run). Compiles; not yet run (the sweep's follow-up).
+  # that worker (a new one each run). Results reach <run dir>/results/ (docs/slurm.md).
   cluster:
     namespace: ${NAMESPACE}
     bucket: ${BUCKET}                         # the run's checkpoint bucket, hf://buckets/<ns>/<name>
