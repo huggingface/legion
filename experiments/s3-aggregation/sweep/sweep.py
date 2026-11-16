@@ -95,12 +95,13 @@ def write_experiment(src: Path, problem: int, n: int, name: str, urls: list[str]
 
 def profile(root: Path, n: int) -> Path:
     """A worker sized to the team: a CPU per agent (at least 4), 1900 MB per CPU (hopper-cpu
-    allows 2000)."""
+    allows 2000); its podman pulls Docker Hub images through a mirror (registries.conf)."""
     cpus = max(4, n)
     path = root / "profiles" / f"n{n:02d}.env"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"SLURM_PARTITION=hopper-cpu\nWORKER_CPUS={cpus}\nWORKER_MEM={cpus * 1900}M\n"
-                    f"SLURM_MAX_MEM_PER_CPU_MB=2000\nVENV={REPO / '.venv'}\n")
+                    f"SLURM_MAX_MEM_PER_CPU_MB=2000\nVENV={REPO / '.venv'}\n"
+                    f"CONTAINERS_REGISTRIES_CONF={HERE / 'registries.conf'}\n")
     return path
 
 
