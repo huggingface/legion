@@ -167,11 +167,17 @@ types:
     replicas_ramp:
       start: 20                       # step 0, on the first pass that sees the ramp
       phases:                         # or one phase as `add: 20, every: 10m`
-        - {every: 5m, add: 20, until: 100}
-        - {every: 10m, add: 20}       # until: max
+        - every: 5m
+          add: 20
+          until: 100
+        - every: 10m                  # until: max
+          add: 20
       max: 300
       stagger: 10s                    # the start raise adds one agent every 10 s (default)
-      hold_if: {waiting: 1, request_s: 15, above: 100}
+      hold_if:
+        waiting: 1
+        request_s: 15
+        above: 100
 ```
 
 The reconciler raises the type's replicas along the schedule: `start`, then each phase adds

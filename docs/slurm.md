@@ -196,7 +196,9 @@ compute:
   max_mem: null              # FLOCK_SLURM_MAX_MEM (a profile key)
   worker_dead_after: 180s    # no env; also worker_unknown_after, crash_backoff (docs/live.md)
   types:                     # per type: partition, cpus, mem, time, container_root
-    interviewer: {cpus: 2, mem: 3800M}
+    interviewer:
+      cpus: 2
+      mem: 3800M
 ```
 
 Precedence: built-in defaults (`cpus` 4, `mem` 7G, `time` 29:00:00; no partition, no node
@@ -222,7 +224,10 @@ types:
       sync_exclude: [data/raw/] # FLOCK_SYNC_EXCLUDE: added to the default excludes
       restore_batch: 1000       # FLOCK_RESTORE_BATCH: files per download batch
       restore_threads: 4        # FLOCK_RESTORE_THREADS: one agent's batches in parallel
-      memory: {rotate: null, drain: null, preempt: null}
+      memory:
+        rotate: null
+        drain: null
+        preempt: null
                                 # FLOCK_MEM_ROTATE, _DRAIN, _PREEMPT
 ```
 

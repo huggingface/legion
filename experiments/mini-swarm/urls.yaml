@@ -17,11 +17,15 @@ resources:
   message_board:                                    # on this machine: a socket mounted into each container
 environment:
   backend: podman
-workers: {agents_per_worker: 3, turn_timeout: 10m}
+workers:
+  agents_per_worker: 3
+  turn_timeout: 10m
 loop:
   prompt: Continue the task until it is complete, then stop.
   every: turn_end
-  while: {until: 8m, max_rounds: 3}
+  while:
+    until: 8m
+    max_rounds: 3
 limits:
   run_timeout_seconds: 600
   agent_max_turns: 20

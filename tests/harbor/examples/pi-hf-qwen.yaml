@@ -2,7 +2,8 @@
 name: pi-hf-qwen-team
 model: Qwen/Qwen3.8-27B
 inference:
-  hf_router: {provider: deepinfra}
+  hf_router:
+    provider: deepinfra
 task:
   repo: https://huggingface.co/datasets/harborframework/terminal-bench-2.1
   dataset: terminal-bench-2.1@2.1.0

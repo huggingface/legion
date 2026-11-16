@@ -3,7 +3,8 @@
 name: ${RUN_NAME:-escape-room-1}
 model: Qwen/Qwen3.8-27B
 inference:
-  hf_router: {provider: deepinfra}
+  hf_router:
+    provider: deepinfra
   reasoning_effort: low
 task:
   repo: https://huggingface.co/datasets/HuggingFaceSwarms/AgentEscapeBench-harbor
@@ -16,8 +17,12 @@ agents:
   count: 4
 environment:
   backend: docker
-workers: {agents_per_worker: 4}  # one worker: a local board is per worker
-loop: {prompt: Work on the task., while: {max_rounds: 1}}  # one start prompt per agent
+workers:  # one worker: a local board is per worker
+  agents_per_worker: 4
+loop:  # one start prompt per agent
+  prompt: Work on the task.
+  while:
+    max_rounds: 1
 limits:
   run_timeout_seconds: 3600
   agent_max_turns: 200

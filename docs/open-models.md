@@ -168,11 +168,13 @@ Big models are servers you run: start them with your own job script (one per ser
 addresses:
 
 ```yaml
-compute: {kind: slurm}
+compute:
+  kind: slurm
 model: Qwen/Qwen3.5-0.8B
 inference:
   urls: ${VLLM_URLS}               # run.env: VLLM_URLS=http://10.53.1.2:8000/v1,http://10.53.1.3:8000/v1
-environment: {backend: podman}
+environment:
+  backend: podman
 ```
 
 `flock init` checks that the servers answer a tool call (its `providers` check), and

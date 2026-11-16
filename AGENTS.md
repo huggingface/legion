@@ -21,6 +21,8 @@ casually: controller, worker and CLI all import it.
 - Always pass `namespace=` to every `huggingface_hub` jobs call (saves a `whoami` per call).
 - Never launch an HF Job from tests. Experiments launch jobs only on `cpu-basic` unless the operator approved otherwise.
 - Commit small; push your branch at the end of every turn that produced work.
+- YAML (spec files, and YAML snippets in docs and READMEs): write mappings in block style, never
+  inline `{a: 1}`; inline lists like `[a, b]` and an empty mapping `{}` are fine.
 
 ## Tests
 Be conservative about adding tests.

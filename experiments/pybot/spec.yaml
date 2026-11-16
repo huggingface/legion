@@ -15,7 +15,8 @@ inference:
   # HF Inference Providers. For a large run, replace hf_router with `urls:` of your own
   # OpenAI-compatible servers (e.g. vLLM serving the same model, reachable from the sandboxes),
   # their key in api_key_env, and drop pricing (docs/open-models.md).
-  hf_router: {provider: novita}
+  hf_router:
+    provider: novita
   api_key_env: HF_INFERENCE_TOKEN             # inference only: never the workers' HF_TOKEN or one that can write PYBOT_REPO
   reasoning_effort: high
 task:
@@ -67,28 +68,57 @@ agents:
   #   steward           40  10
   #   safety            24  12
   roles:
-    answers: {count: 1, role_file: prompts/lanes/answers.md}
-    quality: {count: 1, role_file: prompts/lanes/quality.md}
-    conversation: {count: 1, role_file: prompts/lanes/conversation.md}
-    intent: {count: 1, role_file: prompts/lanes/intent.md, workers: {agents_per_worker: 6}}
-    uncertainty: {count: 1, role_file: prompts/lanes/uncertainty.md, workers: {agents_per_worker: 6}}
-    understanding: {count: 1, role_file: prompts/lanes/understanding.md}
-    routing: {count: 1, role_file: prompts/lanes/routing.md}
-    multi-turn: {count: 1, role_file: prompts/lanes/multi-turn.md, workers: {agents_per_worker: 6}}
+    answers:
+      count: 1
+      role_file: prompts/lanes/answers.md
+    quality:
+      count: 1
+      role_file: prompts/lanes/quality.md
+    conversation:
+      count: 1
+      role_file: prompts/lanes/conversation.md
+    intent:
+      count: 1
+      role_file: prompts/lanes/intent.md
+      workers:
+        agents_per_worker: 6
+    uncertainty:
+      count: 1
+      role_file: prompts/lanes/uncertainty.md
+      workers:
+        agents_per_worker: 6
+    understanding:
+      count: 1
+      role_file: prompts/lanes/understanding.md
+    routing:
+      count: 1
+      role_file: prompts/lanes/routing.md
+    multi-turn:
+      count: 1
+      role_file: prompts/lanes/multi-turn.md
+      workers:
+        agents_per_worker: 6
     steward:
       count: 1
       role_file: prompts/lanes/steward.md
       name_prefix: steward-                   # steward-teal-heron: recognizable on the board and in PRs
-      workers: {agents_per_worker: 10}
+      workers:
+        agents_per_worker: 10
       loop:                                   # a round every 15 min; wakes on mentions and threads only
         prompt_file: prompts/round.md
         every: 15m
         notices: true
         on: [message_board.mention, message_board.thread]
-        while: {until: 48h, max_rounds: 10000}
-        final: {prompt_file: prompts/final.md, reserve_usd: 0.3}
+        while:
+          until: 48h
+          max_rounds: 10000
+        final:
+          prompt_file: prompts/final.md
+          reserve_usd: 0.3
         resume_prompt: 'Your previous turn was interrupted. Read your notes, check your clone and PRs, and continue.'
-    safety: {count: 1, role_file: prompts/lanes/safety.md}
+    safety:
+      count: 1
+      role_file: prompts/lanes/safety.md
 environment:
   backend: hf-sandbox
   flavor: cpu-basic                           # each sandbox's; its idle timeout is turn_timeout + 60 s
@@ -97,14 +127,19 @@ workers:
   flavor: cpu-basic
   turn_timeout: 2h
   worker_lifetime: 54h
-  env: {PYBOT_REPO: '${PYBOT_REPO}'}          # the task's [environment.env] reads it from the worker
+  env:                                        # the task's [environment.env] reads it from the worker
+    PYBOT_REPO: '${PYBOT_REPO}'
 loop:
   prompt_file: prompts/round.md
   every: turn_end
   notices: true
   on: [message_board.mention, message_board.thread, message_board.channel]
-  while: {until: 48h, max_rounds: 10000}
-  final: {prompt_file: prompts/final.md, reserve_usd: 3}
+  while:
+    until: 48h
+    max_rounds: 10000
+  final:
+    prompt_file: prompts/final.md
+    reserve_usd: 3
   resume_prompt: 'Your previous turn was interrupted. Read your notes, check your clone and PRs, and continue.'
 limits:
   run_timeout_seconds: 176400                 # 48 h plus 1 h
