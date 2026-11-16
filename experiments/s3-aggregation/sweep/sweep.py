@@ -93,10 +93,10 @@ def write_experiment(src: Path, problem: int, n: int, name: str, urls: list[str]
         f"with {model} on the sweep's servers.\n" + yaml.safe_dump(spec, sort_keys=False))
 
 
-def profile(root: Path, n: int) -> Path:
+def profile(root: Path, n: int, most: int = 16) -> Path:
     """A worker sized to the team: a CPU per agent (at least 4), 1900 MB per CPU (hopper-cpu
     allows 2000); its podman pulls Docker Hub images through a mirror (registries.conf)."""
-    cpus = max(4, n)
+    cpus = max(4, min(n, most))  # `most`: a big job can queue past the loop's until
     path = root / "profiles" / f"n{n:02d}.env"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"SLURM_PARTITION=hopper-cpu\nWORKER_CPUS={cpus}\nWORKER_MEM={cpus * 1900}M\n"
@@ -153,7 +153,7 @@ def attempt(args, root: Path, secrets: Path, problem: int, n: int, name: str) ->
     for tries in range(3):
         with init_lock:  # one at a time: concurrent inits race on the bucket's write check
             init = flock(run_dir, "init", str(run_dir), "--from", str(src), "--profile",
-                         str(profile(root, n)), "--secrets", str(secrets))
+                         str(profile(root, n, args.max_worker_cpus)), "--secrets", str(secrets))
         log.write_text(init.stdout + init.stderr)
         if init.returncode == 0:
             break
@@ -265,6 +265,9 @@ def main(argv=None) -> int:
     parser.add_argument("--namespace", default="lewtun")
     parser.add_argument("--dataset", help="private dataset for the run directories")
     parser.add_argument("--prefix", default="grid", help="folder in the dataset")
+    parser.add_argument("--max-worker-cpus", type=int, default=16,
+                        help="cap a team's worker (a busy partition can hold a 16-CPU job past "
+                             "the loop's 15 minutes: its run then doesn't count)")
     parser.add_argument("--tag", default="",
                         help="put before every run and swarm name (e.g. q2b-): two grids at once "
                              "then never share a Slurm job name")
