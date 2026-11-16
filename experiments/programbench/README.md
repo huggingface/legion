@@ -30,3 +30,6 @@ See [repository tools](../../docs/hf-repo.md) for the clone, commit, PR, review,
 merge, and sync workflow. Keep the task's reference executable and hidden tests out
 of the collaboration repository. Reuse a dataset only when you intend to retain
 its previous source and PRs.
+
+See the [sixteen-agent prompt iteration](prompt-iteration/README.md) for tested
+prompt variants, native results, and limitations from the November 16 experiment.

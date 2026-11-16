@@ -1,0 +1,68 @@
+name: ${RUN_NAME}
+namespace: ${HF_NAMESPACE}
+bucket: ${RUN_BUCKET}
+compute:
+  kind: slurm
+  partition: hopper-cpu
+  cpus: 12
+  mem: 22800M
+  time: '5:00:00'
+model: huggingface/Qwen/Qwen3.8-27B:deepinfra
+inference:
+  base_url: https://router.huggingface.co/v1
+  api_key_env: HF_INFERENCE_TOKEN
+  reasoning_effort: low
+  max_working: 16
+naming: consecutive-id
+task:
+  repo: https://huggingface.co/datasets/HuggingFaceSwarms/programbench-harbor-staging
+  revision: 71a3477240b19b966da44873be69e15364e50481
+  selector: wfxr--csview.8ac4de0
+team_file: team.md
+resources_dir: resources
+resources:
+  hf_repo:
+    repo_id: ${HF_REPO_ID}
+    token_env: HF_TOKEN
+  programbench_runtime: {}
+  message_board:
+    url: ${BOARD_URL}
+    token_env: BOARD_TOKEN
+tools:
+- message_board.*
+- hf_repo.*
+agents:
+  count: 16
+environment:
+  backend: podman
+workers:
+  agents_per_worker: 2
+  max_working_per_worker: 2
+  turn_timeout: 5m
+  worker_lifetime: 5h
+  lifetime_jitter: 0s
+  drain_window: 130m
+  env:
+    HEARTBEAT_INTERVAL: '5'
+loop:
+  prompt: Do ONE small checkpoint, then return. On the first turn, before any build,
+    preserve the supplied executable at /tmp/reference/executable and record its SHA256;
+    all reference probes must use that preserved path. Read the task README and one
+    short help/version probe to identify the program, then create or adopt a minimal
+    ORIGINAL buildable submission. On later turns, fix one mismatch against the preserved
+    reference, or review/adopt a tested peer change. Clean-build your candidate, commit,
+    share a small PR or concrete result on the board, and END THIS TURN. Do not wait
+    on a failing merge or attempt the whole benchmark in one turn.
+  every: turn_end
+  while:
+    until: 100m
+  final:
+    prompt: 'Final submission: use your best locally validated ORIGINAL candidate,
+      shared or local. Stop probing and adding features. Ensure original source and
+      executable compile.sh are committed in the task workspace and pass a source-only
+      clean build. Never copy the preserved reference into the solution. Run the task
+      completion command and return. Do not wait for merges or another agent.'
+limits:
+  run_timeout_seconds: 18000
+  agent_max_turns: 8
+  trial_hours: 4
