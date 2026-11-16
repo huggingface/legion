@@ -4,7 +4,8 @@
 For each agent of each team in `<root>/rows.jsonl`: the answer the verifier saw (none, malformed,
 the wrong count, the wrong numbers, unsorted, or right), against the problem's numbers
 (the dataset's problems.json at the template's pin), and, from its event stream (`--sessions`:
-`<dir>/<run>/<agent>.jsonl`, the flock sessions the state bucket keeps), what it did: board posts
+a copy of the state bucket, `<dir>/<run>/agent/<agent>/sessions/<agent>.jsonl`, e.g. from
+`hf buckets sync hf://buckets/<bucket> <dir> --include "*/sessions/agent-*.jsonl"`), what it did: board posts
 through `flock-tool`, tool calls that failed, and whether it ever reached `flock-tool` at all
 (a small model may call util-linux's `flock` instead). A team fails when no agent's answer is
 right; the summary counts the failed teams' agents by answer and behaviour.
@@ -96,7 +97,7 @@ def behaviour(path: Path | None) -> dict:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("root", type=Path)
-    parser.add_argument("--sessions", type=Path, help="<dir>/<run>/<agent>.jsonl")
+    parser.add_argument("--sessions", type=Path, help="a copy of the state bucket")
     args = parser.parse_args(argv)
     numbers = problems()
     rows = [json.loads(x) for x in (args.root / "rows.jsonl").read_text().splitlines()]
@@ -105,7 +106,8 @@ def main(argv=None) -> int:
         team = numbers[f"p{r['problem']:02d}"][:r["agents"]]
         run_dir = args.root / "runs" / r["run"]
         for name in sorted(r["rewards"]):
-            session = args.sessions / r["run"] / f"{name}.jsonl" if args.sessions else None
+            session = (args.sessions / r["run"] / "agent" / name / "sessions" / f"{name}.jsonl"
+                       if args.sessions else None)
             agents.append({"run": r["run"], "task": r["task"], "agents": r["agents"],
                            "team_success": bool(r["success"]), "agent": name,
                            "reward": r["rewards"][name],
