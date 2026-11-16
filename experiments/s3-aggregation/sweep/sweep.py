@@ -42,7 +42,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 MODEL = "Qwen/Qwen3.5-27B"
 SECRET = re.compile(r"hf_[A-Za-z0-9]{30,}")
-lock, init_lock = threading.Lock(), threading.Lock()
+lock, init_lock = threading.Lock(), threading.Semaphore(4)
 LOST, GONE = "controller lost", "no controller left"
 
 
@@ -151,7 +151,7 @@ def attempt(args, root: Path, secrets: Path, problem: int, n: int, name: str) ->
     log = root / "logs" / f"{name}-init.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     for tries in range(3):
-        with init_lock:  # one at a time: concurrent inits race on the bucket's write check
+        with init_lock:  # a few at a time: many at once race on the bucket's write check
             init = flock(run_dir, "init", str(run_dir), "--from", str(src), "--profile",
                          str(profile(root, n, args.max_worker_cpus)), "--secrets", str(secrets))
         log.write_text(init.stdout + init.stderr)
