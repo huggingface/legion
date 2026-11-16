@@ -210,7 +210,7 @@ def valid(row: dict) -> bool:
 
 def run_team(args, root: Path, secrets: Path, problem: int, n: int) -> dict | None:
     """A team, run again (as `<task>-rK`) until it runs on one worker incarnation (#121)."""
-    task = f"agg-p{problem:02d}-n{n:02d}"
+    task = f"{args.tag}agg-p{problem:02d}-n{n:02d}"
     for reruns in range(args.max_reruns + 1):
         row = attempt(args, root, secrets, problem, n, task if reruns == 0 else f"{task}-r{reruns}")
         if row is None:
@@ -265,6 +265,9 @@ def main(argv=None) -> int:
     parser.add_argument("--namespace", default="lewtun")
     parser.add_argument("--dataset", help="private dataset for the run directories")
     parser.add_argument("--prefix", default="grid", help="folder in the dataset")
+    parser.add_argument("--tag", default="",
+                        help="put before every run and swarm name (e.g. q2b-): two grids at once "
+                             "then never share a Slurm job name")
     args = parser.parse_args(argv)
     args.urls = args.urls.split(",")
     root = args.root.resolve()
