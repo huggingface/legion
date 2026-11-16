@@ -5,12 +5,13 @@ name: ${RUN_NAME:-TEAM}                       # team.py: the task's name
 model: Qwen/Qwen3.8-27B
 naming: consecutive-id                        # agent-001, ...: the role files go to them in order
 inference:
-  hf_router: {provider: deepinfra}
+  hf_router:
+    provider: deepinfra
   api_key_env: HF_INFERENCE_TOKEN             # inference only: never the workers' HF_TOKEN
 task:
   repo: https://huggingface.co/datasets/HuggingFaceSwarms/s3-aggregation   # private for now
   selector: TEAM                              # team.py: agg-pPP-nNN
-  revision: b064c6ff2ff7b5e294de976323c98d39a25009ca
+  revision: 3170d7b16d7aa6cf683cd6d9612e54c76ff346e7
 agents:                                       # team.py: count N, roles/slot-NN.md per agent
   count: 1
 resources:
@@ -20,14 +21,19 @@ resources:
   message_board:
     channels: [general]
     wake: [mention, thread]
-    rules: {max_len: 1000, min_post_gap: 5s, max_posts: 40}
+    rules:
+      max_len: 1000
+      min_post_gap: 5s
+      max_posts: 40
 workers:
   agents_per_worker: 1                        # team.py: N, the whole team on one worker and board
   turn_timeout: 10m
 loop:
   prompt: Continue the task until it is complete, then stop.
   every: turn_end
-  while: {until: 15m, max_rounds: 4}
+  while:
+    until: 15m
+    max_rounds: 4
 limits:
   run_timeout_seconds: 1200
   agent_max_turns: 60
@@ -39,7 +45,8 @@ where:
   # run tag, so an earlier team's posts on a reused board would read as this team's.
   sandbox:
     namespace: ${SANDBOX_NAMESPACE:-}         # bills the sandboxes; unset: HF_TOKEN's account
-    environment: {backend: hf-sandbox}
+    environment:
+      backend: hf-sandbox
     resources:
       message_board:
         space_id: ${BOARD_SPACE:-s3-TEAM}     # bare name: HF_TOKEN's account
@@ -49,5 +56,11 @@ where:
   cluster:
     namespace: ${NAMESPACE}
     bucket: ${BUCKET}                         # the run's checkpoint bucket, hf://buckets/<ns>/<name>
-    compute: {kind: slurm, cpus: 16, mem: 32G, time: '3:00:00'}
-    environment: {backend: podman}
+    compute:
+      kind: slurm
+      partition: ${SLURM_PARTITION:-}         # the cluster profile's
+      cpus: ${WORKER_CPUS:-16}
+      mem: ${WORKER_MEM:-30G}                 # at most 2000 MB per CPU on hopper-cpu
+      time: '3:00:00'
+    environment:
+      backend: podman
