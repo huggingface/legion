@@ -1,0 +1,27 @@
+name: ${RUN_NAME:-programbench-repo}
+compute: local
+model: huggingface/Qwen/Qwen3.8-27B:deepinfra
+inference:
+  api_key_env: HF_INFERENCE_TOKEN
+  reasoning_effort: low
+task:
+  repo: https://huggingface.co/datasets/HuggingFaceSwarms/programbench-harbor-staging
+  revision: 71a3477240b19b966da44873be69e15364e50481
+  selector: wfxr--csview.8ac4de0
+team_file: prompts/team.md
+resources:
+  hf_repo:
+    repo_id: ${HF_REPO_ID}
+    token_env: HF_REPO_TOKEN
+  message_board: {}
+tools: [message_board.*, hf_repo.*]
+agents: {count: 2}
+environment: {backend: docker}
+workers: {agents_per_worker: 2, turn_timeout: 20m}
+loop:
+  prompt: Work with your teammate to implement and submit the task. Use the board and HF PR tools to share original code.
+  every: turn_end
+  while: {max_rounds: 1}
+limits:
+  run_timeout_seconds: 2400
+  agent_max_turns: 60
