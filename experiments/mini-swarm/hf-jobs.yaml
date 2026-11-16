@@ -1,19 +1,19 @@
 # mini-swarm with the model on a vLLM server flock starts on HF Jobs: the same three agents,
-# task, loop and limits as spec.yaml, and the same model, on one a100-large instead of the HF
-# router. flock starts the job, waits until it answers, and cancels it when the run ends.
-# Needs, cost, launch: README.md.
+# task, loop and limits as spec.yaml, and the same model, on one h200 instead of the HF router.
+# flock starts the job, waits until it answers, and cancels it when the run ends.
+# Needs, cost, launch, other sizes: README.md.
 name: ${RUN_NAME:-mini-swarm-hf-jobs-1}
 namespace: ${SANDBOX_NAMESPACE:-}              # bills the sandboxes and the GPU job; unset: HF_TOKEN's account
 model: ${MODEL:-Qwen/Qwen3.8-27B}
 naming: consecutive-id                              # agent-001..003: the task's test expects agent-NNN
 inference:
   hf_jobs:
-    flavor: ${FLAVOR:-a100-large}
+    flavor: ${FLAVOR:-h200}                   # 3 agents at 128k: an a100-large holds 2.1 (README.md)
     tool_call_parser: qwen3_coder
     reasoning_parser: qwen3
     vllm_args:
-      - max_model_len=${MAX_MODEL_LEN:-131072}
-    startup_timeout: 30m                      # image, 56 GB of weights, CUDA graphs
+      - max_model_len=${MAX_MODEL_LEN:-131072}  # Qwen: at least 128k for thinking
+    startup_timeout: 30m                      # image, 56 GB of weights, compile: 5-8 min
   api_key_env: HF_INFERENCE_TOKEN             # an HF token that can read the job's namespace: never HF_TOKEN
   max_working: 3
 task:

@@ -231,7 +231,7 @@ def test_the_mini_swarm_spec_compiles(monkeypatch, pins):
         "mini-swarm-hf-jobs-1", ts.model, ts.harbor, ts.loop, ts.secrets)
     hj = hf.inference.hf_jobs
     assert (hj.flavor, hj.vllm_args, hf.inference.api_key_env) == (
-        "a100-large", ["max_model_len=131072"], "HF_INFERENCE_TOKEN")
+        "h200", ["max_model_len=131072"], "HF_INFERENCE_TOKEN")
     assert hj.timeout == "3300s"  # startup_timeout 30m + run_timeout_seconds 600 + 15m
 
 

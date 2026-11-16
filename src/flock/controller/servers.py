@@ -329,7 +329,3 @@ class Servers:
                         started_at=_dt(s.started_at), ready_at=_dt(s.ready_at),
                         error=run.error))
             return out
-
-    def swarms(self) -> list[str]:
-        with self.lock:
-            return list(self.runs)

@@ -55,3 +55,66 @@ under `.flock/` (`uv run flock stop mini-swarm-1 --delete --yes` ends it early).
 
 `urls.yaml` is the same swarm on a model server you run (vLLM at `localhost:8000` by default),
 with the agents in rootless podman and a local board: docs/open-models.md has the recipes.
+
+## On a vLLM server flock starts: `hf-jobs.yaml`
+
+The same swarm with the same model, served by vLLM on one HF Jobs `h200` instead of the HF
+router. The task pin, agents, board, loop and limits are `spec.yaml`'s, so rewards, tokens and
+latency differ only by where the model runs. flock starts the job, waits until it answers,
+points the agents at it and cancels it when the run ends (docs/open-models.md, "Servers flock
+starts").
+
+```sh
+uv run flock launch experiments/mini-swarm/hf-jobs.yaml   # prints the job's progress, then preflight
+uv run flock status mini-swarm-hf-jobs-1                  # the job's URL, state, uptime, context window
+```
+
+What differs from `spec.yaml`:
+
+```diff
+ inference:
+-  hf_router: {provider: cerebras}
+-  api_key_env: HF_INFERENCE_TOKEN
++  hf_jobs:
++    flavor: ${FLAVOR:-h200}
++    tool_call_parser: qwen3_coder
++    reasoning_parser: qwen3
++    vllm_args:
++      - max_model_len=${MAX_MODEL_LEN:-131072}
++    startup_timeout: 30m
++  api_key_env: HF_INFERENCE_TOKEN
++  max_working: 3
+```
+
+plus the run's name (`mini-swarm-hf-jobs-1`), so the board keeps the two runs apart.
+
+**Tokens.** Here `HF_INFERENCE_TOKEN` is the agents' key to the jobs proxy, which wants an HF
+token that can read the job's namespace (`SANDBOX_NAMESPACE`, else `HF_TOKEN`'s account).
+`HF_TOKEN` also starts, probes and cancels the job, so it needs permission to run Jobs there.
+As for `spec.yaml`, never give the agents `HF_TOKEN`.
+
+**Cost.** `h200` is $5/h while the job runs: 3.5 to 8 minutes to start (the image, 56 GB of
+weights, `torch.compile`) and the run's ten minutes at most, about $1.50, plus the sandboxes as
+for `spec.yaml`.
+
+**Why `h200`.** Qwen recommends a context of at least 128k to keep thinking working, and the
+three agents may each fill theirs. On an `a100-large` ($2.50/h) the 27B's bf16 weights take
+51 GiB and leave KV cache for 277,963 tokens: 2.12 requests of 131,072 at once. An `h200`
+holds 1,167,090 tokens: 8.9 of them. Three agents would fit on the A100 at
+`MAX_MODEL_LEN=90112` (3 × 90,112 < 277,963; not run), below Qwen's 128k.
+
+**Other sizes.** Only `model` and `flavor` change (`MODEL`, `FLAVOR` and `MAX_MODEL_LEN` fill
+them in), e.g. `MODEL=Qwen/Qwen3.5-0.8B FLAVOR=l4x1 uv run flock launch experiments/mini-swarm/hf-jobs.yaml`.
+
+| Model | Flavor | $/h | Ran |
+|---|---|---|---|
+| `Qwen/Qwen3.5-0.8B` | `l4x1` | 0.80 | yes: ready in about 2.5 min once the GPU was assigned; preflight ok |
+| `Qwen/Qwen3.5-2B` | `l4x1` | 0.80 | no |
+| `Qwen/Qwen3.5-4B` | `l4x1` | 0.80 | no |
+| `Qwen/Qwen3.5-9B` | `l40sx1` | 1.80 | no |
+| `Qwen/Qwen3.8-27B` | `a100-large` | 2.50 | yes: ready in 7.4 min, preflight ok, 2.12 × 128k (above) |
+| `Qwen/Qwen3.8-27B` | `h200` | 5.00 | yes: ready in 3.5 min, preflight ok, 8.9 × 128k; the example |
+| `Qwen/Qwen3.8-27B-FP8` | `l40sx1` | 1.80 | no |
+
+`flock serve experiments/mini-swarm/hf-jobs.yaml` starts the server alone, for several runs to
+share through `inference.urls`.
