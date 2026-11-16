@@ -477,10 +477,9 @@ def serve(
         srv.tick()
         return [r.model_dump(mode="json") for r in srv.status(spec.swarm)]
 
-    limit = max(parse_duration(g.block.startup_timeout).total_seconds() for g in groups(spec))
     try:
-        rows = ops.wait_servers([r.model_dump(mode="json") for r in srv.start(spec)], poll,
-                                lambda line: typer.echo(f"  {line}"), limit + 60)
+        rows = ops.wait_servers(spec, [r.model_dump(mode="json") for r in srv.start(spec)], poll,
+                                lambda line: typer.echo(f"  {line}"))
     except SpecError as e:
         srv.stop(spec.swarm)
         _fail([*e.lines, "the servers did not start (cancelled)"])

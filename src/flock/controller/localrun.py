@@ -443,13 +443,14 @@ def _log_to(path: Path) -> logging.Handler:
 
 async def _servers(http: httpx.AsyncClient, spec: SwarmSpec, say) -> bool:
     """`hf_jobs`: start the servers and wait until they answer, as `flock launch` does."""
-    from flock.ops import SERVERS_POLL_S, server_line
+    from flock.ops import SERVERS_POLL_S, server_groups, server_line
 
+    keys, _ = server_groups(spec)  # the controller ends a startup at startup_timeout
     r = await http.post(f"/swarms/{spec.swarm}/servers", json=spec.model_dump(mode="json"),
                         timeout=120)
     seen: set[str] = set()
     while r.status_code < 400:
-        rows = r.json()
+        rows = [x for x in r.json() if x["group"] in keys]
         for line in map(server_line, rows):
             if line not in seen:
                 seen.add(line)

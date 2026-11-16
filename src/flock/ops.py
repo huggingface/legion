@@ -241,11 +241,25 @@ def server_line(r: dict) -> str:
             + (f": {r['error']}" if r.get("error") else ""))
 
 
-def wait_servers(rows: list[dict], poll: Callable[[], list[dict]], say: Callable[[str], None],
-                 limit: float) -> list[dict]:
-    """Wait until every row is `ready`, saying each change (and every SERVERS_SAY_S); returns
-    the rows. SpecError when one fails or is stopped, or after `limit` s (the controller ends a
-    startup at `startup_timeout`; this only covers a controller that stopped checking)."""
+def server_groups(spec: SwarmSpec) -> tuple[set[str], float]:
+    """The keys of the spec's server groups, and how long to wait for them at most: their
+    longest `startup_timeout` plus 5 minutes (the controller ends a startup at its
+    `startup_timeout`; this only covers a controller that stopped checking)."""
+    from flock.controller.servers import groups
+
+    gs = groups(spec)
+    return ({g.key for g in gs},
+            max(parse_duration(g.block.startup_timeout).total_seconds() for g in gs) + 300)
+
+
+def wait_servers(spec: SwarmSpec, rows: list[dict], poll: Callable[[], list[dict]],
+                 say: Callable[[str], None]) -> list[dict]:
+    """Wait until every server of the spec's groups is `ready` (`rows`, then `poll()`: the
+    swarm's, which may hold groups an earlier spec used), saying each change (and every
+    SERVERS_SAY_S); returns its rows. SpecError when one fails or is stopped, or after the
+    wait's limit (`server_groups`)."""
+    keys, limit = server_groups(spec)
+    rows = [r for r in rows if r["group"] in keys]
     seen: dict[tuple, tuple] = {}
     t0 = last = time.monotonic()
     while True:
@@ -264,19 +278,15 @@ def wait_servers(rows: list[dict], poll: Callable[[], list[dict]], say: Callable
         if now - t0 > limit:
             raise SpecError([f"servers: not ready after {int(limit)} s"])
         _sleep(SERVERS_POLL_S)
-        rows = poll()
+        rows = [r for r in poll() if r["group"] in keys]
 
 
 def start_servers(api: Client, spec: SwarmSpec, say: Callable[[str], None] = lambda _: None,
                   cancel: bool = True) -> list[dict]:
     """Start the spec's `hf_jobs` servers through the controller (it reuses running ones) and
     wait until they answer. A failure raises SpecError, after cancelling them (`cancel`)."""
-    from flock.controller.servers import groups
-
-    limit = max(parse_duration(g.block.startup_timeout).total_seconds() for g in groups(spec))
     try:
-        return wait_servers(api.start_servers(spec), lambda: api.servers(spec.swarm), say,
-                            limit + 300)
+        return wait_servers(spec, api.start_servers(spec), lambda: api.servers(spec.swarm), say)
     except SpecError as e:
         if cancel:
             with contextlib.suppress(Exception):

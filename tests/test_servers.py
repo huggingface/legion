@@ -11,12 +11,14 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from flock import ops
+from flock.client import Client
 from flock.controller.api import create_app
 from flock.controller.hf_jobs_servers import HFJobsServers
 from flock.controller.servers import Servers
 from flock.models import DEFAULT_VLLM_IMAGE, SwarmSpec
 
-from .conftest import HB, TOKEN
+from .conftest import HB, TOKEN, wire
 from .fake_hub_jobs import FakeHubJobs
 
 MODEL = "Qwen/Qwen3.8-27B"
@@ -153,7 +155,8 @@ def test_each_model_gets_its_own_servers(controller, hub, proxy, store):
                     "big": [url("a100x4", MODEL, "0"), url("a100x4", MODEL, "1")]}
 
 
-def test_a_changed_block_moves_the_type_to_new_servers(controller, hub, proxy, store, clock):
+def test_a_changed_block_moves_the_type_to_new_servers(controller, hub, proxy, store, clock,
+                                                        monkeypatch):
     """`flock update` of the hf_jobs block starts new servers and the apply pins them (a block
     change: the type's workers restart on them); the old ones serve the draining workers' turns
     until turn_timeout, then are cancelled."""
@@ -170,7 +173,8 @@ def test_a_changed_block_moves_the_type_to_new_servers(controller, hub, proxy, s
         return job
 
     old = up(spec())
-    new = up(spec({"hf_jobs": {**HF_JOBS, "flavor": "a100x4"}, "max_working": 3}))
+    body = spec({"hf_jobs": {**HF_JOBS, "flavor": "a100x4"}, "max_working": 3})
+    new = up(body)
     pinned = store.get_swarm("s")["spec"].types["agent"].resolved_model.inference
     assert (pinned.hf_jobs.flavor, pinned.urls) == ("a100x4", [f"https://{new}--8000.hf.jobs/v1"])
     assert hub.cancelled == []
@@ -179,6 +183,9 @@ def test_a_changed_block_moves_the_type_to_new_servers(controller, hub, proxy, s
     assert hub.cancelled == [old]
     assert [(r["job_id"], r["state"]) for r in c.get("/swarms/s/servers").json()] == [
         (old, "stopped"), (new, "ready")]
+    wire(monkeypatch, app)  # `flock update` again: the stopped group is no longer the spec's
+    assert [r["job_id"] for r in ops.start_servers(Client(), SwarmSpec.model_validate(body))] == [
+        new]
 
 
 def test_vllm_args_rules(controller, hub):
