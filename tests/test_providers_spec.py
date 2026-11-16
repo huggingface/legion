@@ -19,8 +19,7 @@ PROVIDERS = {
     "anth": {"type": "anthropic", "api_key_env": "ANTHROPIC_API_KEY",
              "pricing": {"claude-opus-5-5": [4, 20, 0.2]}},
 }
-MODELS = {"qwen-27b": {"model": "gpu1:Qwen/Qwen3.8-27B-FP8", "reasoning": "medium",
-                       "extra": {"chat_template_kwargs": {"enable_thinking": False}}}}
+MODELS = {"qwen-27b": {"model": "gpu1:Qwen/Qwen3.8-27B-FP8", "reasoning": "medium"}}
 
 
 def spec(types: dict, providers: dict | None = None, models: dict | None = None) -> SwarmSpec:

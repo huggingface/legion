@@ -209,7 +209,6 @@ def check_spec(spec: SwarmSpec, spec_file: str):
     refused, warnings = loop_problems(spec)
     if refused:
         raise SpecError(refused)
-    warnings += extra_warnings(spec)
     try:
         return prepare(spec, spec_file), warnings
     except ToolsError as e:
@@ -218,14 +217,6 @@ def check_spec(spec: SwarmSpec, spec_file: str):
 
 def provider_backed(spec: SwarmSpec) -> bool:
     return any(ts.resolved_model is not None for ts in spec.types.values())
-
-
-def extra_warnings(spec: SwarmSpec) -> list[str]:
-    """Harbor's Pi cannot add request-body fields: a model's `extra` is kept but not sent."""
-    return [f"warning: type {name}: `extra` is kept in the spec but not sent by the "
-            f"{ts.harness.value} harness (docs/open-models.md)"
-            for name, ts in spec.types.items()
-            if ts.resolved_model is not None and ts.resolved_model.extra]
 
 
 def preflight_lines(results: list[dict]) -> list[str]:

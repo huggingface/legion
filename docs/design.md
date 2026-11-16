@@ -76,8 +76,8 @@ worker and CLI read nothing else, and `tests/test_registry.py` checks every entr
 
 - **Harness**: write `src/flock/worker/adapters/<name>.py` with a class implementing
   `HarnessAdapter` (`adapters/base.py`) and a `make_adapter(workdir, name, spec)` function, and
-  add a `HARNESSES` entry (its import path, the provider `type` it needs, the wire API
-  preflight probes, the instructions file name, whether it sends a model's `extra`).
+  add a `HARNESSES` entry (the adapter's import path, the provider `type` a provider-backed
+  model must have, and the wire API it speaks to that provider, which preflight probes).
 - **Compute backend**: write `src/flock/controller/<name>.py` with a `JobsClient`
   (`controller/jobs.py`) and a `<name>_jobs_client(env, dep, data_dir)` function, and add a
   `COMPUTE` entry (`compute.kind` / `FLOCK_COMPUTE` name -> that function). Every kind but
@@ -176,13 +176,12 @@ Each type sets `harness: harbor`, its `harbor:` block (written by the compile st
 
 ### Providers
 
-Open models (vLLM, the HF router, any OpenAI-compatible server) are reached through
-`providers:` (field names shared with swarmlab); `types.<t>.model` is an alias under `models:`
-or `<provider>:<model id>`. Apply pins the resolved model and its `[input, output, cached]`
-price into the spec (`types.<t>.resolved_model`), adds the provider key to the type's job
-secrets, and preflight probes each model with a tool call. `providers.<name>.max_working` caps
-the agents of the swarm in a turn on that provider, enforced at prompt admission. How-to and
-fields: docs/open-models.md.
+Open models (vLLM, the HF router, any OpenAI-compatible server) are reached through `providers:`;
+`types.<t>.model` is an alias under `models:` or `<provider>:<model id>`. Apply pins the resolved
+model and its `[input, output, cached]` price into the spec (`types.<t>.resolved_model`), adds
+the provider key to the type's job secrets, and preflight probes each model with a tool call.
+`providers.<name>.max_working` caps the agents of the swarm in a turn on that provider, enforced
+at prompt admission. How-to and fields: docs/open-models.md.
 
 ### States
 

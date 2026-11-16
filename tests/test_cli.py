@@ -73,7 +73,7 @@ PROVIDER_SPEC = {
     "swarm": "op", "namespace": "ns", "bucket": "hf://buckets/ns/b",
     "providers": {"gpu1": {"type": "openai_compat", "base_url": "http://fake/v1",
                            "api_key_env": "VLLM_API_KEY", "self_hosted": True}},
-    "models": {"q": {"model": "gpu1:Qwen/Q", "extra": {"chat_template_kwargs": {"enable_thinking": False}}}},
+    "models": {"q": {"model": "gpu1:Qwen/Q"}},
     "types": {"worker": {**HB, "model": "q", "replicas": 1}},
 }
 
@@ -180,19 +180,18 @@ def test_apply_reports_spec_errors_by_field(tmp_path, monkeypatch, app):
     assert "types.writer.model: harness 'harbor' needs a provider-backed model" in r.output
 
 
-def test_warn_extra_that_is_not_sent():
+def test_launch_refuses_model_extra(tmp_path, monkeypatch, app):
     from flock.models import SwarmSpec
 
-    spec = SwarmSpec.model_validate({
-        "swarm": "s", "namespace": "n", "bucket": "b",
-        "providers": {"p": {"type": "openai_compat", "base_url": "http://x/v1", "api_key_env": "K",
-                            "self_hosted": True}},
-        "models": {"m": {"model": "p:m", "extra": {"chat_template_kwargs": {"enable_thinking": False}}},
-                   "plain": {"model": "p:m"}},
-        "types": {"hb": {"harness": "harbor", "model": "m", "harbor": {"task": {}, "config": {}}},
-                  "nox": {"harness": "harbor", "model": "plain", "harbor": {"task": {}, "config": {}}}}})
-    err = "\n".join(ops.extra_warnings(spec))
-    assert "type hb: `extra`" in err and "nox" not in err
+    wire(monkeypatch, app)
+    spec_file = tmp_path / "spec.yaml"
+    model = {"model": "gpu1:Qwen/Q", "extra": {"chat_template_kwargs": {"enable_thinking": False}}}
+    spec_file.write_text(yaml.safe_dump({**PROVIDER_SPEC, "models": {"q": model}}))
+    r = runner.invoke(cli.app, ["launch", str(spec_file)])
+    assert r.exit_code == 1 and "models.q: " in r.output and "`extra` is not supported" in r.output
+    assert "on the server" in r.output
+    # every alias of a spec stored before the field went carries `"extra": null`: that still parses
+    SwarmSpec.model_validate({**PROVIDER_SPEC, "models": {"q": {**model, "extra": None}}})
 
 
 def test_apply_sends_its_git_source(tmp_path, monkeypatch, app, store):

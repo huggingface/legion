@@ -1,6 +1,6 @@
 """Per-agent event stream: pi session format v3 on disk, `Event` records to the controller.
 
-Encoding follows swarmlab's export.py: a header line
+Encoding: a header line
 `{"type":"session","version":3,"id","timestamp","cwd","harness","name"}`, then entries chained
 by `parentId` whose ids are the first 8 hex chars of sha256("<swarm>/<agent>/<n>") (widened
 on collision). Harness messages are `message` entries; the worker's harness-neutral events

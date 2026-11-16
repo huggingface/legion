@@ -247,10 +247,9 @@ async def test_preflight_uses_applied_spec_without_body(preflight_client):
 
 async def test_preflight_probes_chat_completions(preflight_client):
     fake, seen = fake_provider()
-    extra = {"chat_template_kwargs": {"enable_thinking": False}, "response_format": {"type": "json_object"}}
     spec = SwarmSpec.model_validate({
         "swarm": "p", "namespace": "ns", "bucket": "hf://buckets/ns/b", "providers": preflight_providers(),
-        "models": {"small": {"model": "gpu1:Qwen/Small", "extra": extra}},
+        "models": {"small": {"model": "gpu1:Qwen/Small"}},
         "types": {"pixel": {**HB, "model": "small"},
                   "pixel2": {**HB, "model": "small"}}})
     async with await preflight_client(fake, SECRETS) as c:
@@ -262,7 +261,7 @@ async def test_preflight_probes_chat_completions(preflight_client):
     assert chat["usage_reported"] and chat["warning"] is None
     chats = [x for x in seen if x["path"] == "chat"]
     assert len(chats) == 2 and chats[0]["auth"] == "Bearer v"
-    assert "stream" not in chats[0] and "chat_template_kwargs" not in chats[0]  # Pi sends no `extra`
+    assert "stream" not in chats[0]
     assert chats[0]["tools"][0]["function"]["name"] == "get_time" and chats[0]["temperature"] == 0
     m2 = chats[1]["messages"]
     assert [m["role"] for m in m2] == ["user", "assistant", "tool"]
