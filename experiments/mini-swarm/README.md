@@ -73,7 +73,7 @@ What differs from `spec.yaml`:
 
 ```diff
  inference:
--  hf_router: {provider: cerebras}
+-  hf_router: {provider: deepinfra}
 -  api_key_env: HF_INFERENCE_TOKEN
 +  hf_jobs:
 +    flavor: ${FLAVOR:-h200}
@@ -98,6 +98,10 @@ Inference Providers**, repository read and Jobs on your account works for both e
 **Cost.** `h200` is $5/h while the job runs: 3.5 to 8 minutes to start (the image, 56 GB of
 weights, `torch.compile`) and the run's ten minutes at most, about $1.50, plus the sandboxes as
 for `spec.yaml`.
+
+**Against `spec.yaml`** (16 November): both gave every agent reward 1, with the same tool calls
+and thinking and similar turn times (median 6–9 s). vLLM reports no cached prompt tokens, so
+the input count here includes what the router reports as cache reads.
 
 **Why `h200`.** Qwen recommends a context of at least 128k to keep thinking working, and the
 three agents may each fill theirs. On an `a100-large` ($2.50/h) the 27B's bf16 weights take
