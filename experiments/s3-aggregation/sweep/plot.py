@@ -51,6 +51,7 @@ def team_row(r: dict) -> dict:
             "output": t["output"], "posts": r["posts"],
             "posts_per_agent": r["posts"] / r["agents"], "wall_s": r.get("wall_s"),
             "duration_s": r["duration_s"], "outcome": r.get("outcome"),
+            "reruns": r.get("reruns", 0), "incarnations": r.get("incarnations"),
             "missing": ";".join(r["missing"])}
 
 
@@ -70,7 +71,8 @@ def by_n(teams: list[dict]) -> list[dict]:
             "output_per_team": statistics.fmean(t["output"] for t in group),
             "posts_per_agent": statistics.fmean(t["posts_per_agent"] for t in group),
             "wall_s": statistics.fmean(t["wall_s"] for t in group if t["wall_s"] is not None),
-            "incomplete": sum(bool(t["missing"]) for t in group)})
+            "incomplete": sum(bool(t["missing"]) for t in group),
+            "reruns": sum(t["reruns"] for t in group)})
     return out
 
 

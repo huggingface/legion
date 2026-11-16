@@ -9,7 +9,9 @@ local board on its one worker), from team.py's cluster spec with the sweep's mod
 (the same board rules, loop and limits at every N). Per team: `flock init` (a worker sized to
 N), `flock launch`, wait until its loop is done and its agents are idle, `flock stop --release`
 (each Trial is graded as the worker drains; the results land in the run directory), then
-experiments/s3/metrics.py's row plus the wall time goes to `<root>/rows.jsonl`. A team that
+experiments/s3/metrics.py's row plus the wall time goes to `<root>/rows.jsonl`. Until #121
+is fixed, a team must run on one worker incarnation (a relaunch or a preemption overwrites
+results): one that didn't runs again as `<task>-rK` (its row: `reruns`). A team that
 has a row is skipped, so the same command resumes. At the end plot.py writes the figure, CSV
 and table, and with --dataset each run directory (spec, results, logs; never run.env) goes to
 that private dataset under `<prefix>/<task>/`.
@@ -73,17 +75,19 @@ def flock(run_dir: Path, *args: str, timeout: float = 3600) -> subprocess.Comple
                           env=env, capture_output=True, text=True, timeout=timeout, check=False)
 
 
-def write_experiment(src: Path, problem: int, n: int, urls: list[str], model: str) -> str:
-    """team.py's cluster spec and role files, with the sweep's model on its servers."""
+def write_experiment(src: Path, problem: int, n: int, name: str, urls: list[str],
+                     model: str) -> None:
+    """team.py's cluster spec and role files, with the sweep's model on its servers, as swarm
+    `name`."""
     team.main(["--problem", str(problem), "--agents", str(n), "--where", "cluster",
                "--out", str(src)])
     spec = yaml.safe_load((src / "spec.yaml").read_text())
+    spec["name"] = name
     spec["model"] = model
     spec["inference"] = {"urls": urls}  # no key: the servers take none
     (src / "spec.yaml").write_text(
         f"# {spec['task']['selector']} for the scaling sweep (sweep.py): team.py's cluster spec "
         f"with {model} on the sweep's servers.\n" + yaml.safe_dump(spec, sort_keys=False))
-    return spec["task"]["selector"]
 
 
 def profile(root: Path, n: int) -> Path:
@@ -111,35 +115,54 @@ def wait_done(run_dir: Path, task: str, n: int, timeout: float) -> str:
     return f"not done after {timeout:.0f} s"
 
 
-def run_team(args, root: Path, secrets: Path, problem: int, n: int) -> dict | None:
-    task = f"agg-p{problem:02d}-n{n:02d}"
-    run_dir, src = root / "runs" / task, root / "src" / task
+def attempt(args, root: Path, secrets: Path, problem: int, n: int, name: str) -> dict | None:
+    """One run of a team as swarm `name`: its row, or None when it could not start."""
+    run_dir, src = root / "runs" / name, root / "src" / name
     if run_dir.exists():
-        say(task, "has a run directory but no row: remove", run_dir, "to run it again")
+        say(name, "has a run directory but no row: remove", run_dir, "to run it again")
         return None
     started = time.time()
-    write_experiment(src, problem, n, args.urls, args.model)
+    write_experiment(src, problem, n, name, args.urls, args.model)
     init = flock(run_dir, "init", str(run_dir), "--from", str(src), "--profile",
                  str(profile(root, n)), "--secrets", str(secrets))
     if init.returncode != 0:
-        say(task, "init failed:", init.stdout[-600:], init.stderr[-600:])
+        say(name, "init failed:", init.stdout[-600:], init.stderr[-600:])
         return None
-    say(task, "launching")
+    say(name, "launching")
     launch = flock(run_dir, "launch", str(run_dir / "experiment"))
     if launch.returncode != 0:
-        say(task, "launch failed:", launch.stdout[-600:], launch.stderr[-600:])
-    why = wait_done(run_dir, task, n, args.team_timeout) if launch.returncode == 0 else "launch"
-    say(task, "loop:", why, "- releasing")
-    release = flock(run_dir, "stop", task, "--release")
+        say(name, "launch failed:", launch.stdout[-600:], launch.stderr[-600:])
+    why = wait_done(run_dir, name, n, args.team_timeout) if launch.returncode == 0 else "launch"
+    say(name, "loop:", why, "- releasing")
+    release = flock(run_dir, "stop", name, "--release")
     ended = time.time()
-    row = metrics.row(run_dir) | {
+    return metrics.row(run_dir) | {
         "problem": problem, "wall_s": round(ended - started, 1), "outcome": why,
         "released": release.returncode == 0,
+        # each launch of the worker slot writes one env file: more than one is a relaunch or a
+        # preemption, whose results a later incarnation overwrites (#121)
+        "incarnations": len(list((run_dir / "launch").glob("*.env"))),
         "started_at": datetime.fromtimestamp(started, UTC).isoformat()}
+
+
+def run_team(args, root: Path, secrets: Path, problem: int, n: int) -> dict | None:
+    """A team, run again (as `<task>-rK`) until it runs on one worker incarnation (#121)."""
+    task = f"agg-p{problem:02d}-n{n:02d}"
+    for reruns in range(args.max_reruns + 1):
+        row = attempt(args, root, secrets, problem, n, task if reruns == 0 else f"{task}-r{reruns}")
+        if row is None:
+            return None
+        row["reruns"] = reruns
+        if row["incarnations"] == 1:
+            break
+        say(task, f"ran on {row['incarnations']} worker incarnations: running it again")
+        with lock, (root / "rows-discarded.jsonl").open("a") as f:
+            f.write(json.dumps(row) + "\n")
     with lock, (root / "rows.jsonl").open("a") as f:
         f.write(json.dumps(row) + "\n")
     say(task, f"success={row['success']} rewards={list(row['rewards'].values())} "
-        f"posts={row['posts']} wall={row['wall_s']} s missing={row['missing']}")
+        f"posts={row['posts']} wall={row['wall_s']} s reruns={row['reruns']} "
+        f"incarnations={row['incarnations']} missing={row['missing']}")
     return row
 
 
@@ -170,9 +193,12 @@ def main(argv=None) -> int:
     parser.add_argument("--agents", default="1,2,4,8,16")
     parser.add_argument("--parallel", type=int, default=8, help="teams at once")
     parser.add_argument("--team-timeout", type=float, default=2400, help="s until a release")
+    parser.add_argument("--max-reruns", type=int, default=2,
+                        help="runs again of a team that ran on more than one worker (#121)")
     parser.add_argument("--root", type=Path, default=REPO / ".flock" / "s3-sweep")
     parser.add_argument("--bucket", default="lewtun/s3-aggregation-sweep",
-                        help="private bucket for the runs' state")
+                        help="private bucket for the runs' state (a new one per root: a "
+                             "swarm's name is used once in a bucket)")
     parser.add_argument("--namespace", default="lewtun")
     parser.add_argument("--dataset", help="private dataset for the run directories")
     parser.add_argument("--prefix", default="grid", help="folder in the dataset")
