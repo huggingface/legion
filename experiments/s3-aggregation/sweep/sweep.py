@@ -25,6 +25,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -40,7 +41,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 MODEL = "Qwen/Qwen3.5-27B"
 SECRET = re.compile(r"hf_[A-Za-z0-9]{30,}")
-lock = threading.Lock()
+lock, init_lock = threading.Lock(), threading.Lock()
 
 
 def load(name: str, path: Path):
@@ -119,14 +120,25 @@ def attempt(args, root: Path, secrets: Path, problem: int, n: int, name: str) ->
     """One run of a team as swarm `name`: its row, or None when it could not start."""
     run_dir, src = root / "runs" / name, root / "src" / name
     if run_dir.exists():
-        say(name, "has a run directory but no row: remove", run_dir, "to run it again")
-        return None
+        if any((run_dir / "launch").glob("*.env")):  # a worker ran: look before running again
+            say(name, "has a run directory but no row: remove", run_dir, "to run it again")
+            return None
+        shutil.rmtree(run_dir)  # init failed before: nothing ran
     started = time.time()
     write_experiment(src, problem, n, name, args.urls, args.model)
-    init = flock(run_dir, "init", str(run_dir), "--from", str(src), "--profile",
-                 str(profile(root, n)), "--secrets", str(secrets))
-    if init.returncode != 0:
-        say(name, "init failed:", init.stdout[-600:], init.stderr[-600:])
+    log = root / "logs" / f"{name}-init.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    for tries in range(3):
+        with init_lock:  # one at a time: concurrent inits race on the bucket's write check
+            init = flock(run_dir, "init", str(run_dir), "--from", str(src), "--profile",
+                         str(profile(root, n)), "--secrets", str(secrets))
+        log.write_text(init.stdout + init.stderr)
+        if init.returncode == 0:
+            break
+        time.sleep(10 * (tries + 1))
+    else:
+        failed = [x for x in init.stdout.splitlines() if x.startswith("FAIL")]
+        say(name, "init failed 3 times:", failed or init.stdout[-300:], "(log:", log, ")")
         return None
     say(name, "launching")
     launch = flock(run_dir, "launch", str(run_dir / "experiment"))
