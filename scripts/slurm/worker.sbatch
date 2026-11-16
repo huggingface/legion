@@ -122,6 +122,11 @@ if [ "${FLOCK_HARNESS:-}" = harbor ]; then
   trap podman_cleanup EXIT
   export XDG_RUNTIME_DIR=$PODMAN_LOCAL/runtime HF_XET_CACHE=$PODMAN_LOCAL/xet GIT_TERMINAL_PROMPT=0
   mkdir -p "$XDG_RUNTIME_DIR" "$PODMAN_LOCAL/bin" || die "cannot create $PODMAN_LOCAL"
+  # `podman compose` prints a banner about its external provider on the stderr of every call,
+  # `compose exec` included, where Harbor reads a command's output
+  printf '[engine]\ncompose_warning_logs = false\n' > "$PODMAN_LOCAL/containers.conf" \
+    || die "cannot write $PODMAN_LOCAL/containers.conf"
+  export CONTAINERS_CONF_OVERRIDE=$PODMAN_LOCAL/containers.conf
   # Harbor clones task repos with git: HF_TOKEN for huggingface.co only (the upstream helper), read
   # from a 0600 file, as the worker's environment never holds it
   if [ -n "${HF_TOKEN:-}" ]; then
