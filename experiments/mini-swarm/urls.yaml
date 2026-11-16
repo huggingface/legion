@@ -1,0 +1,27 @@
+# mini-swarm on a model server you run: the same three agents, each in a rootless podman
+# container, calling an OpenAI-compatible server (by default at this machine's localhost), with a
+# local board. Recipes (vLLM or Ollama, and the HF cluster): docs/open-models.md.
+name: ${RUN_NAME:-mini-swarm-urls}
+model: ${MODEL:-Qwen/Qwen3.5-0.8B}                  # the name the server serves
+naming: consecutive-id                              # agent-001..003: the task's test expects agent-NNN
+inference:
+  urls:
+    - ${SERVER_URL:-http://localhost:8000/v1}       # localhost: podman agents reach it as host.containers.internal
+task:
+  repo: https://huggingface.co/datasets/HuggingFaceSwarms/mini-swarm
+  selector: mini-swarm
+  revision: d0e1fee0f1036a80d5400d67f7fad9143668ba94
+agents:
+  count: 3
+resources:
+  message_board:                                    # on this machine: a socket mounted into each container
+environment:
+  backend: podman
+workers: {agents_per_worker: 3, turn_timeout: 10m}
+loop:
+  prompt: Continue the task until it is complete, then stop.
+  every: turn_end
+  while: {until: 8m, max_rounds: 3}
+limits:
+  run_timeout_seconds: 600
+  agent_max_turns: 20

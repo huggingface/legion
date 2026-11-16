@@ -76,8 +76,7 @@ worker and CLI read nothing else, and `tests/test_registry.py` checks every entr
 
 - **Harness**: write `src/flock/worker/adapters/<name>.py` with a class implementing
   `HarnessAdapter` (`adapters/base.py`) and a `make_adapter(workdir, name, spec)` function, and
-  add a `HARNESSES` entry (its import path, the provider `type` it needs, the wire API
-  preflight probes, the instructions file name, whether it sends a model's `extra`).
+  add a `HARNESSES` entry (its import path and the wire API preflight probes).
 - **Compute backend**: write `src/flock/controller/<name>.py` with a `JobsClient`
   (`controller/jobs.py`) and a `<name>_jobs_client(env, dep, data_dir)` function, and add a
   `COMPUTE` entry (`compute.kind` / `FLOCK_COMPUTE` name -> that function). Every kind but
@@ -167,22 +166,27 @@ more on SIGTERM, and a new controller restores them before it opens the store
 
 ### Spec
 
-A swarm spec (`SwarmSpec`) names the swarm, its compute, namespace and bucket, `providers:` and
-`models:`, and its `types:`; `flock launch` writes it from a Harbor spec (README, docs/local.md).
-Each type sets `harness: harbor`, its `harbor:` block (written by the compile step), its model,
-`replicas`, packing (`agents_per_worker` 50, `max_working_per_worker` 20), lifetime, `workdir`,
+A swarm spec (`SwarmSpec`) names the swarm, its compute, namespace and bucket, its `inference:`
+block and its `types:`; `flock launch` writes it from a Harbor spec (README, docs/local.md).
+Each type sets `harness: harbor`, its `harbor:` block (written by the compile step), its model
+(and optionally its own `inference` and its `pricing`), `replicas`, packing (`agents_per_worker` 50, `max_working_per_worker` 20), lifetime, `workdir`,
 `worker` knobs, `loop`, `spawn` and `resume_prompt`. The blocks inside the spec are `extra: forbid`
 (an unknown key is refused); `SwarmSpec` and `TypeSpec` themselves drop unknown keys.
 
-### Providers
+### Inference
 
-Open models (vLLM, the HF router, any OpenAI-compatible server) are reached through
-`providers:` (field names shared with swarmlab); `types.<t>.model` is an alias under `models:`
-or `<provider>:<model id>`. Apply pins the resolved model and its `[input, output, cached]`
-price into the spec (`types.<t>.resolved_model`), adds the provider key to the type's job
-secrets, and preflight probes each model with a tool call. `providers.<name>.max_working` caps
-the agents of the swarm in a turn on that provider, enforced at prompt admission. How-to and
-fields: docs/open-models.md.
+`types.<t>.model` is a Hub id (with `urls`, the name the servers serve) and one `inference` block
+(`Inference`) says where it runs: the HF router (`hf_router`, the default; flock sends
+`<model>:<provider>`) or OpenAI-compatible servers you run (`urls`, each agent calling one by
+rendezvous hashing). The swarm's block serves every type that does not set its own. Validation
+pins each type's block and `[input, output, cached]` price into the spec
+(`types.<t>.resolved_model`, under the block's name: `inference` or `types.<t>.inference`), and
+the apply checks the model against each endpoint's `GET /models` and pins the context window it
+is served with (`controller/inference.py`), which Pi's model config and `flock status` get. The
+block's key goes into the type's job secrets, preflight probes each model with a tool call, and
+`max_working` caps the agents of the swarm in a turn on the block, enforced at prompt admission.
+`flock update` may change a running Harbor type's block: new `urls` reach each agent at its next
+turn. How-to and fields: docs/open-models.md.
 
 ### States
 
@@ -211,7 +215,7 @@ proxy may still require its own authentication.
 | PUT | `/swarms/{swarm}` | apply a spec |
 | GET | `/swarms` | list swarms |
 | POST, GET | `/swarms/{swarm}/tools[/{version}]` | upload / fetch the run's packed tools and resources folders |
-| POST | `/swarms/{swarm}/preflight` | probe each provider-backed model |
+| POST | `/swarms/{swarm}/preflight` | probe each model on its inference block |
 | GET, DELETE | `/swarms/{swarm}` | spec and aggregates; drain and remove everything |
 | GET | `/swarms/{swarm}/agents` | paginated agent list |
 | GET | `/agents/{name}` | one agent's status |

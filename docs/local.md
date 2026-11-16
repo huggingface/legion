@@ -28,9 +28,7 @@ has more; experiments/mini-swarm/spec.yaml adds a Space board and a loop, on hf-
 
 ```yaml
 name: hello
-model: huggingface/moonshotai/Kimi-K2.5
-inference: {base_url: https://router.huggingface.co/v1, api_key_env: HF_TOKEN,
-            api_format: openai_chat_completions}
+model: moonshotai/Kimi-K2.5             # on the HF router (the default inference)
 task:
   repo: https://huggingface.co/datasets/harborframework/terminal-bench-2.1
   dataset: terminal-bench-2.1@2.1.0

@@ -72,8 +72,8 @@ $ flock update my-experiment --env runs/demo/run.env --ref origin/main --check
   integer 20); otherwise it is plain text. Keys and prompt files are not substituted. An unset
   variable without a default refuses the spec, naming every such variable. `$${` is a literal
   `${` (any other `$$` stays as written); `${WORLD_HOST}` is always left for the controller
-  (docs/slurm.md), even when the environment sets it. `providers.*.base_urls` also takes a
-  comma-separated string, so `base_urls: ${OPENAI_BASE_URLS:-}` works (empty: none).
+  (docs/slurm.md), even when the environment sets it. `inference.urls` also takes a
+  comma-separated string, so `urls: ${VLLM_URLS}` works.
 - `--ref GIT_REF[:PATH]` (apply and update) exports the repo holding the given folder at
   `GIT_REF` (`git archive`) into a temp dir and reads the spec from there: the folder's own
   path in the repo, or `PATH` (repo-relative, a folder or a spec file). `--env` files are read
@@ -230,7 +230,8 @@ is a crash at once, without waiting for `worker_dead_after`. Raise the keys with
 | other type fields (`max_turns`, `max_budget_usd`, `turn_timeout`, ...) | the next turn boundary |
 | `compute.worker_unknown_after`, `worker_dead_after`, `crash_backoff` | at once (the controller) |
 | `compute.kind`, `swarm` | refused |
-| a Harbor spec's `task`, `tools`, `resources`, `environment`, `inference`, `model`, `team_file`, `role_file`, `limits.agent_*` or `limits.trial_hours` (its roles have agents) | refused: the workers prepared them at launch. Counts, loops, `workers:` and the run's limits change as above. A task branch that moved since the launch is not a change: the run keeps its pinned revision |
+| a Harbor spec's `inference` | `urls` and the context window at each agent's next turn; the rest (`hf_router`, `api_key_env`, `reasoning_effort`) at its next Trial; `max_working` at once (the controller) |
+| a Harbor spec's `task`, `tools`, `resources`, `environment`, `model`, `team_file`, `role_file`, `limits.agent_*` or `limits.trial_hours` (its roles have agents) | refused: the workers prepared them at launch. Counts, loops, `workers:` and the run's limits change as above. A task branch that moved since the launch is not a change: the run keeps its pinned revision |
 
 A turn boundary is a prompt that starts a new turn. A prompt that joins a turn in flight
 changes nothing until that turn ends. Changed type specs reach the workers in the
