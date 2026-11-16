@@ -179,6 +179,10 @@ class Trial(FakeTrial):
             await self.fakes.verify_gate.wait()
         self.verified = True
         self.result.verifier_result = VerifierResult(rewards={"reward": 1.0})
+        trial_dir = self.config.trials_dir / self.config.trial_name  # as Harbor leaves it
+        (trial_dir / "verifier").mkdir(parents=True, exist_ok=True)
+        (trial_dir / "verifier" / "reward.txt").write_text("1")
+        (trial_dir / "result.json").write_text(self.result.model_dump_json())
         return self.result
 
 

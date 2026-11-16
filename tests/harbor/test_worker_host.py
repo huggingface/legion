@@ -4,6 +4,7 @@ environment runs them) overlap instead of queueing on the default pool. Board ag
 whichever worker their Trial starts."""
 
 import asyncio
+import json
 import os
 import shutil
 import threading
@@ -176,6 +177,54 @@ async def test_twenty_agents_share_the_host_and_their_sandbox_commands_overlap(w
     assert all(t.verified for t in world.trials) and not adapters[0].trial_status()["alive"]
     await host.close()
     assert fake.stops == 1
+
+
+EXPORTING = '''
+class Resource:
+    def __init__(self, options, *, state_dir, agents, secrets):
+        self.metadata = {}
+
+    async def start(self):
+        pass
+
+    def bind(self, name):
+        return {}
+
+    async def wait(self):
+        import asyncio
+        await asyncio.Event().wait()
+
+    async def export(self, directory):
+        (directory / "board.jsonl").write_text("{}\\n")
+        return {"board": "board.jsonl"}
+
+    async def stop(self):
+        pass
+'''
+
+
+async def test_a_trials_grading_and_the_exports_outlive_the_worker(world, tmp_path, monkeypatch):
+    """FLOCK_RESULTS_DIR (a Slurm worker's <run dir>/results, on the shared disk): each ended
+    Trial's result and verifier files and, at exit, the resources' exports are copied there, so
+    a run is scored after the node's WORK_ROOT is gone."""
+    for key, value in (("FLOCK_RESULTS_DIR", str(tmp_path / "results")), ("SWARM", "host"),
+                       ("WORKER_ID", "host-agent-w0000")):
+        monkeypatch.setenv(key, value)
+    (tmp_path / "resources" / "exporting.py").write_text(EXPORTING)
+    host, (a, *_) = agents(tmp_path, resources="{fake: {mount: false}, exporting: {}}")
+    await a.start(a.workdir, None, a.spec)
+    events = a.events()
+    await a.send("go")
+    await read(events, "turn_ended")
+    await a.close()
+    await host.close()
+    shutil.rmtree(tmp_path / "work")  # the node's WORK_ROOT
+    trial = tmp_path / "results" / "host" / "agent-0000" / "trials" / "host-agent-0000-t1"
+    assert json.loads((trial / "result.json").read_text())["verifier_result"] == {
+        "rewards": {"reward": 1.0}}
+    assert (trial / "verifier" / "reward.txt").read_text() == "1"
+    export = tmp_path / "results" / "host" / "host-agent-w0000" / "resources" / "exporting"
+    assert (export / "board.jsonl").read_text() == "{}\n"
 
 
 async def test_a_failed_prepare_is_retried_by_the_next_trial(world, tmp_path):

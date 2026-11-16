@@ -354,8 +354,15 @@ class HarborAdapter:
 
     def _ended(self, trial: Any, task: asyncio.Task) -> None:
         """Done callback of a Trial's run(): roll over after trial_hours, report a failure
-        (now, or at the next burst)."""
+        (now, or at the next burst). Its results go to the results dir too, when there is
+        one (flock.worker.harbor)."""
+        from flock.worker.harbor import TRIAL_RESULTS, keep_results, results_dir
+
         self.result = _result(task)
+        if (results := results_dir()) is not None:
+            name = trial.config.trial_name
+            keep_results(trial.config.trials_dir / name, results / self.agent / "trials" / name,
+                         TRIAL_RESULTS)
         if trial is not self.trial or not trial.agent.channel.ready.is_set():
             return  # superseded, or never ready: whoever started it reports that
         try:  # unmounted (hf-sandbox): Harbor's download at the end beats FlockPi's last one
