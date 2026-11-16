@@ -41,7 +41,7 @@ class Proxy:
                 return httpx.Response(401)
             if job not in self.up:
                 return httpx.Response(503)
-            served = self.hub.jobs[job]["command"][2]
+            served = self.hub.jobs[job]["command"][2] if job in self.hub.jobs else MODEL
             return httpx.Response(200, json={"object": "list", "data": [
                 {"id": served, "object": "model", "max_model_len": 131072}]})
         return httpx.MockTransport(handle)
@@ -94,7 +94,9 @@ def test_launch_wait_pin_reattach_and_cancel(controller, hub, proxy, store, cloc
         "--max-model-len", "131072"]
     assert (run["image"], run["flavor"], run["expose"], run["timeout"], run["namespace"]) == (
         DEFAULT_VLLM_IMAGE, "a100-large", [8000], 7200, "me")  # namespace: the token's account
-    assert run["labels"] == {"swarm": "s", "inference": row["group"], "replica": "0"}
+    deadline = int(clock().timestamp()) + 20 * 60 + 300  # startup_timeout, then the apply's
+    assert run["labels"] == {"swarm": "s", "inference": row["group"], "replica": "0",
+                             "retire": str(deadline)}
     assert (row["state"], row["stage"], row["namespace"]) == ("starting", "SCHEDULING", "me")
 
     servers = app.state.servers
@@ -242,7 +244,16 @@ def test_failures_stop_the_apply_and_cancel(controller, hub, proxy, clock):
     assert hub.cancelled == [job]
 
 
-def up(app, c, hub, proxy, body) -> list[str]:
+
+
+# ---------------------------------------------------------------- the cleanup rule: a server job
+# the applied spec does not use goes once the deadline in its `retire` label has passed
+
+GRACE = 30 * 60  # turn_timeout: what draining turns get
+WAIT = 20 * 60 + 300  # startup_timeout, then the apply's margin
+
+
+def up(app, c, hub, proxy, body, apply: bool = True) -> list[str]:
     """Start `body`'s servers, let the new jobs run and answer, apply it: the new jobs' ids."""
     before = len(hub.runs)
     c.post("/swarms/s/servers", json=body)
@@ -251,8 +262,9 @@ def up(app, c, hub, proxy, body) -> list[str]:
         hub.set_stage(job, "RUNNING")
         proxy.up.add(job)
     app.state.servers.tick()
-    r = c.put("/swarms/s", json=body)
-    assert r.status_code == 200, r.text
+    if apply:
+        r = c.put("/swarms/s", json=body)
+        assert r.status_code == 200, r.text
     return jobs
 
 
@@ -260,113 +272,135 @@ def running(hub) -> set[str]:
     return {j for j, x in hub.jobs.items() if x["status"]["stage"] in ("SCHEDULING", "RUNNING")}
 
 
-def test_a_failed_start_cancels_what_it_started_and_keeps_what_ran(controller, hub):
-    """A start that fails part-way (a quota on replica 2) cancels the replica it started, and
-    the group keeps the replica that already ran, so deleting the swarm cancels it."""
-    _, c = controller()
-    two = spec({"hf_jobs": {**HF_JOBS, "replicas": 2}, "max_working": 3})
-    hub.runs_left = 1
-    [row] = c.post("/swarms/s/servers", json=two).json()
+def later(app, clock, seconds: float) -> None:
+    clock.advance(seconds)
+    app.state.servers.tick()
+
+
+B = {"hf_jobs": {**HF_JOBS, "flavor": "a100x4"}, "max_working": 3}  # another group
+TWO = {"hf_jobs": {**HF_JOBS, "replicas": 2}, "max_working": 3}  # the same group, 2 replicas
+
+
+def test_a_restart_judges_jobs_by_the_spec_applied_now(controller, hub, proxy, clock):
+    """A restarted controller sweeps against the spec applied at each sweep (an update after
+    the restart counts), keeps a dropped group for its grace, and never touches worker jobs."""
+    app, c = controller()
+    [a] = up(app, c, hub, proxy, spec())
+    worker = hub.run_job(image="w", command=["flock-worker"], namespace="me", labels={
+        "swarm": "s", "type": "agent", "worker": "s-agent-w0000"}).id
+    app, c = controller()
+    app.state.servers.tick()
+    [b] = up(app, c, hub, proxy, spec(B))  # updated before any sweep of the old group
+    later(app, clock, GRACE - 60)
+    assert running(hub) == {a, b, worker}
+    later(app, clock, 61)
+    assert running(hub) == {b, worker}
+    later(app, clock, 24 * 3600)
+    assert running(hub) == {b, worker}
+
+
+def test_a_failed_start_leaves_nothing_running(controller, hub, clock):
+    """A start refused part-way cancels what it began, and a cancel that fails is tried again
+    at the next sweep; jobs the group already had stay tracked, so a stop cancels them."""
+    app, c = controller()
+    hub.runs_left, hub.cancel_errors = 1, 2
+    [row] = c.post("/swarms/s/servers", json=spec(TWO)).json()
     assert row["state"] == "failed" and "quota" in row["error"]
-    assert running(hub) == set()  # replica 0 was cancelled again
+    assert running(hub) == {hub.runs[0]["id"]}  # the rollback's cancel failed
+    later(app, clock, 31)
+    assert running(hub) == {hub.runs[0]["id"]}  # and the first sweep's
+    later(app, clock, 31)
+    assert running(hub) == set()
 
     hub.runs_left = None
     [kept] = [r["job_id"] for r in c.post("/swarms/s/servers", json=spec()).json()]
     hub.runs_left = 0
-    rows = c.post("/swarms/s/servers", json=two).json()
+    rows = c.post("/swarms/s/servers", json=spec(TWO)).json()
     assert [(r["job_id"], r["state"]) for r in rows] == [(kept, "failed")]
     assert c.delete("/swarms/s/servers").json()["cancelled"] == [kept]
 
 
-def test_a_refused_update_cancels_the_servers_it_started(controller, hub, proxy, store, tmp_path,
-                                                        monkeypatch):
-    """`flock update` starts the servers of a changed block; when the update is then refused
-    (here a naming change), those are cancelled and the applied spec's keep serving."""
-    from flock.ops import SpecError
+def test_an_update_that_does_not_apply_leaves_the_applied_servers(controller, hub, proxy, clock):
+    """What an update starts and does not apply goes after the apply's margin; the applied
+    spec's servers stay, more replicas or fewer, and a group it reverts to keeps its grace."""
+    app, c = controller()
+    [r0] = up(app, c, hub, proxy, spec())
+    up(app, c, hub, proxy, spec(B), apply=False)
+    [r1] = up(app, c, hub, proxy, spec(TWO), apply=False)
+    later(app, clock, 300 + 1)
+    assert running(hub) == {r0}
 
-    from .conftest import write_spec
+    [r1] = up(app, c, hub, proxy, spec(TWO))  # two replicas applied; one refused
+    up(app, c, hub, proxy, spec(), apply=False)
+    later(app, clock, 24 * 3600)
+    assert running(hub) == {r0, r1}
 
+    [b] = up(app, c, hub, proxy, spec(B))  # r0, r1 drain for the grace
+    up(app, c, hub, proxy, spec(TWO), apply=False)  # a revert, refused
+    later(app, clock, GRACE - 60)
+    assert running(hub) == {r0, r1, b}
+    later(app, clock, 61)
+    assert running(hub) == {b}
+
+
+def test_a_restart_keeps_the_deadline_of_servers_the_spec_dropped(controller, hub, proxy, clock):
+    """Servers of a block the spec swapped for urls keep their deadline across a restart, and
+    deleting the swarm cancels them, wherever they ran."""
     app, c = controller()
     [old] = up(app, c, hub, proxy, spec())
-    wire(monkeypatch, app)
-
-    def wait(_):  # each poll of `flock update`: the new job runs and answers
-        for job in running(hub) - proxy.up:
-            hub.set_stage(job, "RUNNING")
-            proxy.up.add(job)
-        app.state.servers.tick()
-
-    monkeypatch.setattr(ops, "_sleep", wait)
-    new = SwarmSpec.model_validate({**spec({"hf_jobs": {**HF_JOBS, "flavor": "a100x4"},
-                                            "max_working": 3}), "naming": "words"})
-    with pytest.raises(SpecError, match="naming"):
-        ops.update(Client(), new, write_spec(tmp_path / "spec.yaml", new), preflight=False)
+    proxy.up.add("fake.invalid")
+    urls = spec({"urls": ["http://fake.invalid/v1"], "api_key_env": "HF_TOKEN"})
+    assert c.put("/swarms/s", json=urls).status_code == 200
+    app, c = controller()
+    later(app, clock, GRACE - 60)
     assert running(hub) == {old}
-    pinned = store.get_swarm("s")["spec"].types["agent"].resolved_model.inference.urls
-    assert pinned == [f"https://{old}--8000.hf.jobs/v1"]
-
-
-def test_a_restart_retries_a_failed_lookup(controller, hub, proxy):
-    """A restarted controller whose first lookup of the Hub's jobs fails tries again at the
-    next tick (and starts nothing), so deleting the swarm still cancels the job."""
-    app, c = controller()
-    [job] = up(app, c, hub, proxy, spec())
-    app, c = controller()
-    hub.list_errors = 1
-    app.state.servers.tick()
-    assert c.get("/swarms/s/servers").json() == []
-    app.state.servers.tick()
-    assert [(r["job_id"], r["state"]) for r in c.get("/swarms/s/servers").json()] == [
-        (job, "ready")]
-    assert c.delete("/swarms/s").json()["cancelled"] == [job] and len(hub.runs) == 1
-
-
-def test_a_restart_keeps_retiring_the_old_servers(controller, hub, proxy, clock):
-    """A controller restarted while a changed block's old servers drain cancels them when the
-    grace ends; deleting the swarm before that cancels them too."""
-    app, c = controller()
-    [old] = up(app, c, hub, proxy, spec())
-    [new] = up(app, c, hub, proxy, spec({"hf_jobs": {**HF_JOBS, "flavor": "a100x4"},
-                                         "max_working": 3}))
-    app, c = controller()  # restarted: it only knows the spec's servers
-    app.state.servers.tick()
-    assert running(hub) == {old, new}
-    clock.advance(30 * 60)  # turn_timeout
-    app.state.servers.tick()
-    assert running(hub) == {new}
-
-    [old] = up(app, c, hub, proxy, spec())  # back to the first block: `new` drains now
-    app, c = controller()
-    app.state.servers.tick()
-    assert sorted(c.delete("/swarms/s").json()["cancelled"]) == sorted([old, new])
+    later(app, clock, 61)
     assert running(hub) == set()
 
-
-def test_fewer_replicas_retire_the_extra_ones(controller, hub, proxy, store, clock):
-    """Two replicas down to one: the apply pins one URL, and the second job serves the draining
-    turns until turn_timeout, then is cancelled."""
+    [old] = up(app, c, hub, proxy, spec())
+    assert c.put("/swarms/s", json=urls).status_code == 200
     app, c = controller()
-    jobs = up(app, c, hub, proxy, spec({"hf_jobs": {**HF_JOBS, "replicas": 2}, "max_working": 3}))
+    app.state.servers.tick()
+    assert c.delete("/swarms/s").json()["cancelled"] == [old]
+
+
+def test_replicas_that_come_back_within_the_grace_stay(controller, hub, proxy, store, clock):
+    """Two replicas, then one (the apply pins one URL; the second serves the draining turns),
+    then two again within the grace: the second is the spec's again and stays."""
+    app, c = controller()
+    jobs = up(app, c, hub, proxy, spec(TWO))
     up(app, c, hub, proxy, spec())
     pinned = store.get_swarm("s")["spec"].types["agent"].resolved_model.inference.urls
     assert pinned == [f"https://{jobs[0]}--8000.hf.jobs/v1"]
-    assert running(hub) == set(jobs)
-    clock.advance(30 * 60)
-    app.state.servers.tick()
-    assert running(hub) == {jobs[0]}
-    assert [r["job_id"] for r in c.get("/swarms/s/servers").json()] == [jobs[0]]
+    up(app, c, hub, proxy, spec(TWO))
+    later(app, clock, GRACE + 1)
+    assert running(hub) == set(jobs) and len(hub.runs) == 2
+    assert [r["state"] for r in c.get("/swarms/s/servers").json()] == ["ready", "ready"]
 
 
-def test_the_startup_deadline_holds_when_the_hub_does_not_answer(controller, hub, clock):
+def test_types_sharing_a_group_get_its_largest_replica_count(controller, hub, proxy, store):
+    app, c = controller()
+    one = {**HB, "model": MODEL, "replicas": 1, "inference": {"hf_jobs": HF_JOBS, "max_working": 3}}
+    two = {**one, "inference": TWO}
+    jobs = up(app, c, hub, proxy, spec(None, a=one, b=two))
+    urls = [f"https://{j}--8000.hf.jobs/v1" for j in jobs]
+    assert len(jobs) == 2 and all(
+        ts.resolved_model.inference.urls == urls
+        for ts in store.get_swarm("s")["spec"].types.values())
+
+
+def test_a_failed_group_s_jobs_are_cancelled_until_they_are_gone(controller, hub, clock):
+    """A startup that fails cancels its jobs; when the Hub refuses the cancel, the next sweep
+    tries again. The startup deadline holds when the Hub does not answer."""
     app, c = controller()
     [row] = c.post("/swarms/s/servers", json=spec()).json()
-    hub.inspect_errors = 100
-    app.state.servers.tick()
-    assert c.get("/swarms/s/servers").json()[0]["state"] == "starting"
-    clock.advance(20 * 60 + 1)  # startup_timeout
-    app.state.servers.tick()
+    hub.set_stage(row["job_id"], "RUNNING")
+    hub.inspect_errors, hub.cancel_errors = 100, 2
+    later(app, clock, 20 * 60 + 1)  # startup_timeout
     [row] = c.get("/swarms/s/servers").json()
     assert row["state"] == "failed" and "not ready after startup_timeout 20m" in row["error"]
+    assert running(hub) == {row["job_id"]}
+    later(app, clock, 31)
     assert running(hub) == set()
 
 
@@ -379,8 +413,7 @@ def test_an_old_failure_leaves_the_status(controller, hub, proxy):
     [failed] = [r["job_id"] for r in c.post("/swarms/s/servers", json=spec()).json()]
     hub.set_stage(failed, "ERROR", "exit code 1")
     app.state.servers.tick()
-    [new] = up(app, c, hub, proxy, spec({"hf_jobs": {**HF_JOBS, "flavor": "a100x4"},
-                                         "max_working": 3}))
+    [new] = up(app, c, hub, proxy, spec(B))
     status = c.get("/swarms/s").json()["status"]
     assert [(s["job_id"], s["state"]) for s in status["servers"]] == [(new, "ready")]
     assert not [r for r in verdict(status, None)["reasons"] if "server" in r]

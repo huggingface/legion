@@ -478,7 +478,7 @@ def update(api: Client, spec: SwarmSpec, spec_file: str, *, sources: dict[str, s
     `sources` (from `read_spec`) names the origins for `check`; `source` replaces the
     `X-Flock-Source` header (--ref). Without `check`, `hf_jobs` servers the spec needs and that
     do not run yet (a changed block or model) are started and waited for first (`say` gets the
-    progress); the apply then stops the ones it no longer uses."""
+    progress); the controller cancels the ones no applied spec uses (controller/servers.py)."""
     from flock.live import diff_specs, keep_replicas, world_tool_changes
 
     if replicas not in ("keep", "spec"):
@@ -492,66 +492,59 @@ def update(api: Client, spec: SwarmSpec, spec_file: str, *, sources: dict[str, s
         raise SpecError([(f"no swarm {spec.swarm!r} is running on this controller: start it "
                           "with `flock launch`") if e.status == 404
                          else f"error {e.status}: {e.detail}"]) from None
-    servers = has_servers(spec) and not check
-    out: dict[str, Any] = {"applied": False}
-    try:
-        if servers:
-            try:
-                start_servers(api, spec, say, cancel=False)  # the running ones serve on
-            except ClientError as e:
-                raise SpecError([f"servers: error {e.status}: {e.detail}"]) from None
-        if preflight is None:  # --check probes every model; an update the ones it adds or moves
-            preflight = (bool(probe_targets(spec) - probe_targets(old))
-                         or (check and bool(unprobed(spec))))
-        probed: list[str] = []
-        if preflight:
-            try:
-                rep = api.preflight(spec)
-            except ClientError as e:
-                raise SpecError([f"preflight error {e.status}: {e.detail}"]) from None
-            probed = [f"preflight {x}" for x in preflight_lines(rep["results"])]
-            bad = [line for line, x in zip(probed, rep["results"], strict=True)
-                   if not x["ok"] and (strict or not x.get("unverified"))]
-            if bad:
-                raise SpecError([*bad, ("preflight failed: not updating (fix the provider or pass "
-                                        "--skip-preflight)")])
-        spec.tools_version = None
-        names: tuple[list[str], list[str]] | None = None
-        if bundle is not None:
-            try:
-                up = api.upload_tools(spec.swarm, bundle.data)
-            except ClientError as e:
-                raise SpecError([f"refused: tools upload ({e.status}): {e.detail}"]) from None
-            spec.tools_version = up["version"]
-            if spec.tools_version != old.tools_version:
-                listed = api.tool_bundles(spec.swarm)
-                before = next((b["tools"] for b in listed if b["version"] == old.tools_version), [])
-                names = (before, up["tools"])
-        kept = keep_replicas(old, spec, ramps_only=replicas == "spec")
-        keep_pins(old, spec)
-        lines = diff_specs(old, spec, names)
-        if check:  # `path: old -> new (spec.yaml:41 | run.env WORKER_MEM | default)`
-            lines = [f"{x} ({source_of(sources or {}, x.split(':', 1)[0])})" if ": " in x
-                     and not x.startswith(("tools:", "prompts changed:")) else x for x in lines]
-        out = {"warnings": warnings, "probed": probed if check else [], "kept": kept,
-               "diff": lines, "deletes": [], "world_tools": None, "applied": False}
-        if not lines and not check:
-            return out
+    if has_servers(spec) and not check:
         try:
-            reply = api.update(spec, check=check, source=source or source_header(spec_file))
+            start_servers(api, spec, say, cancel=False)  # the running ones serve on
         except ClientError as e:
-            raise SpecError([f"refused: {e.detail}"]) from None
-        if check:  # the stored spec is untouched: the new manifest is in the reply
-            new = SwarmSpec.model_validate(reply["spec"])
-            out["deletes"] = reply.get("deletes", [])
-        else:
-            new = SwarmSpec.model_validate(api.swarm(spec.swarm)["spec"])
-        out["world_tools"], out["applied"] = world_tool_changes(old, new), not check
+            raise SpecError([f"servers: error {e.status}: {e.detail}"]) from None
+    if preflight is None:  # --check probes every model; an update the ones it adds or moves
+        preflight = (bool(probe_targets(spec) - probe_targets(old))
+                     or (check and bool(unprobed(spec))))
+    probed: list[str] = []
+    if preflight:
+        try:
+            rep = api.preflight(spec)
+        except ClientError as e:
+            raise SpecError([f"preflight error {e.status}: {e.detail}"]) from None
+        probed = [f"preflight {x}" for x in preflight_lines(rep["results"])]
+        bad = [line for line, x in zip(probed, rep["results"], strict=True)
+               if not x["ok"] and (strict or not x.get("unverified"))]
+        if bad:
+            raise SpecError([*bad, ("preflight failed: not updating (fix the provider or pass "
+                                    "--skip-preflight)")])
+    spec.tools_version = None
+    names: tuple[list[str], list[str]] | None = None
+    if bundle is not None:
+        try:
+            up = api.upload_tools(spec.swarm, bundle.data)
+        except ClientError as e:
+            raise SpecError([f"refused: tools upload ({e.status}): {e.detail}"]) from None
+        spec.tools_version = up["version"]
+        if spec.tools_version != old.tools_version:
+            listed = api.tool_bundles(spec.swarm)
+            before = next((b["tools"] for b in listed if b["version"] == old.tools_version), [])
+            names = (before, up["tools"])
+    kept = keep_replicas(old, spec, ramps_only=replicas == "spec")
+    keep_pins(old, spec)
+    lines = diff_specs(old, spec, names)
+    if check:  # `path: old -> new (spec.yaml:41 | run.env WORKER_MEM | default)`
+        lines = [f"{x} ({source_of(sources or {}, x.split(':', 1)[0])})" if ": " in x
+                 and not x.startswith(("tools:", "prompts changed:")) else x for x in lines]
+    out: dict[str, Any] = {"warnings": warnings, "probed": probed if check else [], "kept": kept,
+                           "diff": lines, "deletes": [], "world_tools": None, "applied": False}
+    if not lines and not check:
         return out
-    finally:  # servers it started that the applied spec does not use (a refusal, Ctrl-C)
-        if servers and not out["applied"]:
-            with contextlib.suppress(Exception):
-                api.stop_servers(spec.swarm, unused=True)
+    try:
+        reply = api.update(spec, check=check, source=source or source_header(spec_file))
+    except ClientError as e:
+        raise SpecError([f"refused: {e.detail}"]) from None
+    if check:  # the stored spec is untouched: the new manifest is in the reply
+        new = SwarmSpec.model_validate(reply["spec"])
+        out["deletes"] = reply.get("deletes", [])
+    else:
+        new = SwarmSpec.model_validate(api.swarm(spec.swarm)["spec"])
+    out["world_tools"], out["applied"] = world_tool_changes(old, new), not check
+    return out
 
 
 def stop(api: Client, swarm: str, *, types: list[str] | None = None,

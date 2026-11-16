@@ -219,10 +219,24 @@ From there on everything is the `urls` path: the model check, the context window
 servers, preflight and Pi's model config. The run's end cancels the jobs: `flock stop --delete`,
 or a local run that ends by itself. `flock update` of a changed `hf_jobs` block or model starts
 its new servers first. The apply then pins them, and, as for any block change, the type's
-workers restart on them. The old servers serve the draining turns and are cancelled after the
-types' longest `turn_timeout`; so are the extra jobs when `replicas` goes down. An update that is
-refused after starting servers cancels the ones the applied spec does not use. With `hf_jobs`,
-`max_working` is also the servers' `max_num_seqs`, so changing it starts new servers too.
+workers restart on them. With `hf_jobs`, `max_working` is also the servers' `max_num_seqs`, so
+changing it starts new servers too.
+
+**Cleanup is one rule**, which the controller applies to the swarm's server jobs every 30
+seconds: a job the applied spec does not use (its group, or a replica beyond the group's
+`replicas`) is cancelled once the deadline in its `retire` label has passed. The deadline sits
+on the job, so a restarted controller applies the same rule.
+
+- A new job's deadline is the time its launch or update has to apply it: `startup_timeout` plus
+  5 minutes, shortened to 5 minutes once it answers. An update that is refused or interrupted
+  thus leaves the applied servers as they were, and its own go shortly after.
+- An apply that stops using a job (another block, fewer replicas) gives it the types' longest
+  `turn_timeout`, for the turns of the agents draining from it. A reused job's deadline is only
+  ever pushed back, and a job the spec uses again keeps serving.
+- A failed group's jobs, and every job of a deleted swarm, are cancelled at once. A cancel the
+  Hub refuses is tried again at the next sweep.
+- Only jobs with an `inference` label are server jobs; the swarm's worker jobs are never
+  touched.
 
 ```text
 servers Qwen/Qwen3.8-27B (hf_jobs a100-large, namespace you, types agent, context 131072):
@@ -231,17 +245,17 @@ servers Qwen/Qwen3.8-27B (hf_jobs a100-large, namespace you, types agent, contex
 
 - **One group per model.** A vLLM server serves one model, so a role with its own `model` gets
   its own jobs: with the run's `hf_jobs` settings, or with its own if it sets its own
-  `inference` block (another flavor, say). Roles with the same model and settings share them.
+  `inference` block (another flavor, say). Roles with the same model and settings share them,
+  with the most `replicas` (and the longest `startup_timeout`) any of them asks for.
   `flock status`, `GET /swarms/{swarm}/servers` and the status page list each job by model,
   with its URL, stage, state, flavor and uptime.
 - **The job.** `vllm serve <model>` on `hf_jobs.image`, with port 8000 exposed through the jobs
   proxy (`expose=[8000]`, as `hf jobs run --expose 8000`) at `https://<job id>--8000.hf.jobs`,
   and `hf_jobs.timeout` as its `--timeout`. The jobs carry labels as workers do (`swarm`,
-  `inference`: the group's settings hash, `replica`); a restarted controller finds them by these
-  instead of starting new ones (it retries until the Hub answers), and cancels the swarm's jobs
-  of groups its spec no longer has once their drain grace is over. `flock stop --delete`
-  cancels every job labelled for the swarm, also ones a controller lost track of. The weights download inside the job, which gets no Hub token, so
-  the model must be public.
+  `inference`: the group's settings hash, `replica`, `retire`: the deadline above); a restarted
+  controller finds them by these instead of starting new ones (it retries until the Hub
+  answers). The weights download inside the job, which gets no Hub token, so the model must be
+  public.
 - **The vLLM arguments** follow trl-internal's evals config. flock sets `--host`, `--port`,
   `--served-model-name` (the Hub id) and the tool-calling flags. `vllm_args` holds every other
   flag as a `KEY=VALUE` string: `max_model_len=131072` becomes `--max-model-len 131072`, and

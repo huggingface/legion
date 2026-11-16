@@ -83,7 +83,8 @@ worker and CLI read nothing else, and `tests/test_registry.py` checks every entr
   `local` needs `bucket` and `world.url` in the spec.
 - **Server starter** (inference servers flock starts itself, like `hf_jobs`): add the block as a
   field of `Inference`, write `src/flock/controller/<name>.py` with a `Starter`
-  (`controller/servers.py`: start or reattach, check readiness, logs, stop) and a
+  (`controller/servers.py`: start or reattach, list, check readiness, logs, cancel, set a
+  job's deadline) and a
   `<name>(env)` function, and add a `SERVERS` entry (the block's key -> that function).
 
 ## Agent lifecycle
@@ -186,7 +187,9 @@ rendezvous hashing) or vLLM servers flock starts on HF Jobs (`hf_jobs`). The swa
 every type that does not set its own. For `hf_jobs` the controller starts one group of jobs per
 model before preflight (`POST /swarms/{swarm}/servers`, `controller/servers.py`), waits until
 each answers, pins their URLs into the resolved block as `urls`, reattaches to them by label
-after a restart and cancels them when the run ends; from there on it is the `urls` path. Validation
+after a restart and cancels them when the run ends; from there on it is the `urls` path. One
+rule cleans up: a server job the applied spec does not use goes once the deadline in its
+`retire` label has passed. Validation
 pins each type's block and `[input, output, cached]` price into the spec
 (`types.<t>.resolved_model`, under the block's name: `inference` or `types.<t>.inference`), and
 the apply checks the model against each endpoint's `GET /models` and pins the context window it

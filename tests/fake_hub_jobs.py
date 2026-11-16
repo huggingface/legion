@@ -2,8 +2,8 @@
 (flock.controller.hf_jobs_servers): it keeps jobs in memory and answers with the real
 `JobInfo` / `JobHardwareInfo`, built from the JSON the Jobs API returns. Tests move a job's
 stage with `set_stage`, and make the Hub fail with `runs_left` (run_job calls that succeed,
-then a quota error), `list_errors` and `inspect_errors` (the next N such calls raise). No job
-ever runs."""
+then a quota error), `list_errors`, `inspect_errors` and `cancel_errors` (the next N such calls
+raise). No job ever runs."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ class FakeHubJobs:
         self.cancelled: list[str] = []
         self.logs: dict[str, list[str]] = {}
         self.runs_left: int | None = None
-        self.list_errors = self.inspect_errors = 0
+        self.list_errors = self.inspect_errors = self.cancel_errors = 0
 
     def whoami(self) -> dict:
         return {"name": self.account, "type": "user"}
@@ -71,9 +71,16 @@ class FakeHubJobs:
                 and all((j["labels"] or {}).get(k) == v for k, v in (labels or {}).items())]
 
     def cancel_job(self, *, job_id, namespace=None) -> None:
+        if self.cancel_errors:
+            self.cancel_errors -= 1
+            raise ConnectionError("the Hub did not answer (fake)")
         self.cancelled.append(job_id)
         if self.jobs[job_id]["status"]["stage"] not in ("COMPLETED", "ERROR", "CANCELED"):
             self.set_stage(job_id, "CANCELED")
+
+    def update_job_labels(self, *, job_id, labels, namespace=None) -> JobInfo:
+        self.jobs[job_id]["labels"] = dict(labels)  # replaces them all, as the Hub does
+        return JobInfo(**self.jobs[job_id])
 
     def fetch_job_logs(self, *, job_id, namespace=None, tail=None) -> list[str]:
         return self.logs.get(job_id, [])[-(tail or 0):]

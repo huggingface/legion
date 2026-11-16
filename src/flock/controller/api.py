@@ -703,7 +703,12 @@ def create_app(
     stored swarms' running servers (a restarted controller)."""
     secret_source = os.environ if secret_source is None else secret_source
     servers = Servers(secret_source) if servers is None else servers
-    servers.stored = lambda: [sw["spec"] for sw in store.list_swarms()]  # reattached at first tick
+    # the applied specs it reattaches to (first tick) and judges server jobs by (each sweep),
+    # and where each swarm's servers ran, kept across restarts
+    servers.applied = lambda: {sw["spec"].swarm: sw["spec"] for sw in store.list_swarms()
+                               if not sw["removing"]}
+    servers.memory = (lambda swarm: store.get_control(swarm, "servers_where"),
+                      lambda swarm, where: store.put_control(swarm, "servers_where", where))
     if servers_interval is None:
         servers_interval = float(os.environ.get("FLOCK_SERVERS_INTERVAL", "10"))
     worlds = WorldHost() if worlds is None else worlds
@@ -979,6 +984,9 @@ def create_app(
             return {"dry_run": True, "spec": spec.model_dump(mode="json"),
                     "deletes": deletions(prev["spec"], spec) if prev else []}
         diff = diff_specs(prev["spec"], spec) if prev else ["created"]
+        # hf_jobs servers the spec no longer uses keep serving the turns of the agents on them
+        # (their workers drain) until their deadline, set before any sweep sees the spec
+        servers.retire_unused(spec, drain_grace(spec))
         with create_lock:  # two `flock launch` racing: one creates, the other gets 412
             if create and store.get_swarm(swarm):
                 worlds.discard(swarm)  # the candidate world this losing launch started
@@ -993,9 +1001,6 @@ def create_app(
         worlds.commit(swarm)  # a replaced world stops only now, after every check passed
         if spec.world is None or spec.world.endpoint != worlds.url(swarm):
             worlds.stop(swarm)  # the block went away or now names a url
-        # hf_jobs servers of a block or model the spec no longer uses, once the turns of the
-        # agents on them (their workers drain) are over
-        servers.prune(spec, grace=drain_grace(spec))
         return swarm_status(store, spec, clock().timestamp(), servers)
 
     # ------------------------------------------------------------- health (docs/health.md)
@@ -1121,14 +1126,9 @@ def create_app(
         return servers.status(swarm)
 
     @api.delete("/swarms/{swarm}/servers")
-    def stop_servers(swarm: str, unused: bool = False) -> dict:
-        """Cancel the swarm's servers (a launch that failed after starting them); `unused`:
-        only the ones the applied spec does not use (an update that did not apply)."""
-        if not unused:
-            return {"swarm": swarm, "cancelled": servers.stop(swarm)}
-        row = store.get_swarm(swarm)
-        return {"swarm": swarm,
-                "cancelled": servers.drop_unused(swarm, row["spec"] if row else None)}
+    def stop_servers(swarm: str) -> dict:
+        """Cancel the swarm's servers (a launch that failed after starting them)."""
+        return {"swarm": swarm, "cancelled": servers.stop(swarm)}
 
     @api.get("/swarms/{swarm}")
     def get_swarm(swarm: str) -> dict:
