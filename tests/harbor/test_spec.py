@@ -279,6 +279,8 @@ def test_compile_gives_one_harbor_type_per_role(tmp_path):
      or d.update(compute="slurm"), "HF_TOKEN is the workers' Hub token"),
     (lambda d: d["resources"]["message_board"].update(token_env="FLOCK_WORLD_ADMIN_TOKEN"),
      "FLOCK_WORLD_ADMIN_TOKEN is the world's admin secret"),
+    (lambda d: d["agents"]["roles"]["safety"].update(inference={"hf_router": {}}),
+     r"agents.roles.safety.inference.api_key_env: HF_TOKEN is the workers' Hub token"),
 ])
 def test_compile_keeps_hub_and_admin_tokens_from_agents(tmp_path, edit, error):
     data = load_spec_yaml(COMPILE)
@@ -293,6 +295,19 @@ def test_compile_keeps_hub_and_admin_tokens_from_agents(tmp_path, edit, error):
     data.pop("compute", None)
     (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
     compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
+
+
+def test_only_the_blocks_the_roles_run_on_are_checked(tmp_path):
+    """The run's block (the router, HF_TOKEN by default) is unused when every role has its own:
+    no agent gets its key, so it is not refused."""
+    data = load_spec_yaml(COMPILE)
+    data["inference"].pop("api_key_env")
+    data["agents"]["roles"]["answers"]["inference"] = {"urls": ["https://vllm.example/v1"]}
+    for name in ("team.md", "answers.md", "round.md"):
+        (tmp_path / name).write_text("x")
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    swarm = compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
+    assert set(swarm.inference_blocks()) == {"types.answers.inference", "types.safety.inference"}
 
 
 @pytest.mark.parametrize(("edit", "error"), [

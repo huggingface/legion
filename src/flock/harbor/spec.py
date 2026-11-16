@@ -297,9 +297,10 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
     # the inference key goes into every agent's container: never the token a remote worker
     # syncs the bucket and starts sandboxes with
     remote = spec.environment.backend == "hf-sandbox" or spec.compute.kind in ("slurm", "hf-jobs")
-    blocks = [("inference", spec.inference)] + [
-        (f"agents.roles.{n}.inference", r.inference) for n, r in roles.items() if r.inference]
-    for where, inference in blocks:
+    # the blocks the roles run on: a role's own, else the run's (unused when every role has one)
+    blocks = dict((f"agents.roles.{n}.inference", r.inference) if r.inference
+                  else ("inference", spec.inference) for n, r in roles.items())
+    for where, inference in blocks.items():
         if remote and inference.key_env == "HF_TOKEN":
             raise ValueError(f"{where}.api_key_env: HF_TOKEN is the workers' Hub token (bucket, "
                              "sandboxes; the router's default key) and would reach every "
