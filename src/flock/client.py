@@ -268,6 +268,20 @@ class Client:
         return self._call("POST", f"/swarms/{spec.swarm}/preflight",
                           json=spec.model_dump(mode="json"), timeout=300)
 
+    def start_servers(self, spec: SwarmSpec) -> list[dict]:
+        """Start the spec's `hf_jobs` servers (or reattach to the running ones); the controller
+        then waits for them. Returns their status rows at once."""
+        return self._call("POST", f"/swarms/{spec.swarm}/servers",
+                          json=spec.model_dump(mode="json"), timeout=120)
+
+    def servers(self, swarm: str) -> list[dict]:
+        """The swarm's servers (`ServerStatus` rows)."""
+        return self._call("GET", f"/swarms/{swarm}/servers")
+
+    def stop_servers(self, swarm: str) -> dict:
+        """Cancel the swarm's servers: {"cancelled": job ids}."""
+        return self._call("DELETE", f"/swarms/{swarm}/servers")
+
     def upload_tools(self, swarm: str, data: bytes) -> dict:
         """Upload a packed tools bundle: {"version", "tools"}."""
         return self._call("POST", f"/swarms/{swarm}/tools", content=data,

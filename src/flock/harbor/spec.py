@@ -10,6 +10,7 @@ the run's.
 """
 
 import json
+import math
 import os
 import re
 import shutil
@@ -48,6 +49,9 @@ from .config import (
 _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 # the tools a role without `spawn:` rules is not shown (it may still prompt its parent)
 SPAWNING = ("spawn.spawn", "spawn.remove")
+# an `hf_jobs` server's lifetime without `timeout`: its startup_timeout, the run's
+# run_timeout_seconds and this margin (the run's end, the verifiers); the run cancels it sooner
+SERVER_MARGIN_S = 900
 
 
 def seconds(value):
@@ -332,6 +336,16 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
     secrets = resource_secrets(spec) + (["HF_TOKEN"] if spec.environment.backend == "hf-sandbox"
                                         else [])  # sandboxes start with the worker's HF token
     secrets = list(dict.fromkeys(secrets))  # a Space board's HF_TOKEN may be the sandboxes' too
+    def lifetime(inference: Inference | None) -> Inference | None:
+        """An `hf_jobs` block's `timeout` filled in: the job outlives the run by a margin."""
+        hj = inference.hf_jobs if inference is not None else None
+        if hj is None or hj.timeout is not None:
+            return inference
+        s = (parse_duration(hj.startup_timeout).total_seconds() + spec.limits.run_timeout_seconds
+             + SERVER_MARGIN_S)
+        return inference.model_copy(update={"hf_jobs": hj.model_copy(
+            update={"timeout": flock_duration(math.ceil(s))})})
+
     # [input, output, cached] by model: a role's own model at its own pricing, any other at the
     # run's (none: $0)
     prices = {"*": spec.pricing} | {
@@ -355,7 +369,7 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
             **packing,
             "harness": "harbor",
             "model": model,
-            "inference": role.inference,
+            "inference": lifetime(role.inference),
             "pricing": prices.get(model) or prices["*"],
             "name_prefix": role.name_prefix,
             "replicas": 0 if ramp else role.count,  # the ramp raises them
@@ -386,7 +400,7 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
         "swarm": spec.name,
         "namespace": spec.namespace,
         "bucket": spec.bucket,
-        "inference": spec.inference,
+        "inference": lifetime(spec.inference),
         "types": types,
         "dashboard": spec.dashboard,
         "spawn": spec.spawn,

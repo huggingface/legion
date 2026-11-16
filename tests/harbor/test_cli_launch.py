@@ -124,14 +124,15 @@ def test_launch_resume_and_update_on_a_harbor_spec(tmp_path, monkeypatch, app, s
 
 
 def experiment_spec(monkeypatch, pins, name, rev, env=None):
-    """An experiments/ folder's spec (or an absolute folder's) as `flock launch` reads it, the
-    task pin faked."""
+    """An experiments/ folder's spec (or an absolute folder's, or a spec file in one) as `flock
+    launch` reads it, the task pin faked."""
     pins[rev] = "a" * 40
     for key in ("RUN_NAME", "BUCKET"):
         monkeypatch.delenv(key, raising=False)
     for key, value in (env or {}).items():
         monkeypatch.setenv(key, value)
-    path = EXPERIMENTS / name / "spec.yaml"
+    path = EXPERIMENTS / name
+    path = path / "spec.yaml" if path.is_dir() else path
     swarm = read_spec(str(path))
     assert check_spec(swarm, str(path))[1] == []  # no refusals, no warnings
     assert all(ts.harbor.task["task"]["git_commit_id"] == "a" * 40 for ts in swarm.types.values())
@@ -219,6 +220,19 @@ def test_the_mini_swarm_spec_compiles(monkeypatch, pins):
     assert ts.harbor.config["tools"] == ["message_board.*"]
     assert ts.harbor.config["environment"] == {"backend": "hf-sandbox", "flavor": "cpu-basic"}
     assert ts.secrets == ["HF_TOKEN"]  # the worker deploys the Space and starts the sandboxes
+    # hf-jobs.yaml: the same run (task pin, roster, loop, limits) with the same model on a vLLM
+    # job flock starts
+    for key in ("MODEL", "FLAVOR", "MAX_MODEL_LEN"):
+        monkeypatch.delenv(key, raising=False)
+    hf = experiment_spec(monkeypatch, pins, "mini-swarm/hf-jobs.yaml",
+                         "d0e1fee0f1036a80d5400d67f7fad9143668ba94")
+    other = hf.types["agent"]
+    assert (hf.swarm, other.model, other.harbor, other.loop, other.secrets) == (
+        "mini-swarm-hf-jobs-1", ts.model, ts.harbor, ts.loop, ts.secrets)
+    hj = hf.inference.hf_jobs
+    assert (hj.flavor, hj.vllm_args, hf.inference.api_key_env) == (
+        "a100-large", ["max_model_len=131072"], "HF_INFERENCE_TOKEN")
+    assert hj.timeout == "3300s"  # startup_timeout 30m + run_timeout_seconds 600 + 15m
 
 
 def test_the_escape_room_spec_compiles(monkeypatch, pins):

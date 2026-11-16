@@ -68,7 +68,7 @@ def test_agents_spread_over_several_urls():
 
 
 @pytest.mark.parametrize(("inference", "needle"), [
-    ({"urls": ["http://a/v1"], "hf_router": {}}, "set hf_router or urls, not both"),
+    ({"urls": ["http://a/v1"], "hf_router": {}}, "set one of hf_router, urls or hf_jobs, not hf_router and urls"),
     ({"urls": ["ftp://a/v1"]}, "HTTP(S) URL without credentials"),
     ({"urls": ["http://user:pw@a/v1"]}, "HTTP(S) URL without credentials"),
     ({"urls": ["http://a/v1", "http://a/v1/"]}, "must not repeat a URL"),

@@ -31,6 +31,13 @@ RENAMED = {
 FAMILIES = ("loop", "ramp", "world", "budget")  # `ramp_held` -> `ramp.held`
 
 
+def uptime(seconds: float) -> str:
+    """`1h05m`, `12m`, `40s`: how long a server has run."""
+    s = max(0, int(seconds))
+    return f"{s // 3600}h{s % 3600 // 60:02d}m" if s >= 3600 else f"{s // 60}m" if s >= 60 \
+        else f"{s}s"
+
+
 def event_name(kind: str, stream: str) -> str:
     """The dotted name of a stored event type; `stream` is `agent` or `swarm`."""
     if kind in RENAMED:
@@ -98,6 +105,12 @@ def verdict(status: dict, health: dict | None, now: float | None = None) -> dict
         degraded.append(f"{len(unsynced)} agents' final sync failed")
     if status.get("budget_stop"):
         degraded.append(f"budget stop ({status['budget_stop']})")
+    for s in status.get("servers") or []:  # hf_jobs servers flock started
+        what = f"server {s['model']} replica {s['replica']} (job {s.get('job_id') or '-'})"
+        if s["state"] == "failed":
+            failing.append(f"{what}: failed: {s.get('error') or s.get('stage')}")
+        elif s["state"] == "starting":
+            degraded.append(f"{what}: starting")
     if health is None:
         degraded.append("no health snapshot yet")
     else:

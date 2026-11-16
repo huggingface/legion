@@ -20,7 +20,7 @@ and the other commands reach it from the same directory.
 Stops on SIGINT/SIGTERM (`flock stop --delete` sends it; a second one forces), `--until
 <duration>`, `--until idle`, or the spec's `limits.budget_usd`. Stopping halts the reconcile loop (so nothing relaunches), sends each worker
 a drain (in-flight turns finish within `grace` s, then the processes are killed), waits for the
-final event flush, writes the bundle and exits.
+final event flush, writes the bundle, cancels the run's `hf_jobs` servers and exits.
 """
 
 from __future__ import annotations
@@ -625,6 +625,11 @@ async def run_local(opts: RunOptions) -> RunResult:
                                   tracker=tracker)
         finally:
             await asyncio.to_thread(worlds.stop_all)  # after the workers, before the server
+            try:  # the run's hf_jobs servers end with it (docs/open-models.md)
+                if cancelled := await asyncio.to_thread(app.state.servers.stop, spec.swarm):
+                    say(f"servers cancelled: {', '.join(cancelled)}")
+            except Exception:
+                log.exception("cancelling the servers failed")
             # parked long-polls of exited workers are cancelled at shutdown: not an error
             uv_log = logging.getLogger("uvicorn.error")
             level = uv_log.level
