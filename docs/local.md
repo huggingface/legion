@@ -19,12 +19,8 @@ Install (Python 3.12+; Harbor comes with flock):
 
 ```sh
 git clone https://github.com/huggingface/flock && cd flock
-uv sync --extra controller
+uv sync
 ```
-
-The extra installs FastAPI, Uvicorn, and Jinja2 for the controller's API and status
-page. Local launch runs that server as well as workers; worker-only installations
-do not need the controller extra.
 
 Write a Harbor spec (`compute: local` is the default). This one runs 2 agents on one
 terminal-bench task in docker, with the HF router as the model server (tests/harbor/examples/

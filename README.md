@@ -16,12 +16,8 @@ You need Python 3.12+, [uv](https://docs.astral.sh/uv/), and Git:
 ```sh
 git clone https://github.com/huggingface/flock
 cd flock
-uv sync --extra controller
+uv sync
 ```
-
-The `controller` extra adds FastAPI, Uvicorn, and Jinja2 for the controller's API
-and status page. Local launch starts a controller, so it needs this extra; a
-worker-only installation does not.
 
 Use `uv run flock` for the commands below. A bare `flock` may invoke your system's
 file-locking utility instead.

@@ -85,18 +85,18 @@ controller's environment. Workers need `HF_TOKEN` to access the wheel and state
 bucket. Do not list `FLOCK_TOKEN` in the spec's secrets; the controller supplies
 worker authentication itself.
 
-For a controller running directly on your machine instead of as an HF Job:
+For a swarm running on your machine, set `compute: local` in the spec (the default)
+and use the normal launch command from a shell without `FLOCK_URL` set:
 
 ```sh
-FLOCK_TOKEN=... HF_TOKEN=... \
-FLOCK_WHEEL_URL=hf://buckets/<you>/flock/dist/<rev>/flock-0.0.1-py3-none-any.whl \
-uv run flock-controller
+export HF_TOKEN=...
+uv run flock launch spec.yaml   # spec with compute: local
 ```
 
-This starts the API at `http://127.0.0.1:7860`. Controller state lives in
-`FLOCK_DATA` (`/data` in the controller image). Keep that directory persistent or
-configure `FLOCK_STATE_URL`; otherwise a restart loses controller state, including
-spawned-agent records.
+Flock starts the controller and workers locally and records the run under `.flock/`.
+The spec's `environment.backend` still chooses where agent containers run; use
+`docker` or `podman` for local containers. See [local usage](local.md) for a complete
+spec, model credentials, status commands, and results.
 
 ## Two URLs, two auth paths
 

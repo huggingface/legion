@@ -16,7 +16,7 @@ casually: controller, worker and CLI all import it.
 
 ## Conventions
 - Python 3.12+, pydantic v2, httpx, typer, FastAPI. Keep it small; no new frameworks.
-- Install with `uv sync --all-extras` (Harbor is a main dependency; the extras add the controller's and the tests').
+- Install with `uv sync --all-extras` (Harbor and controller dependencies are included by default; the dev extra adds tests and linting).
 - `ruff check` and `pytest` must pass before pushing.
 - Always pass `namespace=` to every `huggingface_hub` jobs call (saves a `whoami` per call).
 - Never launch an HF Job from tests. Experiments launch jobs only on `cpu-basic` unless the operator approved otherwise.
