@@ -257,6 +257,24 @@ def test_cli_update_prints_what_changed_and_refuses_cleanly(tmp_path, monkeypatc
     assert store.get_swarm("demo")["spec"] == applied  # nothing was applied
 
 
+def test_cli_update_probes_a_model_sent_somewhere_new(tmp_path, monkeypatch, app, tick):
+    """An update probes again when what a model is sent to changes (new urls under the same
+    block name), not only when a model or block is added."""
+    wire(monkeypatch, app)
+    exp = tmp_path / "exp"
+    f = _experiment(exp)
+    assert runner.invoke(cli.app, ["launch", str(f), "--skip-preflight"]).exit_code == 0
+    tick()
+    # --strict: a probe without the key (unverified) refuses the update, so it shows when one ran
+    r = runner.invoke(cli.app, ["update", str(exp), "--strict"])  # the same spec: no probe
+    assert r.exit_code == 0 and "preflight" not in r.output, r.output
+    d = yaml.safe_load(f.read_text())
+    d["inference"]["urls"] = ["http://gpu2.invalid/v1"]
+    f.write_text(yaml.safe_dump(d))
+    r = runner.invoke(cli.app, ["update", str(exp), "--strict"])
+    assert r.exit_code == 1 and "preflight inference:m: unverified" in r.output, r.output
+
+
 def test_cli_update_keeps_live_replicas_and_checks(tmp_path, monkeypatch, app, store, tick):
     wire(monkeypatch, app)
     exp = tmp_path / "exp"

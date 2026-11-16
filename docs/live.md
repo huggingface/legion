@@ -49,8 +49,9 @@ A refused update exits 1, prints the reason and applies nothing. The reasons are
 `flock launch` gives: a spec error, a tools folder error, an unknown tool name, or a 400/409
 from the controller.
 
-Preflight runs only when the update adds a provider-backed model the running spec does not
-have (`--preflight` / `--skip-preflight` to choose). Locally, `flock update` finds the run
+Preflight runs only when the update adds a model, or sends one somewhere new (other URLs, router
+provider, key or headers), compared with the running spec (`--preflight` / `--skip-preflight`
+to choose). Locally, `flock update` finds the run
 through `.flock/current`, like the other commands do.
 
 ## Env files and `--ref`
