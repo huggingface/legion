@@ -278,9 +278,11 @@ class Client:
         """The swarm's servers (`ServerStatus` rows)."""
         return self._call("GET", f"/swarms/{swarm}/servers")
 
-    def stop_servers(self, swarm: str) -> dict:
-        """Cancel the swarm's servers: {"cancelled": job ids}."""
-        return self._call("DELETE", f"/swarms/{swarm}/servers")
+    def stop_servers(self, swarm: str, *, unused: bool = False) -> dict:
+        """Cancel the swarm's servers (`unused`: only the ones its applied spec does not
+        use): {"cancelled": job ids}."""
+        return self._call("DELETE", f"/swarms/{swarm}/servers",
+                          params={"unused": "true"} if unused else None)
 
     def upload_tools(self, swarm: str, data: bytes) -> dict:
         """Upload a packed tools bundle: {"version", "tools"}."""

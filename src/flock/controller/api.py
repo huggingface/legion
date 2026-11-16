@@ -34,7 +34,7 @@ from flock.controller.inference import check as inference_check
 from flock.controller.loop import LoopEngine, loop_status, swarm_stream
 from flock.controller.preflight import run_preflight
 from flock.controller.reconcile import agent_state, record_heartbeat, worker_state
-from flock.controller.servers import Servers
+from flock.controller.servers import Servers, drain_grace
 from flock.controller.spawn import (
     Refused,
     SpawnAck,
@@ -77,7 +77,6 @@ from flock.models import (
     WorkerState,
     WorkerStatus,
     loop_refusals,
-    parse_duration,
     type_spec_rev,
     worker_type_spec,
 )
@@ -996,8 +995,7 @@ def create_app(
             worlds.stop(swarm)  # the block went away or now names a url
         # hf_jobs servers of a block or model the spec no longer uses, once the turns of the
         # agents on them (their workers drain) are over
-        servers.prune(spec, grace=max((parse_duration(ts.turn_timeout).total_seconds()
-                                       for ts in spec.types.values()), default=0))
+        servers.prune(spec, grace=drain_grace(spec))
         return swarm_status(store, spec, clock().timestamp(), servers)
 
     # ------------------------------------------------------------- health (docs/health.md)
@@ -1123,9 +1121,14 @@ def create_app(
         return servers.status(swarm)
 
     @api.delete("/swarms/{swarm}/servers")
-    def stop_servers(swarm: str) -> dict:
-        """Cancel the swarm's servers (a launch that failed after starting them)."""
-        return {"swarm": swarm, "cancelled": servers.stop(swarm)}
+    def stop_servers(swarm: str, unused: bool = False) -> dict:
+        """Cancel the swarm's servers (a launch that failed after starting them); `unused`:
+        only the ones the applied spec does not use (an update that did not apply)."""
+        if not unused:
+            return {"swarm": swarm, "cancelled": servers.stop(swarm)}
+        row = store.get_swarm(swarm)
+        return {"swarm": swarm,
+                "cancelled": servers.drop_unused(swarm, row["spec"] if row else None)}
 
     @api.get("/swarms/{swarm}")
     def get_swarm(swarm: str) -> dict:

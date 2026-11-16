@@ -19,7 +19,7 @@ from typing import Any
 
 import httpx
 
-from flock.controller.servers import Group, Server
+from flock.controller.servers import TERMINAL, Group, Server, StartError
 from flock.models import DEFAULT_SERVER_TIMEOUT, VLLM_PORT, HFJobs, parse_duration, vllm_arg_key
 
 log = logging.getLogger("flock.servers")
@@ -74,13 +74,17 @@ class HFJobsServers:
         self._account: str | None = None
         self._gpus: dict[str, int] = {}
 
+    def account(self) -> str:
+        """The token's account (resolved once): the default namespace."""
+        if self._account is None:
+            self._account = self.api.whoami()["name"]
+        return self._account
+
     def namespace(self, group: Group) -> str:
-        """Who runs and pays: the block's or spec's namespace, else the token's account
-        (resolved once). Written into the group, so status shows it."""
+        """Who runs and pays: the block's or spec's namespace, else the token's account.
+        Written into the group, so status shows it."""
         if not group.namespace:
-            if self._account is None:
-                self._account = self.api.whoami()["name"]
-            group.namespace = self._account
+            group.namespace = self.account()
         return group.namespace
 
     def gpus(self, flavor: str) -> int:
@@ -108,7 +112,7 @@ class HFJobsServers:
         ns = self.namespace(group)
         found: dict[int, Server] = {}
         for job in self.api.list_jobs(labels=group.labels, namespace=ns):
-            if (_stage(job)[0] or "") in ("COMPLETED", "CANCELED", "ERROR", "DELETED"):
+            if (_stage(job)[0] or "") in TERMINAL:
                 continue
             replica = int((getattr(job, "labels", None) or {}).get("replica", 0))
             if replica in found:
@@ -126,16 +130,29 @@ class HFJobsServers:
         servers = [s for s in servers if s.replica < block.replicas]
         have = {s.replica for s in servers}
         missing = [r for r in range(block.replicas) if r not in have]
-        if missing:
-            command = vllm_command(group.model, block, group.max_working, self.gpus(block.flavor))
-            timeout = int(parse_duration(block.timeout or DEFAULT_SERVER_TIMEOUT).total_seconds())
+        started: list[Server] = []
+        try:
+            if missing:
+                command = vllm_command(group.model, block, group.max_working,
+                                       self.gpus(block.flavor))
+                timeout = int(parse_duration(block.timeout or DEFAULT_SERVER_TIMEOUT)
+                              .total_seconds())
             for replica in missing:
                 job = self.api.run_job(image=block.image, command=command, env=dict(JOB_ENV),
                                        flavor=block.flavor, timeout=timeout,
                                        labels={**group.labels, "replica": str(replica)},
                                        expose=[VLLM_PORT], namespace=ns)
-                servers.append(self._server(job, replica))
-        return sorted(servers, key=lambda s: s.replica)
+                started.append(self._server(job, replica))
+        except Exception as e:  # a quota, a flavor: roll back what this start began
+            for s in started:
+                try:
+                    self.api.cancel_job(job_id=s.job_id, namespace=ns)
+                except Exception:
+                    log.exception("hf_jobs: cancelling %s failed", s.job_id)
+            raise StartError(f"{type(e).__name__}: {e}"
+                             + (f" (cancelled {', '.join(s.job_id for s in started)})"
+                                if started else ""), servers) from e
+        return sorted(servers + started, key=lambda s: s.replica)
 
     def check(self, group: Group, servers: list[Server]) -> None:
         ns = self.namespace(group)
@@ -172,6 +189,17 @@ class HFJobsServers:
             if s.job_id is not None and not s.ended:
                 self.api.cancel_job(job_id=s.job_id, namespace=ns)
                 s.stage = "CANCELED"
+
+    def sweep(self, labels: dict[str, str], namespace: str | None, keep: set[str]) -> list[str]:
+        ns = namespace or self.account()
+        out = []
+        for job in self.api.list_jobs(labels=labels, namespace=ns):
+            group = (getattr(job, "labels", None) or {}).get("inference")
+            if (_stage(job)[0] or "") in TERMINAL or group in keep:
+                continue
+            self.api.cancel_job(job_id=job.id, namespace=ns)
+            out.append(job.id)
+        return out
 
 
 def hf_jobs_servers(env: Mapping[str, str]) -> HFJobsServers:

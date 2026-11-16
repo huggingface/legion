@@ -13,7 +13,8 @@ module per block kind, e.g. controller/hf_jobs_servers.py) does the backend's pa
     servers.start(spec)          # start, or reattach to the running jobs; returns at once
     servers.tick()               # every few seconds: stages, readiness, startup_timeout
     servers.pin(spec)            # once ready: `urls` into each type's resolved block
-    servers.stop(spec.swarm)     # cancel
+    servers.prune(spec, grace)   # after an apply: retire what the spec no longer uses
+    servers.stop(spec.swarm)     # cancel (also jobs labelled for the swarm it lost track of)
 """
 
 from __future__ import annotations
@@ -71,10 +72,19 @@ class Server:
         return self.stage in TERMINAL
 
 
+class StartError(Exception):
+    """A start that failed part-way: the jobs it started were cancelled again; `servers` are
+    the group's running ones it found, still running (the caller tracks them, to cancel)."""
+
+    def __init__(self, message: str, servers: list[Server]):
+        super().__init__(message)
+        self.servers = servers
+
+
 class Starter(Protocol):
     def start(self, group: Group) -> list[Server]:
         """The group's servers, one per replica: the running ones (found by `group.labels`)
-        reused, the missing ones started."""
+        reused, the missing ones started. StartError when starting one fails."""
 
     def reattach(self, group: Group) -> list[Server]:
         """The group's running servers, started by an earlier controller; none started."""
@@ -87,6 +97,10 @@ class Starter(Protocol):
 
     def stop(self, group: Group, servers: list[Server]) -> None:
         """Cancel the servers that still run."""
+
+    def sweep(self, labels: dict[str, str], namespace: str | None, keep: set[str]) -> list[str]:
+        """Cancel every running job carrying `labels` whose group (its `inference` label) is
+        not in `keep`, in `namespace` (None: the default); returns their ids."""
 
 
 def server_kind(inference: Any) -> str | None:
@@ -122,6 +136,14 @@ def groups(spec: SwarmSpec, label: str = "swarm") -> list[Group]:
     return list(out.values())
 
 
+
+def drain_grace(spec: SwarmSpec) -> float:
+    """How long servers a spec no longer uses keep serving: the types' longest `turn_timeout`,
+    the turns their agents' draining workers may still run on them."""
+    return max((parse_duration(ts.turn_timeout).total_seconds() for ts in spec.types.values()),
+               default=0.0)
+
+
 @dataclass
 class _Run:
     """A group's servers in this process."""
@@ -132,7 +154,17 @@ class _Run:
     state: str = "starting"  # starting, ready, failed, stopped
     error: str | None = None
     checked: float = 0.0
-    retire_at: float | None = None  # no longer in the spec: cancelled at this time (`prune`)
+    retire_at: float | None = None  # no longer in the spec: cancelled (and dropped) at this time
+
+
+@dataclass
+class _Sweep:
+    """After a restart: the swarm's labelled jobs of groups its spec no longer has (a
+    retirement the restart lost) are cancelled at `at`."""
+
+    at: float
+    keep: set[str]  # the spec's group keys
+    where: set[tuple[str, str | None]]  # (kind, namespace) to look in
 
 
 def _dt(t: float | None) -> datetime | None:
@@ -142,7 +174,8 @@ def _dt(t: float | None) -> datetime | None:
 class Servers:
     """The servers of each swarm (or, for `flock serve`, each spec: `label="serve"`).
     Thread-safe: the API's handlers and the ticker call it. `stored()` lists the specs a
-    restarted controller holds: the first `tick` reattaches to their running servers."""
+    restarted controller holds: `tick` reattaches to their running servers until it has them
+    all, and sweeps their obsolete groups' jobs once their drain grace is over."""
 
     def __init__(self, env: Mapping[str, str], starters: Mapping[str, Starter] | None = None,
                  label: str = "swarm", clock=time.time,
@@ -152,73 +185,122 @@ class Servers:
         self.runs: dict[str, dict[str, _Run]] = {}
         self.lock = threading.RLock()
         self._reattached = False
+        self._sweeps: dict[str, _Sweep] = {}
+        # every (kind, namespace) a swarm's servers ran in: where `stop` looks for its jobs
+        self._where: dict[str, set[tuple[str, str | None]]] = {}
 
     def starter(self, kind: str) -> Starter:
         if kind not in self._starters:
             self._starters[kind] = load(SERVERS[kind])(self.env)
         return self._starters[kind]
 
+    def _seen(self, swarm: str, g: Group) -> None:
+        self._where.setdefault(swarm, set()).add((g.kind, g.namespace))
+
     # ------------------------------------------------------------------ lifecycle
 
     def start(self, spec: SwarmSpec) -> list[ServerStatus]:
         """Start the spec's groups that are not starting or ready (a failed or stopped one
-        starts again), reusing running jobs; returns at once with their status."""
+        starts again), reusing running jobs; returns at once with their status. A start that
+        fails keeps the group's running jobs tracked (`stop` cancels them)."""
         with self.lock:
             runs = self.runs.setdefault(spec.swarm, {})
             for g in groups(spec, self.label):
                 run = runs.get(g.key)
-                live = run is not None and run.state in ("starting", "ready") and sum(
-                    not s.ended for s in run.servers) >= g.block.replicas
-                if live:
-                    run.group.types = g.types  # the types it serves may have changed
+                want = g.block.replicas
+                if run is not None and run.state in ("starting", "ready") and sum(
+                        not s.ended and s.replica < want for s in run.servers) >= want:
+                    run.group.types, run.group.block = g.types, g.block  # replicas may have changed
                     run.retire_at = None  # in the spec again
                     continue
+                kept = [s for s in run.servers if not s.ended] if run is not None else []
                 try:
                     servers = self.starter(g.kind).start(g)
+                except StartError as e:  # its own jobs rolled back; the running ones kept
+                    log.warning("servers %s for %s: start failed: %s", g.key, g.model, e)
+                    runs[g.key] = _Run(g, e.servers, self.clock(), "failed", f"start failed: {e}")
+                    continue
                 except Exception as e:  # noqa: BLE001 - the backend refused: the status says why
                     log.warning("servers %s for %s: start failed: %s", g.key, g.model, e)
-                    runs[g.key] = _Run(g, [], self.clock(), "failed",
+                    runs[g.key] = _Run(g, kept, self.clock(), "failed",
                                        f"start failed: {type(e).__name__}: {e}")
                     continue
+                finally:
+                    self._seen(spec.swarm, g)
                 runs[g.key] = _Run(g, servers, self.clock())
                 log.info("servers %s for %s: %s", g.key, g.model,
                          ", ".join(f"{s.job_id} ({s.stage})" for s in servers))
             return self.status(spec.swarm)
 
-    def reattach(self, specs: Iterable[SwarmSpec]) -> None:
-        """After a restart: each stored spec's groups from their running jobs (none started).
-        A group with no running job is shown stopped."""
+    def reattach(self, specs: Iterable[SwarmSpec]) -> bool:
+        """After a restart: each stored spec's groups from their running jobs (none started),
+        replicas beyond the spec's retired after the drain grace, and a sweep of the jobs of
+        groups the spec no longer has scheduled at the end of that grace. A group with no
+        running job is shown stopped. False: a lookup failed; call again (`tick` does)."""
+        ok, now = True, self.clock()
         for spec in specs:
-            for g in groups(spec, self.label):
-                with self.lock:
-                    runs = self.runs.setdefault(spec.swarm, {})
+            gs, grace = groups(spec, self.label), drain_grace(spec)
+            with self.lock:
+                runs = self.runs.setdefault(spec.swarm, {})
+                for g in gs:
                     if g.key in runs:
                         continue
                     try:
-                        servers = self.starter(g.kind).reattach(g)
+                        found = self.starter(g.kind).reattach(g)
                     except Exception:
                         log.exception("servers %s for %s: reattach failed", g.key, g.model)
+                        ok = False
                         continue
-                    runs[g.key] = _Run(g, servers, self.clock()) if servers else _Run(
-                        g, [], self.clock(), "stopped", "no running job")
+                    self._seen(spec.swarm, g)
+                    want = g.block.replicas
+                    servers = [s for s in found if s.replica < want]
+                    runs[g.key] = _Run(g, servers, now) if servers else _Run(
+                        g, [], now, "stopped", "no running job")
+                    self._retire_servers(spec.swarm, g, [s for s in found if s.replica >= want],
+                                         now + grace, "starting")
                     log.info("servers %s for %s: reattached %s", g.key, g.model,
-                             ", ".join(s.job_id or "?" for s in servers) or "nothing")
+                             ", ".join(s.job_id or "?" for s in found) or "nothing")
+                if gs and spec.swarm not in self._sweeps:
+                    self._sweeps[spec.swarm] = _Sweep(now + grace, {g.key for g in gs},
+                                                      {(g.kind, g.namespace) for g in gs})
+        return ok
 
     def tick(self) -> None:
-        """Check the starting groups (stages, readiness, startup_timeout) and, every
-        READY_CHECK_S, the ready ones: a job that ended fails its group."""
+        """Reattach a restarted controller's servers (until it has them all), run due sweeps,
+        cancel retired groups whose grace is over, and check the starting groups (stages,
+        readiness, startup_timeout) and, every READY_CHECK_S, the ready ones: a job that ended
+        fails its group."""
         if not self._reattached and self.stored is not None:
-            self.reattach(self.stored())
-        self._reattached = True
+            self._reattached = self.reattach(self.stored())
         now = self.clock()
         with self.lock:
-            for swarm, runs in self.runs.items():
-                for key, run in runs.items():
+            for swarm, sweep in list(self._sweeps.items()):
+                if now >= sweep.at and self._sweep(swarm, sweep.where, sweep.keep) is not None:
+                    del self._sweeps[swarm]
+            for runs in self.runs.values():
+                for key, run in list(runs.items()):
                     if run.retire_at is not None and now >= run.retire_at:
-                        self.stop(swarm, keep=set(runs) - {key})
+                        if self._cancel(run):
+                            del runs[key]
                     elif run.state == "starting" or (
                             run.state == "ready" and now - run.checked >= READY_CHECK_S):
                         self._check(run, now)
+
+    def _sweep(self, swarm: str, where: Iterable[tuple[str, str | None]], keep: set[str]
+               ) -> list[str] | None:
+        """Cancel the swarm's labelled jobs whose group is not in `keep`: their ids, or None
+        when a lookup failed."""
+        out: list[str] = []
+        for kind, namespace in where:
+            try:
+                out += self.starter(kind).sweep({self.label: swarm}, namespace, keep)
+            except Exception:
+                log.exception("servers of %s: sweep failed", swarm)
+                return None
+        if out:
+            log.info("servers of %s: cancelled %s (groups no longer in the spec)", swarm,
+                     ", ".join(out))
+        return out
 
     def _check(self, run: _Run, now: float) -> None:
         g, st = run.group, self.starter(run.group.kind)
@@ -226,6 +308,10 @@ class Servers:
             st.check(g, run.servers)
         except Exception as e:  # noqa: BLE001 - the Hub or the network: the next tick tries again
             log.warning("servers %s for %s: check failed: %s", g.key, g.model, e)
+            if run.state == "starting" and now - run.since > self._startup_s(g):
+                waiting = next((s for s in run.servers if not s.ready_at), Server(replica=0))
+                self._fail(run, f"not ready after startup_timeout {g.block.startup_timeout} "
+                                f"(checking job {waiting.job_id} failed: {e})", waiting)
             return
         run.checked = now
         if ended := next((s for s in run.servers if s.ended), None):
@@ -255,55 +341,98 @@ class Servers:
         run.state, run.error = "failed", why + ("; last log lines: " + " | ".join(tail)
                                                 if tail else "")
         log.warning("servers %s for %s: %s", run.group.key, run.group.model, run.error)
-        try:
-            st.stop(run.group, run.servers)
-        except Exception:
-            log.exception("servers %s: cancel failed", run.group.key)
+        self._cancel(run, state="failed")
 
-    def stop(self, swarm: str, keep: Iterable[str] = ()) -> list[str]:
-        """Cancel every server of `swarm` (the groups in `keep` aside); returns the job ids."""
-        keep, out = set(keep), []
+    def _cancel(self, run: _Run, state: str = "stopped") -> list[str] | None:
+        """Cancel the run's servers that still run: their ids, or None when cancelling failed
+        (the run keeps them, for the next try)."""
+        live = [s for s in run.servers if not s.ended]
+        if live:
+            try:
+                self.starter(run.group.kind).stop(run.group, live)
+            except Exception:
+                log.exception("servers %s: cancel failed", run.group.key)
+                return None
+            log.info("servers %s for %s: stopped %s", run.group.key, run.group.model,
+                     ", ".join(s.job_id or "?" for s in live))
+        if run.state != "failed":
+            run.state = state
+        run.retire_at = None
+        return [s.job_id for s in live if s.job_id]
+
+    def _retire_servers(self, swarm: str, g: Group, servers: list[Server], at: float,
+                        state: str) -> None:
+        """Replicas a group no longer needs: each its own run, cancelled at `at`."""
+        for s in servers:
+            self.runs[swarm][f"{g.key}/r{s.replica}"] = _Run(g, [s], self.clock(), state,
+                                                            retire_at=at)
+
+    def stop(self, swarm: str) -> list[str]:
+        """Cancel every server of `swarm`: the ones tracked, then any job labelled for it (one
+        this controller lost track of); returns the job ids."""
+        out: list[str] = []
         with self.lock:
-            for key, run in self.runs.get(swarm, {}).items():
-                if key not in keep:
-                    run.retire_at = None
-                live = [s for s in run.servers if not s.ended]
-                if key in keep or not live:
-                    if key not in keep and run.state in ("starting", "ready"):
-                        run.state = "stopped"
-                    continue
-                try:
-                    self.starter(run.group.kind).stop(run.group, live)
-                except Exception:
-                    log.exception("servers %s: cancel failed", key)
-                    continue
-                out += [s.job_id for s in live if s.job_id]
-                if run.state != "failed":
-                    run.state = "stopped"
-                log.info("servers %s for %s: stopped %s", key, run.group.model,
-                         ", ".join(s.job_id or "?" for s in live))
+            for run in self.runs.get(swarm, {}).values():
+                out += self._cancel(run) or []
+            self._sweeps.pop(swarm, None)
+            out += [j for j in self._sweep(swarm, self._where.get(swarm, ()), set()) or []
+                    if j not in out]
         return out
 
     def prune(self, spec: SwarmSpec, grace: float = 0.0) -> list[str]:
-        """After an apply: cancel the swarm's groups the spec no longer uses, after `grace` s
-        (the turns their agents' draining workers still run on them; 0: now)."""
-        keep = {g.key for g in groups(spec, self.label)}
-        if grace <= 0:
-            return self.stop(spec.swarm, keep=keep)
+        """After an apply: the swarm's groups the spec no longer uses, and the replicas beyond
+        its `replicas`, are cancelled after `grace` s (the turns their agents' draining
+        workers still run on them; 0: now). Obsolete groups with nothing running (failed,
+        stopped) are dropped. Returns the job ids cancelled now."""
+        keep = {g.key: g for g in groups(spec, self.label)}
+        now, out = self.clock(), []
         with self.lock:
-            for key, run in self.runs.get(spec.swarm, {}).items():
-                if key not in keep and run.state in ("starting", "ready") and run.retire_at is None:
-                    run.retire_at = self.clock() + grace
+            runs = self.runs.get(spec.swarm, {})
+            for key, run in list(runs.items()):
+                g = keep.get(key)
+                if g is not None:
+                    excess = [s for s in run.servers if s.replica >= g.block.replicas]
+                    if excess:
+                        run.servers = [s for s in run.servers if s.replica < g.block.replicas]
+                        self._retire_servers(spec.swarm, run.group, excess, now + grace,
+                                             run.state)
+                elif not any(not s.ended for s in run.servers):
+                    del runs[key]  # nothing runs: an obsolete failure is history
+                elif run.retire_at is None:
+                    run.retire_at = now + grace
                     log.info("servers %s for %s: no longer in the spec, cancelled in %.0f s",
                              key, run.group.model, grace)
-        return []
+            for key, run in list(runs.items()):  # a grace of 0: now
+                if (run.retire_at is not None and run.retire_at <= now
+                        and (done := self._cancel(run)) is not None):
+                    out += done
+                    del runs[key]
+        return out
+
+    def drop_unused(self, swarm: str, applied: SwarmSpec | None) -> list[str]:
+        """A launch or update that did not apply: cancel now the groups it started that the
+        applied spec does not use (all of the swarm's when none is applied); the ones retiring
+        keep their grace. Returns the job ids."""
+        if applied is None:
+            return self.stop(swarm)
+        keep = {g.key for g in groups(applied, self.label)}
+        out: list[str] = []
+        with self.lock:
+            runs = self.runs.get(swarm, {})
+            for key, run in list(runs.items()):
+                if (key not in keep and run.retire_at is None
+                        and (done := self._cancel(run)) is not None):
+                    out += done
+                    del runs[key]
+        return out
 
     # ------------------------------------------------------------------ the spec
 
     def pin(self, spec: SwarmSpec, previous: SwarmSpec | None = None) -> None:
-        """Write each ready group's URLs into its types' resolved block (`urls`). A type whose
-        group is not ready keeps the URLs `previous` pinned for the same block and model (a
-        re-apply right after a restart); otherwise InferenceError says what to do."""
+        """Write each ready group's URLs (its first `replicas`) into its types' resolved block
+        (`urls`). A type whose group is not ready keeps the URLs `previous` pinned for the same
+        block and model (a re-apply right after a restart); otherwise InferenceError says what
+        to do."""
         with self.lock:
             runs = self.runs.get(spec.swarm, {})
             for name, ts in spec.types.items():
@@ -314,7 +443,8 @@ class Servers:
                 old = previous.types.get(name) if previous is not None else None
                 old = old.resolved_model if old is not None else None
                 if run is not None and run.state == "ready":
-                    urls = [s.url for s in sorted(run.servers, key=lambda s: s.replica)]
+                    urls = [s.url for s in sorted(run.servers, key=lambda s: s.replica)
+                            if s.replica < g.block.replicas]
                 elif (old is not None and old.inference.urls and old.model_id == r.model_id
                       and old.inference.unpinned() == r.inference.unpinned()
                       and (run is None or run.state == "starting")):

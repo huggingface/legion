@@ -1,7 +1,9 @@
 """A fake of the HF Jobs part of `huggingface_hub.HfApi`, for the `hf_jobs` servers
 (flock.controller.hf_jobs_servers): it keeps jobs in memory and answers with the real
 `JobInfo` / `JobHardwareInfo`, built from the JSON the Jobs API returns. Tests move a job's
-stage with `set_stage`. No job ever runs."""
+stage with `set_stage`, and make the Hub fail with `runs_left` (run_job calls that succeed,
+then a quota error), `list_errors` and `inspect_errors` (the next N such calls raise). No job
+ever runs."""
 
 from __future__ import annotations
 
@@ -20,6 +22,8 @@ class FakeHubJobs:
         self.runs: list[dict] = []  # each run_job call's arguments
         self.cancelled: list[str] = []
         self.logs: dict[str, list[str]] = {}
+        self.runs_left: int | None = None
+        self.list_errors = self.inspect_errors = 0
 
     def whoami(self) -> dict:
         return {"name": self.account, "type": "user"}
@@ -34,6 +38,10 @@ class FakeHubJobs:
 
     def run_job(self, *, image, command, env=None, secrets=None, flavor=None, timeout=None,
                 labels=None, expose=None, namespace=None) -> JobInfo:
+        if self.runs_left is not None:
+            if self.runs_left <= 0:
+                raise RuntimeError("402: jobs quota exceeded (fake)")
+            self.runs_left -= 1
         job_id = f"{len(self.jobs) + 1:024x}"
         self.runs.append({"id": job_id, "image": image, "command": command, "env": env,
                           "secrets": secrets, "flavor": flavor, "timeout": timeout,
@@ -50,9 +58,15 @@ class FakeHubJobs:
         self.jobs[job_id]["status"].update(stage=stage, message=message)
 
     def inspect_job(self, *, job_id, namespace=None) -> JobInfo:
+        if self.inspect_errors:
+            self.inspect_errors -= 1
+            raise ConnectionError("the Hub did not answer (fake)")
         return JobInfo(**self.jobs[job_id])
 
     def list_jobs(self, *, labels=None, namespace=None) -> list[JobInfo]:
+        if self.list_errors:
+            self.list_errors -= 1
+            raise ConnectionError("the Hub did not answer (fake)")
         return [JobInfo(**j) for j in self.jobs.values() if j["owner"]["name"] == namespace
                 and all((j["labels"] or {}).get(k) == v for k, v in (labels or {}).items())]
 
