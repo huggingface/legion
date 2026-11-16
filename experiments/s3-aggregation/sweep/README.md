@@ -2,13 +2,18 @@
 
 What the s³ paper's Figure 5 (information aggregation: success against swarm size) looks like
 with flock: every problem of `HuggingFaceSwarms/s3-aggregation` at N = 1, 2, 4, 8 and 16 agents,
-each team its own flock run on the HF cluster.
+each team its own flock run on the HF cluster, for `Qwen/Qwen3.5-27B` and `Qwen/Qwen3.5-2B`. The
+results (figure, CSVs, tables, the rows and why each set-aside attempt didn't count) are in
+`../results/`, and the raw runs in the private `HuggingFaceSwarms/s3-aggregation-results`.
 
 | File | |
 | --- | --- |
-| `serve-vllm.sbatch` | the model server: vLLM with `Qwen/Qwen3.5-27B` on one B200 GPU (docs/open-models.md) |
+| `serve-vllm.sbatch` | the model server: vLLM with `$MODEL` (default `Qwen/Qwen3.5-27B`) on one B200 GPU (docs/open-models.md) |
 | `sweep.py` | runs the grid, one command, resumable: a row per team in `<root>/rows.jsonl` |
-| `plot.py` | `scaling.png` (Figure 5's style), `teams.csv`, `by_n.csv` and `by_n.md` from the rows |
+| `plot.py` | `scaling.png` (Figure 5's style), `teams.csv`, `by_n.csv` and `by_n.md` from the rows, one series per model |
+| `setaside.py` | why each attempt in `rows-discarded.jsonl` didn't count, and how many teams needed a rerun |
+| `failures.py` | per agent: the answer the verifier saw (no answer, malformed, wrong count, wrong numbers, right) and, from the state bucket's event streams, its tool calls, failed calls and posts |
+| `waits.py` | how long each kept team's worker queued |
 | `registries.conf` | the workers' podman pulls Docker Hub images through `mirror.gcr.io` |
 
 ## Run it
@@ -25,6 +30,13 @@ uv run experiments/s3-aggregation/sweep/sweep.py --urls http://<node 1>:8000/v1,
   --dataset HuggingFaceSwarms/s3-aggregation-results --prefix grid
 scancel -n s3-sweep-vllm
 ```
+
+The 2B grid is the same with `--export=ALL,MODEL=Qwen/Qwen3.5-2B` for the server, and
+`--model Qwen/Qwen3.5-2B --tag q2b-` and its own bucket and `--prefix` for the driver. Its
+agents run far longer, so more teams are in flight at once: `--max-worker-cpus 8` keeps their
+workers small enough to be scheduled, except at N = 16, whose 2B teams need 16 CPUs (30 GB) and
+run from a second driver (`--agents 16`) on the same root. Then plot both:
+`plot.py --series Qwen3.5-27B=<root> --series Qwen3.5-2B=<root> --out <dir>`.
 
 Each team is team.py's cluster spec (`--where cluster`) with the model on the servers' URLs
 (each agent calls one, by rendezvous hashing): `compute: slurm`, one worker on hopper-cpu
@@ -53,7 +65,7 @@ is safe: in-flight teams keep running and are adopted.
 
 | | s³ (Figure 5, top row) | here |
 | --- | --- | --- |
-| Agents | Qwen3-0.6B trained with RL at N = 4, and its controls | `Qwen/Qwen3.5-27B`, not trained: one prompted condition |
+| Agents | Qwen3-0.6B trained with RL at N = 4, and its controls | `Qwen/Qwen3.5-27B` and `Qwen/Qwen3.5-2B`, not trained: one prompted condition each |
 | Harness | their asynchronous harness: `message(to, text)` and `read_messages()`, notifications that interrupt generation, idle until a message arrives | Pi in a container per agent, with flock's board tools (`flock-tool message_board.*`) through its shell; a shared `#general` channel, mentions and a long-poll `wait`; flock's loop prompts again at each turn's end |
 | Messages | to one teammate or broadcast | posts on a board every agent reads; private channels possible |
 | Names | sampled from `agent_1`..`agent_64`, teammates in shuffled order | `agent-001`..`agent-00N`, in order |
@@ -62,4 +74,4 @@ is safe: in-flight teams keep running and are adopted.
 | Instruction | Appendix G's, with an example message and the token-cost rule | adapted from Appendix G for the board, with no example message and no token cost |
 | Problems | 32 held-out problems x 6 seeds; N = 1, 2, 4, 6, 8, 12, 16 | 32 problems (our seed, the same recipe: 16 numbers in 1..99, the first N) x 1 attempt; N = 1, 2, 4, 8, 16 |
 | Intervals | mean ± SE across six seeds | 95% Wilson intervals across problems |
-| Right panel | token efficiency (needs the allowance) | generated (output) tokens per team, as the paper's Figure 10 |
+| Right panel | token efficiency (needs the allowance) | four cost panels: input and generated tokens per team (as the paper's Figure 10), wall time per team and board posts per agent |
