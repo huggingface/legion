@@ -3,7 +3,7 @@
 name: mini-swarm
 model: Qwen/Qwen3.8-27B
 inference:
-  hf_router: {provider: cerebras}
+  hf_router: {provider: deepinfra}
 task:
   repo: https://huggingface.co/datasets/HuggingFaceSwarms/mini-swarm
   selector: mini-swarm

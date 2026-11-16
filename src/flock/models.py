@@ -136,7 +136,7 @@ class HFRouter(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    # A provider (`cerebras`), or a selection policy: `fastest` (the router's default),
+    # A provider (`deepinfra`), or a selection policy: `fastest` (the router's default),
     # `cheapest` or `preferred` (your order in the Hub settings). None: the router's default.
     provider: str | None = None
     bill_to: str | None = None  # an org the router bills instead of the key's owner (X-HF-Bill-To)
@@ -145,7 +145,7 @@ class HFRouter(BaseModel):
     @classmethod
     def _name(cls, v: str | None) -> str | None:
         if v is not None and not _ROUTER_NAME_RE.match(v):
-            raise ValueError(f"{v!r} must be a name, e.g. cerebras or huggingface")
+            raise ValueError(f"{v!r} must be a name, e.g. deepinfra or huggingface")
         return v
 
     @property
@@ -257,7 +257,7 @@ class Inference(BaseModel):
         return max(self.endpoints, key=lambda u: hashlib.sha256(f"{agent}\n{u}".encode()).digest())
 
     def describe(self) -> str:
-        """One line for status: `hf_router cerebras` or the URLs."""
+        """One line for status: `hf_router deepinfra` or the URLs."""
         if self.hf_router is not None:
             return f"hf_router {self.hf_router.provider or 'fastest'}" + (
                 f", billed to {self.hf_router.bill_to}" if self.hf_router.bill_to else "")
@@ -1974,7 +1974,7 @@ class ProviderStatus(BaseModel):
     """An inference block the types run on (`SwarmSpec.inference_blocks`)."""
 
     name: str  # `inference`, or `types.<t>.inference` for a type's own
-    endpoint: str  # Inference.describe(): `hf_router cerebras` or the URLs
+    endpoint: str  # Inference.describe(): `hf_router deepinfra` or the URLs
     types: list[str]  # agent types on it
     # each of their models -> the context window pinned at apply (None: not pinned yet)
     models: dict[str, int | None] = Field(default_factory=dict)

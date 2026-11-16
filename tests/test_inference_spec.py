@@ -35,7 +35,7 @@ def test_the_hf_router_is_the_default():
 
 
 @pytest.mark.parametrize(("provider", "sent", "policy"), [
-    ("cerebras", "Qwen/Qwen3.8-27B:cerebras", False), ("cheapest", "Qwen/Qwen3.8-27B:cheapest", True)])
+    ("deepinfra", "Qwen/Qwen3.8-27B:deepinfra", False), ("cheapest", "Qwen/Qwen3.8-27B:cheapest", True)])
 def test_a_router_provider_or_policy_is_added_to_the_model(provider, sent, policy):
     s = spec({"a": {**HB, "model": "Qwen/Qwen3.8-27B", "pricing": [1, 2, 0.5]}},
              {"hf_router": {"provider": provider, "bill_to": "huggingface"}})
@@ -45,7 +45,7 @@ def test_a_router_provider_or_policy_is_added_to_the_model(provider, sent, polic
     assert r.inference.headers == {"X-HF-Bill-To": "huggingface"}
 
 
-@pytest.mark.parametrize("model", ["huggingface/Qwen/Qwen3.8-27B", "Qwen/Qwen3.8-27B:cerebras"])
+@pytest.mark.parametrize("model", ["huggingface/Qwen/Qwen3.8-27B", "Qwen/Qwen3.8-27B:deepinfra"])
 def test_the_router_takes_a_plain_hub_id(model):
     msg = err({"a": {**HB, "model": model}})
     assert "types.a.model" in msg and "inference.hf_router.provider" in msg
@@ -76,7 +76,7 @@ def test_agents_spread_over_several_urls():
     ({"metrics": True}, "it needs urls"),
     ({"api_key_env": "hf_abc-123"}, "env var name"),
     ({"max_working": 0}, "greater than or equal to 1"),
-    ({"hf_router": {"provider": "cerebras:fast"}}, "must be a name"),
+    ({"hf_router": {"provider": "deepinfra:fast"}}, "must be a name"),
     ({"base_url": "http://a/v1"}, "Extra inputs are not permitted"),
 ])
 def test_block_validation(inference, needle):
@@ -85,7 +85,7 @@ def test_block_validation(inference, needle):
 
 def test_a_type_runs_on_its_own_block():
     s = spec({"a": {**HB, "model": "m"}, "b": {**HB, "model": "m", "inference": URLS}},
-             {"hf_router": {"provider": "cerebras"}})
+             {"hf_router": {"provider": "deepinfra"}})
     assert s.types["a"].provider_name == "inference"
     assert s.types["b"].provider_name == "types.b.inference"
     assert s.inference_blocks()["types.b.inference"].max_working == 3
@@ -141,7 +141,7 @@ def test_a_stored_swarm_that_does_not_load_is_skipped(tmp_path, caplog):
     old = good.model_dump(mode="json") | {"swarm": "old", "providers": {"inference": {
         "type": "openai_compat", "base_url": HF_ROUTER_URL, "api_key_env": "HF_TOKEN"}}}
     old.pop("inference")
-    old["types"]["w"]["model"] = "inference:huggingface/Qwen/Qwen3.8-27B:cerebras"
+    old["types"]["w"]["model"] = "inference:huggingface/Qwen/Qwen3.8-27B:deepinfra"
     store._x("INSERT INTO swarms (name, spec, applied_at) VALUES (?, ?, 0)",
              ["old", json.dumps(old)])
     with caplog.at_level("ERROR", logger="flock.controller.store"):

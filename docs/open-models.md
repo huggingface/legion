@@ -19,7 +19,7 @@ model: Qwen/Qwen3.8-27B            # a Hub id; with urls, the name the servers s
 # The HF router (the default)
 inference:
   hf_router:
-    provider: cerebras             # a provider, or a policy: fastest (the router's default), cheapest, preferred
+    provider: deepinfra            # a provider, or a policy: fastest (the router's default), cheapest, preferred
     bill_to: huggingface           # optional: bill an org (X-HF-Bill-To)
   api_key_env: HF_INFERENCE_TOKEN  # default: HF_TOKEN
 
@@ -38,7 +38,7 @@ inference:
 
 | Field | Meaning |
 |---|---|
-| `hf_router.provider` | A router provider (`cerebras`, `deepinfra`, ...), or a selection policy: `fastest`, `cheapest`, `preferred`. Unset: the router's default (`fastest`). flock sends `<model>:<provider>`. |
+| `hf_router.provider` | A router provider (`deepinfra`, `cerebras`, ...), or a selection policy: `fastest`, `cheapest`, `preferred`. Unset: the router's default (`fastest`). flock sends `<model>:<provider>`. |
 | `hf_router.bill_to` | An org the router bills instead of the key's owner: Pi and preflight send `X-HF-Bill-To`. |
 | `urls` | One or more base URLs ending in `/v1`, all serving `model`. A comma-separated string works too (`urls: ${VLLM_URLS}`). |
 | `api_key_env` | The env var that holds the key (never the key itself). Default: `HF_TOKEN` for `hf_router`, none for `urls`. |

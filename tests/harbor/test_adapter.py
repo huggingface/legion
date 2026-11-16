@@ -310,8 +310,8 @@ def endpoint_spec(inference, backend="docker", window=None):
 
 
 async def test_pi_gets_the_router_provider_bill_to_and_context_window(fakes, tmp_path):
-    ts = endpoint_spec({"hf_router": {"provider": "cerebras", "bill_to": "huggingface"}},
-                       window=65536)
+    ts = endpoint_spec({"hf_router": {"provider": "deepinfra", "bill_to": "huggingface"}},
+                       window=262144)
     a = make_adapter(tmp_path / "work" / "agent-0000", "agent-0000", ts)
     _, events = await start(a)
     await a.send("go")
@@ -319,8 +319,8 @@ async def test_pi_gets_the_router_provider_bill_to_and_context_window(fakes, tmp
     provider = pi_models(fakes)
     assert provider["baseUrl"] == "https://router.huggingface.co/v1"
     assert provider["headers"] == {"X-HF-Bill-To": "huggingface"}
-    assert provider["models"] == [{"id": "moonshotai/Kimi-K2.5:cerebras", "contextWindow": 65536}]
-    assert "--model moonshotai/Kimi-K2.5:cerebras" in fakes.pi[0]
+    assert provider["models"] == [{"id": "moonshotai/Kimi-K2.5:deepinfra", "contextWindow": 262144}]
+    assert "--model moonshotai/Kimi-K2.5:deepinfra" in fakes.pi[0]
     await a.close()
 
 

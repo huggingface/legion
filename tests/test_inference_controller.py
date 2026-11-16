@@ -21,7 +21,7 @@ from flock.models import AgentHeartbeat, SwarmSpec, TokenUsage, WorkerHeartbeat
 from . import fake_models
 from .conftest import HB, TOKEN
 
-ROUTER = {"hf_router": {"provider": "cerebras"}}
+ROUTER = {"hf_router": {"provider": "deepinfra"}}
 GPU1 = {"urls": ["http://qwen-job:8000/v1"], "api_key_env": "VLLM_API_KEY", "max_working": 2}
 
 
@@ -56,7 +56,7 @@ async def test_the_key_is_added_to_job_secrets(client, jobs, settings, tick):
 
 async def test_invalid_spec_is_rejected_at_apply(client):
     raw = pspec().model_dump(mode="json")
-    raw["types"]["worker"]["model"] = "Qwen/X:cerebras"
+    raw["types"]["worker"]["model"] = "Qwen/X:deepinfra"
     r = await client.put("/swarms/p", json=raw)
     assert r.status_code == 422
     assert "types.worker.model" in r.text and "hf_router.provider" in r.text
@@ -97,7 +97,7 @@ async def test_servers_you_run_are_free_and_status_shows_each_block(client, cloc
     assert gpu1 == {"name": "types.local.inference", "endpoint": "urls http://qwen-job:8000/v1",
                     "types": ["local"], "models": {"Qwen/Small": fake_models.WINDOW},
                     "working": 1, "max_working": 2, "zero_usage_agents": 0}
-    assert st["status"]["providers"]["inference"]["endpoint"] == "hf_router cerebras"
+    assert st["status"]["providers"]["inference"]["endpoint"] == "hf_router deepinfra"
     page = (await client.get("/")).text
     assert "types.local.inference:Qwen/Small" in page and "working 1 / max 2" in page
 
@@ -488,7 +488,7 @@ async def test_preflight_tool_call_seen(preflight_client):
     assert all(x["tool_call_seen"] and x["follow_up_ok"] and x["usage_reported"]
                and x["latency_ms"] is not None and x["warning"] is None for x in rep["results"])
     assert len(seen) == 4  # two turns per model
-    hf = next(x for x in seen if x["model"] == "Qwen/Qwen3.8-27B:cerebras")  # the router's provider
+    hf = next(x for x in seen if x["model"] == "Qwen/Qwen3.8-27B:deepinfra")  # the router's provider
     assert hf["auth"] == "Bearer hf-secret" and hf["tools"][0]["function"]["name"] == "get_time"
 
 

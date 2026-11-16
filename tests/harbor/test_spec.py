@@ -163,7 +163,7 @@ COMPILE = """
 name: lanes
 model: Qwen/Qwen3.8-27B
 inference:
-  hf_router: {provider: cerebras}
+  hf_router: {provider: deepinfra}
   max_working: 40
   reasoning_effort: high
   api_key_env: HF_INFERENCE_TOKEN
@@ -211,7 +211,7 @@ def test_compile_gives_one_harbor_type_per_role(tmp_path):
     )
     blocks = swarm.inference_blocks()  # the run's, and the role's own
     assert blocks["inference"].model_dump(exclude_defaults=True) == {
-        "hf_router": {"provider": "cerebras"}, "api_key_env": "HF_INFERENCE_TOKEN",
+        "hf_router": {"provider": "deepinfra"}, "api_key_env": "HF_INFERENCE_TOKEN",
         "max_working": 40, "reasoning_effort": "high"}
     assert blocks["types.safety.inference"].model_dump(exclude_defaults=True) == {
         "urls": ["https://vllm.example/v1"], "api_key_env": "VLLM_KEY"}
@@ -222,7 +222,7 @@ def test_compile_gives_one_harbor_type_per_role(tmp_path):
     answers, safety = swarm.types["answers"], swarm.types["safety"]
     assert answers.harness.value == safety.harness.value == "harbor"
     assert answers.model == answers.harness_model == "Qwen/Qwen3.8-27B"
-    assert answers.resolved_model.request_model == "Qwen/Qwen3.8-27B:cerebras"
+    assert answers.resolved_model.request_model == "Qwen/Qwen3.8-27B:deepinfra"
     assert answers.resolved_model.pricing == [0.3, 1.2, 0.03]
     assert answers.replicas == 0  # the ramp raises them to max
     assert answers.replicas_ramp.model_dump(include={"start", "add", "every", "max"}) == {
