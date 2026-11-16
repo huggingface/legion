@@ -11,7 +11,8 @@ N), `flock launch`, wait until its loop is done and its agents are idle, `flock 
 (each Trial is graded as the worker drains; the results land in the run directory), then
 experiments/s3/metrics.py's row plus the wall time goes to `<root>/rows.jsonl`. Until #121
 is fixed, a team must run on one worker incarnation (a relaunch or a preemption overwrites
-results): one that didn't runs again as `<task>-rK` (its row: `reruns`). A team that
+results); and a spot reclaim may take its controller, or leave rewards unverified. A run that
+doesn't count (why_invalid) runs again as `<task>-rK` (its row: `reruns`). A team that
 has a row is skipped, so the same command resumes. At the end plot.py writes the figure, CSV
 and table, and with --dataset each run directory (spec, results, logs; never run.env) goes to
 that private dataset under `<prefix>/<task>/`.
@@ -42,6 +43,7 @@ REPO = HERE.parents[2]
 MODEL = "Qwen/Qwen3.5-27B"
 SECRET = re.compile(r"hf_[A-Za-z0-9]{30,}")
 lock, init_lock = threading.Lock(), threading.Lock()
+LOST = "controller lost"
 
 
 def load(name: str, path: Path):
@@ -102,15 +104,24 @@ def profile(root: Path, n: int) -> Path:
     return path
 
 
+def controller_state(name: str) -> str:
+    """The Slurm state of the run's controller job (`flock-ctl-<run>`), '' when it has none."""
+    out = subprocess.run(["squeue", "-h", "-n", f"flock-ctl-{name}", "-o", "%T"],
+                         capture_output=True, text=True, check=False).stdout.split()
+    return out[0] if out else ""
+
+
 def wait_done(run_dir: Path, task: str, n: int, timeout: float) -> str:
-    """Poll `flock status` until the loop is done and every agent is idle: 'done', or why not."""
+    """Poll `flock status` until the loop is done and every agent is idle: 'done', or why not.
+    A controller that stops answering and isn't running (a spot reclaim requeued it, or it is
+    gone) is LOST."""
     deadline, unanswered = time.monotonic() + timeout, 0
     while time.monotonic() < deadline:
         status = flock(run_dir, "status", task, timeout=120)
         text = status.stdout
         unanswered = unanswered + 1 if status.returncode != 0 else 0
-        if unanswered >= 3:  # no controller: already released (an adopted run), or gone
-            return "no controller answers"
+        if unanswered >= 3 and controller_state(task) != "RUNNING":
+            return LOST
         if re.search(r"crashloop|launch_refused", text):
             return "worker failed: " + " ".join(text.split())[:300]
         if re.search(r"^loop agent: done", text, re.MULTILINE) and re.search(
@@ -158,8 +169,14 @@ def finish(args, run_dir: Path, name: str, problem: int, n: int, started: float,
            why: str | None = None) -> dict:
     """Wait for a launched team, release it (its Trials are graded) and make its row."""
     why = why or wait_done(run_dir, name, n, args.team_timeout)
-    say(name, "loop:", why, "- releasing")
-    release = flock(run_dir, "stop", name, "--release")
+    if why == LOST:  # nothing to release: end its jobs, and the team runs again
+        say(name, "controller lost (spot reclaim?): cancelling its jobs")
+        for job in (f"flock-ctl-{name}", f"{name}-agent-w0000"):
+            subprocess.run(["scancel", "-n", job], check=False)
+        release = subprocess.CompletedProcess([], 1)
+    else:
+        say(name, "loop:", why, "- releasing")
+        release = flock(run_dir, "stop", name, "--release")
     ended = time.time()
     return metrics.row(run_dir) | {
         "problem": problem, "wall_s": round(ended - started, 1), "outcome": why,
@@ -170,6 +187,20 @@ def finish(args, run_dir: Path, name: str, problem: int, n: int, started: float,
         "started_at": datetime.fromtimestamp(started, UTC).isoformat()}
 
 
+def why_invalid(row: dict) -> str:
+    """Why a team's run doesn't count ('' when it does): a model result needs the run on one
+    worker incarnation (#121), its controller kept, every agent's reward and the board export.
+    A missing reward means the verifier never ran: the infrastructure failed, not the team."""
+    return "; ".join(why for why, bad in (
+        (f"{row.get('incarnations')} worker incarnations", row.get("incarnations") != 1),
+        (LOST, row.get("outcome") == LOST),
+        (f"missing {', '.join(row['missing'])}"[:120], bool(row["missing"]))) if bad)
+
+
+def valid(row: dict) -> bool:
+    return not why_invalid(row)
+
+
 def run_team(args, root: Path, secrets: Path, problem: int, n: int) -> dict | None:
     """A team, run again (as `<task>-rK`) until it runs on one worker incarnation (#121)."""
     task = f"agg-p{problem:02d}-n{n:02d}"
@@ -178,9 +209,9 @@ def run_team(args, root: Path, secrets: Path, problem: int, n: int) -> dict | No
         if row is None:
             return None
         row["reruns"] = reruns
-        if row["incarnations"] == 1:
+        if valid(row):
             break
-        say(task, f"ran on {row['incarnations']} worker incarnations: running it again")
+        say(task, f"run doesn't count ({why_invalid(row)}): running it again")
         with lock, (root / "rows-discarded.jsonl").open("a") as f:
             f.write(json.dumps(row) + "\n")
     with lock, (root / "rows.jsonl").open("a") as f:
@@ -218,8 +249,8 @@ def main(argv=None) -> int:
     parser.add_argument("--agents", default="1,2,4,8,16")
     parser.add_argument("--parallel", type=int, default=8, help="teams at once")
     parser.add_argument("--team-timeout", type=float, default=2400, help="s until a release")
-    parser.add_argument("--max-reruns", type=int, default=2,
-                        help="runs again of a team that ran on more than one worker (#121)")
+    parser.add_argument("--max-reruns", type=int, default=3,
+                        help="runs again of a team whose run doesn't count (why_invalid)")
     parser.add_argument("--root", type=Path, default=REPO / ".flock" / "s3-sweep")
     parser.add_argument("--bucket", default="lewtun/s3-aggregation-sweep",
                         help="private bucket for the runs' state (a new one per root: a "
@@ -242,8 +273,13 @@ def main(argv=None) -> int:
                        f"BUCKET=hf://buckets/{args.bucket}\n")
     os.umask(old)
     rows_file = root / "rows.jsonl"
-    done = {(r["problem"], r["agents"]) for r in map(json.loads, rows_file.read_text().splitlines())
-            } if rows_file.exists() else set()
+    rows = [json.loads(x) for x in rows_file.read_text().splitlines()] if rows_file.exists() else []
+    if bad := [r for r in rows if not valid(r)]:  # an earlier driver kept them: run them again
+        with (root / "rows-discarded.jsonl").open("a") as f:
+            f.write("".join(json.dumps(r) + "\n" for r in bad))
+        rows_file.write_text("".join(json.dumps(r) + "\n" for r in rows if valid(r)))
+        say(f"{len(bad)} rows that don't count moved to rows-discarded.jsonl")
+    done = {(r["problem"], r["agents"]) for r in rows if valid(r)}
     teams = [(p, n) for p in numbers(args.problems) for n in numbers(args.agents)
              if (p, n) not in done]
     say(f"{len(teams)} teams to run ({len(done)} done), {args.parallel} at once, on {args.urls}")
