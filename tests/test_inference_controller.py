@@ -185,17 +185,48 @@ async def test_apply_checks_every_url_and_pins_the_smallest_window(store, clock)
         assert (await put(c, spec)).status_code == 200 and seen == []
 
 
-async def test_a_server_without_a_window_takes_context_window_or_is_refused(store, clock):
-    ollama = {"object": "list", "data": [{"id": "qwen3.5:2b", "object": "model"}]}
-    urls = {"urls": ["http://box:11434/v1"]}
-    async with checked(store, clock, ollama) as c:
-        r = await put(c, one(urls, "qwen3.5:2b"))
-        assert r.status_code == 400 and r.json()["detail"] == (
-            "types.worker.model 'qwen3.5:2b' on inference: no server reports the model's "
-            "context window: set inference.context_window")
-        assert (await put(c, one({**urls, "context_window": 16384}, "qwen3.5:2b"))).status_code == 200
+def by_host(replies: dict[str, dict]) -> httpx.MockTransport:
+    """`GET /models` answered per host."""
+    return httpx.MockTransport(lambda request: httpx.Response(200, json=replies[request.url.host]))
+
+
+QWEN = fake_models.listing(["qwen3.5:2b"], None)  # Ollama's: no window
+WITH_TOOLS_NO_WINDOW = router_listing(provider("cerebras", 65536), provider("newco"))
+
+
+@pytest.mark.parametrize(("inference", "replies", "fallback", "window_or_error"), [
+    ({"urls": ["http://box:11434/v1"]}, {"box": QWEN}, None,
+     "http://box:11434/v1 reports no context window for 'qwen3.5:2b': set inference.context_window"),
+    ({"urls": ["http://box:11434/v1"]}, {"box": QWEN}, 16384, 16384),
+    # each server takes the fallback when it reports none, and the smallest wins
+    ({"urls": ["http://a:8000/v1", "http://box:11434/v1"]},
+     {"a": fake_models.listing(["qwen3.5:2b"], 40960), "box": QWEN}, None,
+     "http://box:11434/v1 reports no context window"),
+    ({"urls": ["http://a:8000/v1", "http://box:11434/v1"]},
+     {"a": fake_models.listing(["qwen3.5:2b"], 40960), "box": QWEN}, 8192, 8192),
+    ({"urls": ["http://a:8000/v1", "http://box:11434/v1"]},
+     {"a": fake_models.listing(["qwen3.5:2b"], 40960), "box": QWEN}, 65536, 40960),
+    # under a router policy, every provider with tools may serve a request
+    ({"hf_router": {}}, {"router.huggingface.co": WITH_TOOLS_NO_WINDOW}, None,
+     "HF router provider 'newco' reports no context window"),
+    ({"hf_router": {}}, {"router.huggingface.co": WITH_TOOLS_NO_WINDOW}, 32768, 32768),
+    ({"hf_router": {"provider": "cerebras"}}, {"router.huggingface.co": WITH_TOOLS_NO_WINDOW},
+     None, 65536),
+])
+async def test_a_server_without_a_window_takes_context_window_or_is_refused(
+        store, clock, inference, replies, fallback, window_or_error):
+    model = "Qwen/Qwen3.8-27B" if "hf_router" in inference else "qwen3.5:2b"
+    block = {**inference, **({"context_window": fallback} if fallback else {})}
+    app = create_app(store, TOKEN, clock=clock, inference_transport=by_host(replies))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t",
+                                 headers={"Authorization": f"Bearer {TOKEN}"}) as c:
+        r = await put(c, one(block, model))
+        if isinstance(window_or_error, str):
+            assert r.status_code == 400 and window_or_error in r.json()["detail"], r.text
+            return
+        assert r.status_code == 200, r.text
         st = (await c.get("/swarms/p")).json()
-    assert st["spec"]["types"]["worker"]["resolved_model"]["context_window"] == 16384
+    assert st["spec"]["types"]["worker"]["resolved_model"]["context_window"] == window_or_error
 
 
 async def test_a_server_that_wants_a_key_the_controller_lacks(store, clock):

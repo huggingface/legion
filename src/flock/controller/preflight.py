@@ -21,7 +21,7 @@ from typing import Any
 
 import httpx
 
-from flock.controller.inference import InferenceError, aget, served_window
+from flock.controller.inference import InferenceError, aget, context_window
 from flock.models import (
     Harness,
     PreflightReport,
@@ -154,7 +154,8 @@ async def probe(
     t0 = time.monotonic()
     tok2 = 0
     try:
-        served_window(p, r.model_id, {u: await aget(client, u, key) for u in p.endpoints})
+        context_window(p, r.model_id, {u: await aget(client, u, key) for u in p.endpoints},
+                       r.provider_name)
         tok1 = await _probe_chat(client, r, key, result, timeout)
     except InferenceError as e:
         result.latency_ms = int((time.monotonic() - t0) * 1000)

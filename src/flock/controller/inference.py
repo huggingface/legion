@@ -3,15 +3,15 @@ model is served where its `inference` block says, and the context window it is s
 pinned into the spec (`resolved_model.context_window`), for Pi's model config and `flock status`.
 
 The controller runs it at apply (`check`) and preflight runs it before its probe
-(`served_window`), with `GET <url>/models` on each endpoint as written:
+(`context_window`), with `GET <url>/models` on each endpoint as written:
 - the HF router lists each model with its providers (`context_length`, `supports_tools`): the
-  model must be listed, a named provider must serve it with tools, and the window is that
-  provider's; under a policy (no provider, or `fastest`, `cheapest`, `preferred`) it is the
-  smallest among the providers with tools;
+  model must be listed, and a named provider must serve it with tools. A request reaches that
+  provider, or under a policy (no provider, or `fastest`, `cheapest`, `preferred`) any provider
+  with tools;
 - a server you run lists the names it serves, and `model` must be one of them; vLLM and SGLang
-  report `max_model_len`, and the window is the smallest over the servers.
-A server that reports no window takes `inference.context_window`; without either, the apply is
-refused.
+  report `max_model_len`.
+The window is the smallest over the servers or providers a request may reach, each one's own,
+or `inference.context_window` for one that reports none; without either, the apply is refused.
 """
 
 from __future__ import annotations
@@ -42,25 +42,41 @@ def _window(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 
-def served_window(inference: Inference, model: str, listings: Mapping[str, Any]) -> int | None:
-    """The context window `model` is served with on `inference`, from each endpoint's
-    `GET /models` reply (`listings`, by URL); None when no endpoint reports one. Raises
-    InferenceError, naming what is served, when the model is not."""
-    if inference.hf_router is not None:
-        return _router_window(inference.hf_router, model, listings[HF_ROUTER_URL])
+def context_window(inference: Inference, model: str, listings: Mapping[str, Any],
+                   block: str = "inference") -> int:
+    """The context window `model` is served with on `inference` (its block named `block`), from
+    each endpoint's `GET /models` reply (`listings`, by URL): the smallest over the servers or
+    router providers a request may reach, `inference.context_window` for one that reports none.
+    Raises InferenceError, naming what is served when the model is not, or the server or
+    provider that reports no window when there is no fallback."""
     windows = []
+    for where, window in served_windows(inference, model, listings):
+        window = window or inference.context_window
+        if window is None:
+            raise InferenceError(f"{where} reports no context window for {model!r}: set "
+                                 f"{block}.context_window")
+        windows.append(window)
+    return min(windows)
+
+
+def served_windows(inference: Inference, model: str,
+                   listings: Mapping[str, Any]) -> list[tuple[str, int | None]]:
+    """(where, window or None) of each server, or each router provider a request may reach,
+    that serves `model`. Raises InferenceError, naming what is served, when the model is not."""
+    if inference.hf_router is not None:
+        return _router_windows(inference.hf_router, model, listings[HF_ROUTER_URL])
+    out = []
     for url in inference.endpoints:
         entries = _entries(listings[url])
         entry = next((e for e in entries if e.get("id") == model), None)
         if entry is None:
             served = ", ".join(sorted(str(e.get("id")) for e in entries)) or "nothing"
             raise InferenceError(f"{url} does not serve {model!r}; it serves: {served}")
-        if (w := _window(entry.get("max_model_len"))) is not None:
-            windows.append(w)
-    return min(windows) if windows else None
+        out.append((url, _window(entry.get("max_model_len"))))
+    return out
 
 
-def _router_window(router: HFRouter, model: str, listing: Any) -> int | None:
+def _router_windows(router: HFRouter, model: str, listing: Any) -> list[tuple[str, int | None]]:
     entries = _entries(listing)
     entry = next((e for e in entries if e.get("id") == model), None)
     if entry is None:
@@ -80,8 +96,8 @@ def _router_window(router: HFRouter, model: str, listing: Any) -> int | None:
         tools = [named]
     elif not tools:
         raise InferenceError(f"no HF router provider lists tool support for {model!r}")
-    windows = [w for p in tools if (w := _window(p.get("context_length"))) is not None]
-    return min(windows) if windows else None
+    return [(f"HF router provider {p.get('provider')!r}", _window(p.get("context_length")))
+            for p in tools]
 
 
 def _get(client: httpx.Client, url: str, key: str | None) -> Any:
@@ -135,12 +151,8 @@ def check(spec: SwarmSpec, secrets: Mapping[str, str],
                     if (url, key) not in listings:
                         listings[url, key] = _get(client, url, key)
                     got[url] = listings[url, key]
-                served = served_window(r.inference, r.model_id, got)
+                r.context_window = context_window(r.inference, r.model_id, got, r.provider_name)
             except InferenceError as e:
                 hint = (f" ({r.inference.key_env} is not set on the controller)"
                         if r.inference.key_env and key is None and "HTTP 401" in str(e) else "")
                 raise InferenceError(f"{where}: {e}{hint}") from None
-            r.context_window = served or r.inference.context_window
-            if r.context_window is None:
-                raise InferenceError(f"{where}: no server reports the model's context window: "
-                                     f"set {r.provider_name}.context_window")

@@ -186,10 +186,11 @@ At apply the controller reads `GET <url>/models` from each endpoint, as written:
 - **Each server you run** must serve `model`; the apply lists what it serves when it does not.
 
 It then pins the context window the model is served with into the spec
-(`types.<t>.resolved_model.context_window`): vLLM's and SGLang's `max_model_len` (the smallest
-over the servers), or the router provider's `context_length` (under a policy, the smallest among
-the providers with tool support). A server that reports none takes `inference.context_window`;
-without either, the apply is refused. Pi's model config gets it as `contextWindow`, so Pi
+(`types.<t>.resolved_model.context_window`): the smallest over the servers, or the router
+providers a request may reach (the named one, or under a policy every one with tool support).
+Each counts with its own window (vLLM's and SGLang's `max_model_len`, the router's
+`context_length`), or `inference.context_window` when it reports none; one without either
+refuses the apply, naming it. Pi's model config gets it as `contextWindow`, so Pi
 compacts before the server refuses a request, and `flock status` shows it per model. A re-apply
 with the same block and model keeps the pinned value without asking the servers again.
 
