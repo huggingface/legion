@@ -324,9 +324,10 @@ async def test_pi_gets_the_router_provider_bill_to_and_context_window(fakes, tmp
     await a.close()
 
 
-async def test_pi_reaches_this_machine_through_podman_and_a_moved_server(fakes, tmp_path):
-    """`localhost` is the host as podman containers reach it; a server you run takes no key (Pi
-    gets a placeholder); new `urls` (`flock update`) reach the running Trial at its next turn."""
+async def test_pi_reaches_this_machine_through_podman(fakes, tmp_path):
+    """`localhost` is the host as podman containers reach it, allowlisted; a server you run takes
+    no key (Pi gets a placeholder). A running Trial keeps its endpoint and allowlist: a changed
+    block restarts the type's workers instead (the controller)."""
     ts = endpoint_spec({"urls": ["http://localhost:8000/v1"]}, "podman", 32768)
     a = make_adapter(tmp_path / "work" / "agent-0000", "agent-0000", ts)
     sid, events = await start(a)
@@ -344,7 +345,8 @@ async def test_pi_reaches_this_machine_through_podman_and_a_moved_server(fakes, 
     assert await a.start(a.workdir, sid, moved) == sid
     await a.send("again")
     await read(a.events(), "turn_ended")
-    assert len(fakes.trials) == 1 and pi_models(fakes)["baseUrl"] == "http://10.53.0.9:8000/v1"
+    assert len(fakes.trials) == 1
+    assert pi_models(fakes)["baseUrl"] == "http://host.containers.internal:8000/v1"
     await a.close()
 
 

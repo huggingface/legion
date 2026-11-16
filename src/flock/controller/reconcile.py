@@ -288,6 +288,23 @@ def rotate_worker(store: Store, swarm: str, w: Row, now: float) -> None:
         type="memory_rotation", ts=datetime.fromtimestamp(now, UTC), agent="", data=data)])
 
 
+def restart_workers(store: Store, swarm: str, type_name: str, now: float, why: str) -> list[str]:
+    """Drain the type's live workers: each ends in a planned restart, and its agents resume on
+    a new job, launched with the current spec and secrets. `workers_restarted` on the swarm
+    stream names them."""
+    drained = []
+    for w in store.list_workers(swarm, type_name):
+        if w["job_id"] is not None and not w["draining"] and w["retire_at"] is None:
+            store.enqueue_command(w["id"], DrainCommand().model_dump_json())
+            store.update_worker(w["id"], draining=1)
+            drained.append(w["id"])
+    if drained:
+        store.append_events(swarm, swarm_stream(swarm), [Event(
+            type="workers_restarted", ts=datetime.fromtimestamp(now, UTC), agent="",
+            data={"type": type_name, "workers": drained, "why": why})])
+    return drained
+
+
 def rotatable(w: Row, now: float, lv: Liveness) -> bool:
     return (w["job_id"] is not None and not w["draining"] and not w["retire_at"]
             and worker_state(w, now, lv) == WorkerState.running)

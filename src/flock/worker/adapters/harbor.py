@@ -110,8 +110,6 @@ class HarborAdapter:
                     raise RuntimeError("the Trial start was cancelled: the agent closed") from None
             if not self.alive():
                 await self._new_trial(restore=bool(session_id and files))
-            else:
-                self._endpoint(self.trial.agent.channel)  # a `flock update` of the urls
         except ResumeError:
             self.session_id = None  # the runtime's fresh start gets a new id
             raise
@@ -224,8 +222,8 @@ class HarborAdapter:
             run_id=os.environ.get("SWARM"))  # as the upstream launcher: the run (swarm) a board spans
 
     def _endpoint(self, channel: Any) -> None:
-        """The type spec's endpoint into the Trial's channel: Pi's models.json takes it at the
-        next turn. A server that moved (new `urls`, `flock update`) reaches a running Trial so."""
+        """The type spec's endpoint into a new Trial's channel, for Pi's models.json. A changed
+        block restarts the type's workers (controller), so a Trial keeps its endpoint."""
         from flock.harbor.launch import agent_url
 
         r = self.spec.resolved_model

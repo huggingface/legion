@@ -93,7 +93,9 @@ model family; `qwen3_coder` for Qwen3.5 and Qwen3.8).
     Under `compute: slurm`, `localhost` would be each worker's own node and is refused too.
 - **Keys.** A server without a key needs no `api_key_env`; Pi then gets a placeholder key.
 - **A server that moves.** When a server restarts on another node, update `urls` and run
-  `flock update`: each agent calls its new server from its next turn.
+  `flock update`. A change to a running type's block (anything but `max_working`) restarts the
+  type's workers: they drain (in-flight turns finish), and their agents resume on new workers,
+  whose Trials call and allowlist the new servers and get the new key.
 - **Cost.** $0 unless the spec sets `pricing`; the real cost is the GPUs' time, which flock does
   not count.
 
@@ -175,7 +177,8 @@ environment: {backend: podman}
 
 `flock init` checks that the servers answer a tool call (its `providers` check), and
 `flock launch` checks the model and pins its context window. A server that restarts on another
-node gets a new address: update `VLLM_URLS` in run.env and run `flock update`.
+node gets a new address: update `VLLM_URLS` in run.env and run `flock update` (the type's
+workers restart on the new URLs).
 
 ## Model check and context window
 

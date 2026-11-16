@@ -17,6 +17,16 @@ SKIP_KEYS = ("resolved_model", "channel_id", "kickoff_id", "tools_version")
 WORLD_DERIVED = ("endpoint", "manifest", "credential_origin", "credential_id")
 
 
+def inference_changed(old: SwarmSpec, new: SwarmSpec) -> list[str]:
+    """Types of both specs whose inference block changed in anything but `max_working` (the
+    controller's): their workers hold its key (job secrets) and their Trials its endpoints."""
+    def held(ts):
+        r = ts.resolved_model
+        return r and r.inference.model_copy(update={"max_working": None})
+    return [n for n, ts in new.types.items()
+            if n in old.types and held(old.types[n]) != held(ts)]
+
+
 def _flat(d: dict[str, Any], prefix: str = "") -> dict[str, Any]:
     out: dict[str, Any] = {}
     for k, v in d.items():

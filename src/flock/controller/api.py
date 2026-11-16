@@ -33,7 +33,7 @@ from flock.controller.inference import InferenceError
 from flock.controller.inference import check as inference_check
 from flock.controller.loop import LoopEngine, loop_status, swarm_stream
 from flock.controller.preflight import run_preflight
-from flock.controller.reconcile import agent_state, record_heartbeat, worker_state
+from flock.controller.reconcile import agent_state, record_heartbeat, restart_workers, worker_state
 from flock.controller.spawn import (
     Refused,
     SpawnAck,
@@ -47,7 +47,7 @@ from flock.controller.spawn import (
 )
 from flock.controller.spawn import spawn as spawn_child
 from flock.controller.store import Row, Store, agent_tokens
-from flock.live import diff_specs, keep_replicas
+from flock.live import diff_specs, inference_changed, keep_replicas
 from flock.models import (
     AgentState,
     AgentStatus,
@@ -951,6 +951,10 @@ def create_app(
                 worlds.discard(swarm)  # the candidate world this losing launch started
                 raise HTTPException(412, f"swarm {swarm!r} already exists")
             store.put_swarm(spec, clock().timestamp())
+        for type_name in inference_changed(prev["spec"], spec) if prev else []:
+            # new endpoints or key (docs/live.md): the workers hold the key, the Trials the
+            # endpoints and their allowlist, so the type's workers restart on the new block
+            restart_workers(store, swarm, type_name, clock().timestamp(), "inference changed")
         if diff:  # an effective apply: a new generation, its spec kept in spec_history
             src = spec_source(x_flock_source)
             gen = store.record_spec(spec, clock().timestamp(), src, diff[:50], new=prev is None)

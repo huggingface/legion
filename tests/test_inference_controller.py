@@ -97,6 +97,43 @@ async def test_servers_you_run_are_free_and_status_shows_each_block(client, cloc
     assert "types.local.inference:Qwen/Small" in page and "working 1 / max 2" in page
 
 
+async def test_a_changed_block_restarts_its_types_workers(client, jobs, settings, tick, clock):
+    """Workers hold the block's key (job secrets) and their Trials its endpoints and allowlist:
+    a change restarts the type's workers, which relaunch with the new block; max_working (the
+    controller's) restarts nothing."""
+    settings.secret_source = {"VLLM_API_KEY": "v", "NEW_KEY": "n"}
+
+    def spec(**inference):
+        return pspec(ROUTER, local={**HB, "model": "Qwen/Small", "replicas": 1,
+                                    "inference": {**GPU1, **inference}})
+
+    async def drains(wid):
+        cmds = (await client.get(f"/workers/{wid}/commands?wait=0")).json()["commands"]
+        return [c["kind"] for c in cmds if c["kind"] == "drain"]
+
+    assert (await put(client, spec())).status_code == 200
+    tick()
+    (first,) = jobs.launches
+    wid = first["worker_id"]
+    assert first["secrets"]["VLLM_API_KEY"] == "v"
+    assert (await put(client, spec(max_working=5))).status_code == 200
+    assert await drains(wid) == []
+    moved = spec(urls=["http://qwen-job-2:8000/v1"], api_key_env="NEW_KEY")
+    assert (await put(client, moved)).status_code == 200
+    assert await drains(wid) == ["drain"]
+    events = (await client.get("/swarms/p/events")).json()["events"]
+    assert [e["data"] for e in events if e["type"] == "workers_restarted"] == [
+        {"type": "local", "workers": [wid], "why": "inference changed"}]
+    jobs.set_stage(first["job_id"], "COMPLETED")  # the drained worker exits
+    tick()
+    clock.advance(60)
+    tick()
+    second = jobs.launches[-1]
+    assert second["worker_id"] == wid and second["job_id"] != first["job_id"]
+    assert second["secrets"]["NEW_KEY"] == "n" and "VLLM_API_KEY" not in second["secrets"]
+    assert second["spec"].resolved_model.inference.urls == ["http://qwen-job-2:8000/v1"]
+
+
 # --------------------------------------------------------------------------- the apply's check
 
 

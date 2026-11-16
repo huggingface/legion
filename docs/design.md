@@ -185,8 +185,9 @@ the apply checks the model against each endpoint's `GET /models` and pins the co
 is served with (`controller/inference.py`), which Pi's model config and `flock status` get. The
 block's key goes into the type's job secrets, preflight probes each model with a tool call, and
 `max_working` caps the agents of the swarm in a turn on the block, enforced at prompt admission.
-`flock update` may change a running Harbor type's block: new `urls` reach each agent at its next
-turn. How-to and fields: docs/open-models.md.
+`flock update` may change a running Harbor type's block: anything but `max_working` restarts the
+type's workers (they hold the key, their Trials the endpoints and allowlist). How-to and
+fields: docs/open-models.md.
 
 ### States
 
