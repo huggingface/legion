@@ -238,6 +238,16 @@ an older configuration stand out.
 The controller: `FLOCK_COMPUTE=slurm`. An unknown `FLOCK_COMPUTE` stops it at
 start (it never falls back to HF Jobs); the first log line names the kind and the client.
 
+## Results
+
+A Harbor worker's `WORK_ROOT` is node-local (`/tmp/flock/<worker id>/work`) and goes with its
+job, so `worker.sbatch` sets `FLOCK_RESULTS_DIR=<run dir>/results` and what a run is graded on
+lands on the shared disk: each Trial's `result.json`, `config.json` and `verifier/` as the Trial
+ends, in `results/<swarm>/<agent>/trials/<trial>/`, and the resources' exports (the board's
+`board.jsonl` and `channels.json`) as the worker exits, in `results/<swarm>/<worker id>/resources/`.
+A Trial is verified when its worker drains (`flock stop --release`, or the end of its lifetime):
+stop a run that way before reading its rewards.
+
 ## Job states
 
 `squeue -h -j <id> -o %T` first (finished jobs stay a few minutes), then

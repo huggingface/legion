@@ -4,6 +4,11 @@ the vendored tool bundle, the task downloaded once, and on hf-sandbox a thread p
 every sandbox call. Prepared at the worker's first Trial start; a failed attempt is retried by
 the next one. The worker stops the resources when it exits.
 
+With FLOCK_RESULTS_DIR set (a Slurm worker: `<run dir>/results`, on the shared disk), what a run
+is graded on outlives the worker's WORK_ROOT (node-local): each ended Trial's `result.json`,
+`config.json` and `verifier/` go to `<dir>/<swarm>/<agent>/trials/<trial>/` (adapters/harbor.py)
+and the resources' exports, at exit, to `<dir>/<swarm>/<worker id>/resources/`.
+
 Each agent is added to the resources as its Trial starts and removed when it leaves (another
 worker of the type, a spawned agent and a re-assigned one alike), and the resources' events for
 an agent (the board's mentions) go to `emit(agent, event)`, which the worker forwards as the
@@ -15,7 +20,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+import os
+import shutil
+from collections.abc import Awaitable, Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -24,6 +31,30 @@ from flock.models import TypeSpec
 from flock.secrets_file import exposed, secret_env
 
 log = logging.getLogger(__name__)
+
+RESULTS_ENV = "FLOCK_RESULTS_DIR"
+TRIAL_RESULTS = ("result.json", "config.json", "verifier")  # what a Trial is graded on
+
+
+def results_dir() -> Path | None:
+    """`$FLOCK_RESULTS_DIR/<swarm>`, where results outlive the worker; None when unset."""
+    root = os.environ.get(RESULTS_ENV)
+    return Path(root) / os.environ.get("SWARM", "swarm") if root else None
+
+
+def keep_results(src: Path, dest: Path, names: Iterable[str]) -> None:
+    """Copy `names` (files or folders) from `src` to `dest`, links as links, missing ones
+    skipped. A failure is logged: a run without its copy is still a run."""
+    try:
+        for name in names:
+            path = src / name
+            if path.is_dir() and not path.is_symlink():
+                shutil.copytree(path, dest / name, symlinks=True, dirs_exist_ok=True)
+            elif path.exists() or path.is_symlink():
+                dest.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, dest / name, follow_symlinks=False)
+    except OSError as e:
+        log.warning("results of %s not kept in %s: %s", src, dest, e)
 
 
 class HarborHost:
@@ -105,9 +136,14 @@ class HarborHost:
             self.resources = resources
 
     async def close(self) -> None:
-        """Export and stop the resources (the worker exits)."""
+        """Export and stop the resources (the worker exits); the exports go to the results
+        dir too, when there is one."""
         if self._prepared is not None:
             self._prepared.cancel()
             await asyncio.gather(self._prepared, return_exceptions=True)
         if self.resources is not None:
             await self.resources.finish()
+            if (results := results_dir()) is not None:
+                worker = os.environ.get("WORKER_ID", "worker")
+                await asyncio.to_thread(keep_results, self.root, results / worker,
+                                        ["resources"])
