@@ -50,8 +50,8 @@ def _main(ctx: typer.Context, run: str = typer.Option(
         help="Run every command against RUN_DIR (`flock init`): its cluster.env and run.env as "
              "the first --env files, its controller (hosts/controller.host) and token. Also FLOCK_RUN_DIR, which "
              "an exported FLOCK_URL beats; --run beats FLOCK_URL.")) -> None:
-    _API[:] = [] if ctx.invoked_subcommand in ("init", "world", "serve") else [
-        Client.for_run(run, need_host=ctx.invoked_subcommand != "launch")]
+    _API[:] = [] if ctx.invoked_subcommand in ("init", "world") else [
+        Client.for_run(run, need_host=ctx.invoked_subcommand not in ("launch", "serve"))]
 
 
 def _table(rows: list[list[Any]], header: list[str]) -> None:
@@ -449,11 +449,13 @@ def serve(
     """Start a spec's `hf_jobs` servers on their own, with the code a run starts them with
     (docs/open-models.md "flock serve"): wait until each answers, then print the URLs, the job
     ids and how to stop them. Runs share them by listing the URLs as `inference.urls`. No
-    controller: HF_TOKEN (or the saved login) starts, probes and cancels the jobs."""
+    controller: HF_TOKEN (or the saved login) starts, probes and cancels the jobs. With
+    --run / FLOCK_RUN_DIR, the run's cluster.env and run.env fill the spec and the environment."""
     from flock.controller.servers import Servers, groups
     from flock.models import parse_duration
 
-    spec = load_spec(_spec_file(target), env_files or [])
+    env_files = [*_api().env_files, *(env_files or ())]  # a run dir's cluster.env, run.env
+    spec = load_spec(_spec_file(target), env_files)
     if not groups(spec):
         _fail([f"{target}: no inference block with hf_jobs: nothing to serve"])
     if timeout:
@@ -464,13 +466,12 @@ def serve(
         for ts in spec.types.values():
             if (hj := ts.resolved_model.inference.hf_jobs) is not None:
                 hj.timeout = timeout
-    srv = Servers(os.environ, label="serve")
-    if stop:
+    srv = Servers(ops.environment(_api(), env_files), label="serve")
+    if stop:  # every job `flock serve` labelled for this spec's name, whatever its settings
         srv.reattach([spec])
         cancelled = srv.stop(spec.swarm)
         typer.echo(f"cancelled: {', '.join(cancelled)}" if cancelled
-                   else f"no running servers of {spec.swarm} (`flock serve --stop` finds the "
-                        "ones started from the same hf_jobs settings)")
+                   else f"no running servers of {spec.swarm}")
         return
 
     def poll() -> list[dict]:

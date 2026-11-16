@@ -245,3 +245,28 @@ def test_the_escape_room_spec_compiles(monkeypatch, pins):
     assert swarm.naming == "words" and ts.harbor.config["environment"]["backend"] == "docker"
     assert ts.harbor.team.startswith("Solve the escape-room puzzle")
     assert ts.harbor.config["tools"] == ["message_board.*"] and ts.secrets == []
+
+
+def test_serve_takes_the_run_dirs_environment(tmp_path, monkeypatch, pins):
+    """`flock --run RUN serve SPEC` fills the spec from the run's run.env and starts the servers
+    with its environment (the Hub faked)."""
+    from flock.controller.hf_jobs_servers import HFJobsServers
+
+    from ..fake_hub_jobs import FakeHubJobs
+
+    pins["d0e1fee0f1036a80d5400d67f7fad9143668ba94"] = "a" * 40
+    monkeypatch.delenv("RUN_NAME", raising=False)
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "run.env").write_text("RUN_NAME=from-run-env\nHF_TOKEN=run-env-token\n")
+    tokens = []
+
+    def starter(env):
+        tokens.append(env.get("HF_TOKEN"))
+        return HFJobsServers(FakeHubJobs(), env.get("HF_TOKEN"))
+
+    monkeypatch.setattr("flock.controller.hf_jobs_servers.hf_jobs_servers", starter)
+    r = runner.invoke(cli.app, ["--run", str(run), "serve",
+                                str(EXPERIMENTS / "mini-swarm" / "hf-jobs.yaml"), "--stop"])
+    assert r.exit_code == 0, r.output
+    assert "no running servers of from-run-env" in r.output and tokens == ["run-env-token"]

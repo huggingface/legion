@@ -220,8 +220,9 @@ servers, preflight and Pi's model config. The run's end cancels the jobs: `flock
 or a local run that ends by itself. `flock update` of a changed `hf_jobs` block or model starts
 its new servers first. The apply then pins them, and, as for any block change, the type's
 workers restart on them. The old servers serve the draining turns and are cancelled after the
-types' longest `turn_timeout`. With `hf_jobs`, `max_working` is also the servers'
-`max_num_seqs`, so changing it starts new servers too.
+types' longest `turn_timeout`; so are the extra jobs when `replicas` goes down. An update that is
+refused after starting servers cancels the ones the applied spec does not use. With `hf_jobs`,
+`max_working` is also the servers' `max_num_seqs`, so changing it starts new servers too.
 
 ```text
 servers Qwen/Qwen3.8-27B (hf_jobs a100-large, namespace you, types agent, context 131072):
@@ -237,7 +238,9 @@ servers Qwen/Qwen3.8-27B (hf_jobs a100-large, namespace you, types agent, contex
   proxy (`expose=[8000]`, as `hf jobs run --expose 8000`) at `https://<job id>--8000.hf.jobs`,
   and `hf_jobs.timeout` as its `--timeout`. The jobs carry labels as workers do (`swarm`,
   `inference`: the group's settings hash, `replica`); a restarted controller finds them by these
-  instead of starting new ones. The weights download inside the job, which gets no Hub token, so
+  instead of starting new ones (it retries until the Hub answers), and cancels the swarm's jobs
+  of groups its spec no longer has once their drain grace is over. `flock stop --delete`
+  cancels every job labelled for the swarm, also ones a controller lost track of. The weights download inside the job, which gets no Hub token, so
   the model must be public.
 - **The vLLM arguments** follow trl-internal's evals config. flock sets `--host`, `--port`,
   `--served-model-name` (the Hub id) and the tool-calling flags. `vllm_args` holds every other
@@ -250,7 +253,9 @@ servers Qwen/Qwen3.8-27B (hf_jobs a100-large, namespace you, types agent, contex
   unless `vllm_args` sets them.
 - **Failures** stop the launch with the reason and the job's last log lines, show in `flock
   status`, and cancel the group's jobs: an image that does not pull, vLLM running out of memory
-  (a `max_model_len` the GPU cannot hold), or no answer within `startup_timeout`. A job that ends
+  (a `max_model_len` the GPU cannot hold), or no answer within `startup_timeout` (also when
+  the Hub does not answer). A start refused part-way (a quota) cancels the jobs it started. An
+  apply drops failed groups the spec no longer uses from the status. A job that ends
   during the run marks its server `failed` in `flock status` (the verdict is failing); flock does
   not replace it.
 - **Not cancelled:** `flock stop --release` keeps the servers (the run is held, not over), and a
@@ -305,7 +310,9 @@ uv run flock serve experiments/mini-swarm/hf-jobs.yaml --stop   # or: hf jobs ca
 
 It needs no controller: `HF_TOKEN` (or the saved login) starts and probes the jobs. They are
 labelled `serve` instead of `swarm`, so no run's controller adopts or cancels them; only
-`--stop` or their `timeout` (`--timeout`, default the spec's) ends them. flock does not share
+`--stop` (every job `flock serve` labelled for the spec's name) or their `timeout`
+(`--timeout`, default the spec's) ends them. With `--run` (or `FLOCK_RUN_DIR`) it reads the
+run's cluster.env and run.env, as `flock launch` does. flock does not share
 servers across runs by itself.
 
 ## Model check and context window
