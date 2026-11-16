@@ -6,7 +6,7 @@ solution. A merged collaboration PR is not a successful benchmark submission.
 
 ## Setup
 
-- Install Flock with controller extras and Docker with Compose.
+- Install Flock (`uv sync`) and Docker with Compose.
 - Create a private HF dataset with an initial README commit on `main`.
 - Set `HF_REPO_ID` to its `namespace/name`, `HF_REPO_TOKEN` to a credential with
   write access to it, and `HF_INFERENCE_TOKEN` to your model credential.

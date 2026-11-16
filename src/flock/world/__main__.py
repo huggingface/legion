@@ -29,8 +29,8 @@ def world_serve(
         from flock.world.server import serve
 
         cache_defaults()  # no usable HOME (a container): $FLOCK_HOMELESS_ROOT, else the temp dir
-    except ImportError as e:  # fastapi / uvicorn: the `controller` extra
-        typer.echo(f"python -m flock.world serve needs the controller extra: {e}", err=True)
+    except ImportError as e:  # incomplete or broken installation
+        typer.echo(f"python -m flock.world serve could not import its server dependencies: {e}", err=True)
         raise typer.Exit(1) from None
     serve(target, host=host, port=port, token_env=token_env, insecure=insecure)
 

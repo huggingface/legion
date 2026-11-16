@@ -14,6 +14,8 @@ state to a world (the `world` resource, docs/world.md).
 
 ## Architecture
 
+[View the architecture diagram](architecture.svg).
+
 ```
    CLI / library ── apply, prompt, status, events ──┐
                                                     ▼
@@ -199,9 +201,15 @@ launch (a 4xx); either pauses launching until the next apply.
 
 ### API (controller)
 
+Direct calls use `Authorization: Bearer $FLOCK_TOKEN`. Through the HF Jobs proxy,
+use the [deployment guide's authentication headers](deploy-job.md#two-urls-two-auth-paths).
+The status page and `/healthz` do not require controller authentication; a hosting
+proxy may still require its own authentication.
+
 | Method | Path | Purpose |
 |---|---|---|
 | PUT | `/swarms/{swarm}` | apply a spec |
+| GET | `/swarms` | list swarms |
 | POST, GET | `/swarms/{swarm}/tools[/{version}]` | upload / fetch the run's packed tools and resources folders |
 | POST | `/swarms/{swarm}/preflight` | probe each provider-backed model |
 | GET, DELETE | `/swarms/{swarm}` | spec and aggregates; drain and remove everything |
@@ -213,7 +221,19 @@ launch (a 4xx); either pauses launching until the next apply.
 | GET | `/workers`, `/workers/{id}` | workers |
 | GET | `/workers/{id}/commands?wait=` | worker long-poll (worker token) |
 | POST | `/workers/{id}/heartbeat`, `/workers/{id}/events` | heartbeat and event batches (worker token) |
+| POST | `/agents/{parent}/spawn` | create a child agent ([spawning](spawn.md)) |
+| DELETE | `/agents/{name}` | remove a child agent |
+| GET | `/whoami` | authenticated identity |
+| GET, POST | `/swarms/{swarm}/loop` | inspect or control loops ([loops](loop.md)) |
+| GET | `/swarms/{swarm}/events` | swarm-level events |
+| GET | `/swarms/{swarm}/health`, `/swarms/{swarm}/health/history?since=&res=` | health snapshots ([health](health.md)) |
 | GET | `/` | HTML status page |
+| GET | `/healthz` | health and request counters |
+
+Single-agent prompts accept `{text, timeout?, reply_to?}`. Bulk prompts accept
+`{type, state?, text, timeout?, reply_to?}` and return counts. With `state: idle`,
+agents that already have a pending prompt are skipped, so repeated bulk calls do
+not stack prompts. Agent lists accept `type`, `state`, and `cursor` filters.
 
 Prompt results are read from the event stream. A prompt for an agent whose worker is down is
 held in SQLite and delivered on the replacement's first poll (at least once). Each launch gets an

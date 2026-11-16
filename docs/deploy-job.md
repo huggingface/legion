@@ -41,6 +41,7 @@ group, so worker traffic never crosses an edge or a proxy.
 
 ```sh
 export HF_TOKEN=... FLOCK_TOKEN=$(openssl rand -hex 24)
+uv run hf buckets create <you>/flock --private  # once, for wheels and state
 W=$(uv run scripts/publish-wheel.sh hf://buckets/<you>/flock/dist)
 scripts/deploy-job.sh "$W" --group my-run [--flavor cpu-upgrade] [--timeout 48h] \
     [--secret OPENAI_API_KEY ...] [--dry-run]
@@ -73,6 +74,29 @@ same wheel and tar. The job gets:
 container and the proxy URL is `https://<JOB_ID>--<port>.hf.jobs`. The controller derives
 both URLs itself, with no Hub call and no second launch step. It logs them at start and
 reports them in `/healthz` (`public_url`, `status_url`). `FLOCK_PUBLIC_URL` overrides.
+
+Publishing requires Git access to the private `huggingface/msgboard` dependency.
+The publication includes `harbor-deps.tar`, so jobs install the pinned dependencies
+without needing your GitHub credentials. Workers bootstrap from a stock
+`node:22-bookworm` image and download the wheel from the bucket.
+
+Every secret named by a spec, including model `api_key_env` values, must be in the
+controller's environment. Workers need `HF_TOKEN` to access the wheel and state
+bucket. Do not list `FLOCK_TOKEN` in the spec's secrets; the controller supplies
+worker authentication itself.
+
+For a swarm running on your machine, set `compute: local` in the spec (the default)
+and use the normal launch command from a shell without `FLOCK_URL` set:
+
+```sh
+export HF_TOKEN=...
+uv run flock launch spec.yaml   # spec with compute: local
+```
+
+Flock starts the controller and workers locally and records the run under `.flock/`.
+The spec's `environment.backend` still chooses where agent containers run; use
+`docker` or `podman` for local containers. See [local usage](local.md) for a complete
+spec, model credentials, status commands, and results.
 
 ## Two URLs, two auth paths
 
