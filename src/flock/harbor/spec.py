@@ -137,6 +137,17 @@ class Role(RoleSettings):
 
 class Agents(AgentSettings):
     roles: dict[RoleName, Role] | None = Field(default=None, min_length=1)
+    # with `count` and `naming: consecutive-id`: one file per agent, in name order, whose text
+    # only that agent is given (e.g. a private piece of information). Unlike roles, the agents
+    # stay one type, so one worker holds them all and they share its board
+    role_files: list[Path] | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def one_role_file_per_agent(self):
+        if self.role_files is not None and (
+                self.roles is not None or len(self.role_files) != self.count):
+            raise ValueError("agents.role_files needs agents.count, and one file per agent")
+        return self
 
 
 class SpecLimits(Limits):
@@ -228,6 +239,9 @@ class Spec(Config):
                 named := [n for n, r in self.roles().items() if r.name_prefix]):
             raise ValueError(f"agents.roles.{named[0]}.name_prefix needs naming: words "
                              "(consecutive-id names are agent-001, ...)")
+        if self.agents.role_files and self.naming != "consecutive-id":
+            raise ValueError("agents.role_files needs naming: consecutive-id (the files go to "
+                             "agent-001, agent-002, ... in order)")
         if backend == "hf-sandbox" and "spawn" in self.resources:
             raise ValueError("resources.spawn needs a mount: use backend docker or podman")
         if backend == "hf-sandbox" and (self.resources.get("message_board") or {}).get("rules"):
@@ -268,6 +282,9 @@ class Spec(Config):
         for role in roles:
             if role.role_file is not None:
                 role.role_file = (here / role.role_file.expanduser()).resolve()
+        if spec.agents.role_files:
+            spec.agents.role_files = [(here / p.expanduser()).resolve()
+                                      for p in spec.agents.role_files]
         for loop in (spec.loop, *(role.loop for role in roles)):
             for prompted in (loop, loop and loop.final):
                 if prompted and prompted.prompt_file is not None:
@@ -284,6 +301,9 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
     (`ResolvedTask.manifest()`); `bundle` the built tool bundle (None: no tools); `folders` the
     version of `pack_folders` (None: workers read tools_dir and resources_dir where they are)."""
     team = spec.team_file.read_text(encoding="utf-8") if spec.team_file is not None else ""
+    # agents.role_files: each agent's own text, by its consecutive name (one type, `agent`)
+    role_texts = {name: path.read_text(encoding="utf-8") for name, path in zip(
+        spec.agents.roster(), spec.agents.role_files or (), strict=False)}
     roles, loops = spec.roles(), spec.type_loops()
     label = {name: name if spec.agents.roles else None for name in roles}
     # the folders: a worker builds the tool bundle and loads the resource modules from them
@@ -374,6 +394,7 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
                 "team": team,
                 "role": label[name],
                 "role_text": role.role_file.read_text(encoding="utf-8") if role.role_file else "",
+                "role_texts": role_texts,
                 "tools": tools,
                 "tools_sha256": bundle.sha256 if bundle is not None else None,
                 "resources": spec.resources,

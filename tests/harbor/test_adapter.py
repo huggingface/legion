@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 from harbor.agents.factory import AgentFactory
 from harbor.environments.base import ExecResult
 from harbor.models.agent.context import AgentContext
@@ -292,6 +293,35 @@ async def test_one_trial_across_bursts(fakes, tmp_path):
     (session,) = a.session_files(sid)
     assert session == a.home / "sessions" / "s.jsonl" and a.session_dir == a.root  # purge()
     assert len(session.read_text().splitlines()) == 2
+
+
+async def test_role_files_give_each_agent_only_its_own_text(fakes, tmp_path):
+    """`agents.role_files`: one type whose agents each find their own file's text in their
+    instructions, and no other agent's (e.g. s3-aggregation's private numbers)."""
+    data = yaml.safe_load((EXAMPLES / "pi-hf.yaml").read_text())
+    del data["team_file"]
+    data |= {"naming": "consecutive-id",
+             "agents": {"count": 2, "role_files": ["roles/a.md", "roles/b.md"]}}
+    (tmp_path / "roles").mkdir()
+    for slot in ("a", "b"):
+        (tmp_path / "roles" / f"{slot}.md").write_text(f"Your private number: secret-{slot}.")
+    spec_file = tmp_path / "spec.yaml"
+    spec_file.write_text(yaml.safe_dump(data))
+    swarm = compile_spec(Spec.load(spec_file, env={}), TASK)
+    assert list(swarm.types) == ["agent"]  # one type: one worker can hold the team
+    for name in ("agent-001", "agent-002"):
+        a = make_adapter(tmp_path / "work" / name, name, swarm.types["agent"])
+        _, events = await start(a)
+        await a.send("go")
+        await read(events, "turn_ended")
+        await a.close()
+    first, second = fakes.pi
+    assert "secret-a" in first and "secret-b" not in first
+    assert "secret-b" in second and "secret-a" not in second
+    for bad in ({"naming": "words"}, {"agents": {"count": 3, "role_files": ["roles/a.md"]}}):
+        spec_file.write_text(yaml.safe_dump(data | bad))
+        with pytest.raises(ValueError, match="agents.role_files needs"):
+            Spec.load(spec_file, env={})
 
 
 def pi_models(fakes, n=0):

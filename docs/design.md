@@ -67,7 +67,9 @@ one. A Trial that fails is reported and the next prompt starts a new one on the 
 One package with three entry points: `flock` (CLI and library: `init`, `launch`, `update`,
 `stop`, `prompt`, `status`), `flock-controller` and `flock-worker`. `flock launch` compiles a
 Harbor spec (`flock.harbor.spec`) into a swarm spec with one type per role, packs the run's
-tools and resources folders and applies it.
+tools and resources folders and applies it. `agents.role_files` gives each agent of one type its
+own text (`harbor.role_texts`, by name), so a team that shares one worker's board can still hold
+private information.
 
 ### Adding a harness or a compute backend
 

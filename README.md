@@ -96,6 +96,9 @@ agents:
 ```
 
 Use `team_file` for shared instructions or `agents.roles` for different roles.
+Each role runs on its own workers. To give each agent its own text and keep the team
+on one worker, list one file per agent in `agents.role_files`, next to `count`, with
+`naming: consecutive-id`.
 A spec's `loop` can send prompts automatically; without one, send a prompt yourself:
 
 ```sh

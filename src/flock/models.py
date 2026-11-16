@@ -750,6 +750,8 @@ class HarborSpec(BaseModel):
     team: str = ""  # the team_file's text
     role: str | None = None  # the role named in the instructions (None: agents.count)
     role_text: str = ""  # the role_file's text
+    # agent name -> its own text (agents.role_files), given to that agent instead of role_text
+    role_texts: dict[str, str] = Field(default_factory=dict)
     # every replica's name -> role: with `naming: consecutive-id`, consecutive names compiled
     # from the counts; with words empty here, and filled by the controller in each assign
     roster: dict[str, str | None] = Field(default_factory=dict)

@@ -218,7 +218,8 @@ class HarborAdapter:
         h = self.spec.harbor
         roster = h.roster if self.agent in h.roster else {**h.roster, self.agent: h.role}
         return build_agent_instructions(
-            self.agent, roster, {"tools": h.tools.get("tools", {})}, h.team, h.role_text,
+            self.agent, roster, {"tools": h.tools.get("tools", {})}, h.team,
+            h.role_texts.get(self.agent, h.role_text),
             run_id=os.environ.get("SWARM"))  # as the upstream launcher: the run (swarm) a board spans
 
     def _endpoint(self, channel: Any) -> None:
