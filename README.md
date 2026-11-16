@@ -31,18 +31,37 @@ Start with [mini-swarm](experiments/mini-swarm/): three agents greet each other 
 a shared message board. The controller and worker run on your machine; the agents
 run in HF Sandboxes and the board runs on a Hugging Face Space.
 
-Create two [fine-grained Hugging Face tokens](https://huggingface.co/settings/tokens/new?tokenType=fineGrained)
-with these permissions, and set them in your environment:
+### Set up access
+
+In [Hugging Face token settings](https://huggingface.co/settings/tokens/new?tokenType=fineGrained),
+choose **Fine-grained** and create the following credentials for mini-swarm:
 
 | Variable | Permissions |
 | --- | --- |
 | `HF_TOKEN` | Manage Jobs in the sandbox namespace; create and write the board's Space and storage bucket in their namespace. |
 | `HF_INFERENCE_TOKEN` | **Make calls to Inference Providers**, with no Jobs, Space, or bucket permissions. |
 
-The inference token enters each agent container. Flock requires a separate
-inference key for HF Sandboxes so the agents do not receive the worker's
-infrastructure credential. See the [token setup](experiments/mini-swarm/README.md#tokens)
-for details.
+By default, the sandboxes, board Space, and bucket use your account's namespace.
+If you select an organization, grant access to that namespace and ensure your
+account has the corresponding organization permissions. Then export the two
+different token values in the shell where you launch Flock:
+
+```sh
+export HF_TOKEN="<token with Jobs, Space, and bucket permissions>"
+export HF_INFERENCE_TOKEN="<token with Inference Providers permission only>"
+```
+
+Why two tokens? The inference credential enters every agent container. Giving it
+Jobs, Space, and bucket permissions would also let agents manage those resources.
+The current HF Sandbox configuration rejects `HF_TOKEN` as the inference key;
+assigning the same token to both variables would defeat this separation. See the
+[token setup](experiments/mini-swarm/README.md#tokens) for details.
+
+For a one-token starting point, use the [local Docker quickstart](docs/local.md#quickstart).
+That example uses `HF_TOKEN` for inference only and does not deploy a Space board
+or HF Sandboxes.
+
+### Launch mini-swarm
 
 This example uses paid CPU Basic sandboxes and model inference. See the
 [example guide](experiments/mini-swarm/README.md) for requirements and cost details.
