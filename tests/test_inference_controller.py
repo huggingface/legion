@@ -14,7 +14,8 @@ from fastapi.testclient import TestClient
 
 from flock.controller.api import create_app
 from flock.controller.jobs import FakeJobsClient
-from flock.controller.reconcile import reconcile
+from flock.controller.reconcile import rebuild_from_jobs, reconcile
+from flock.controller.store import Store
 from flock.models import AgentHeartbeat, SwarmSpec, TokenUsage, WorkerHeartbeat
 
 from . import fake_models
@@ -190,6 +191,51 @@ async def test_a_lost_drain_is_sent_again(client, store, jobs, settings, tick, c
     await client.post(f"/workers/{wid}/heartbeat", json=beat)
     tick()
     assert drains(store, wid) == 0  # it drains
+
+
+async def test_a_drain_lost_before_the_first_heartbeat_is_sent_again(client, store, jobs,
+                                                                      settings, tick):
+    """Before the job's first heartbeat its drain is unacknowledged too."""
+    settings.secret_source = {"VLLM_API_KEY": "v", "NEW_KEY": "n"}
+    assert (await put(client, local_spec())).status_code == 200
+    tick()
+    wid = jobs.launches[0]["worker_id"]
+    assert (await put(client, local_spec(**MOVED))).status_code == 200
+    tick()
+    assert drains(store, wid) == 1
+    await client.get(f"/workers/{wid}/commands?wait=0")  # delivered, and the response lost
+    tick()
+    assert drains(store, wid) == 1  # sent again, with no heartbeat yet
+
+
+@pytest.mark.parametrize("carried", [True, False])
+def test_a_restored_controller_restarts_a_readopted_job_of_another_block(tmp_path, clock,
+                                                                         settings, carried):
+    """A controller restored from a checkpoint taken before a launch re-adopts the job by its
+    labels, with the inference revision the job carries (`INFERENCE_REV`): the job restarts
+    when the block changed since, and when its revision is unknown."""
+    settings.secret_source = {"VLLM_API_KEY": "v", "NEW_KEY": "n"}
+    jobs, first = FakeJobsClient(), Store(tmp_path / "first")
+    c = TestClient(create_app(first, TOKEN, clock=clock), headers={"Authorization": f"Bearer {TOKEN}"})
+    assert c.put("/swarms/p", json=local_spec().model_dump(mode="json")).status_code == 200
+    checkpoint = first.get_swarm("p")["spec"]  # the swarm, before its worker launched
+    reconcile(first, jobs, clock(), settings)
+    (launch,) = jobs.launches
+    assert launch["env"]["INFERENCE_REV"]
+    if not carried:  # e.g. a job launched by another controller version
+        del launch["env"]["INFERENCE_REV"]
+    restored = Store(tmp_path / "restored")
+    restored.put_swarm(checkpoint, clock().timestamp())
+    assert [a.kind for a in rebuild_from_jobs(restored, jobs, clock())] == ["adopt"]
+    reconcile(restored, jobs, clock(), settings)
+    assert drains(restored, launch["worker_id"]) == (0 if carried else 1)
+    c = TestClient(create_app(restored, TOKEN, clock=clock),
+                   headers={"Authorization": f"Bearer {TOKEN}"})
+    assert c.put("/swarms/p", json=local_spec(**MOVED).model_dump(mode="json")).status_code == 200
+    reconcile(restored, jobs, clock(), settings)
+    assert drains(restored, launch["worker_id"]) == 1
+    first.close()
+    restored.close()
 
 
 async def test_a_controller_only_change_keeps_the_pinned_window(store, clock, jobs, settings):

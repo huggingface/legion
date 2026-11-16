@@ -301,13 +301,14 @@ def inference_rev(ts: TypeSpec | None) -> str | None:
 
 
 def _restart_stale(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec | None) -> None:
-    """Workers launched with another inference revision than the type's now (docs/live.md):
-    drained, each ends in a planned restart and its agents resume on a new job, launched with
-    the current block and key. Checked every pass, so a launch that raced the update is caught
-    by the next one. Each is a `restart` event on the swarm stream."""
+    """Workers launched with another inference revision than the type's now, or an unknown one
+    (docs/live.md): drained, each ends in a planned restart and its agents resume on a new job,
+    launched with the current block and key. Checked every pass, so a launch that raced the
+    update is caught by the next one. A job carries its revision (`INFERENCE_REV`), which a
+    restored controller re-adopts with it. Each is a `restart` event on the swarm stream."""
     rev = inference_rev(ts)
     stale = [w for w in p.store.list_workers(spec.swarm, type_name)
-             if rev is not None and w["job_id"] is not None and w["inference_rev"] not in (None, rev)
+             if rev is not None and w["job_id"] is not None and w["inference_rev"] != rev
              and not w["draining"] and w["retire_at"] is None]
     for w in stale:
         p.store.enqueue_command(w["id"], DrainCommand().model_dump_json())
@@ -316,11 +317,11 @@ def _restart_stale(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec | Non
 
 
 def _redrain(p: _Pass, w: Row) -> None:
-    """A drain the controller sent (`draining`) that the worker's last heartbeat does not
-    report, with none queued: its delivery was lost (the poll's response), so it goes again.
-    The worker's drain is idempotent."""
+    """A drain the controller sent (`draining`) that the current job has not reported (its last
+    heartbeat says otherwise, or there is none yet), with none queued: its delivery was lost
+    (the poll's response), so it goes again. The worker's drain is idempotent."""
     if (w["draining"] and w["job_id"] is not None
-            and json.loads(w["telemetry"] or "{}").get("draining") is False
+            and json.loads(w["telemetry"] or "{}").get("draining") is not True
             and not any(json.loads(c["body"]).get("kind") == "drain"
                         for c in p.store.commands_for(w["id"]))):
         p.store.enqueue_command(w["id"], DrainCommand().model_dump_json())
@@ -834,6 +835,8 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
         "DEADLINE": _iso(deadline),
         "DRAIN_WINDOW": ts.drain_window,  # known before the first assign arrives
         "BUCKET": spec.bucket,
+        # the inference block it holds, re-adopted with the job by a restored controller
+        **({"INFERENCE_REV": rev} if (rev := inference_rev(ts)) else {}),
     }
     secrets = {"FLOCK_TOKEN": s.token}
     names = list(ts.secrets)
@@ -895,6 +898,7 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
         state=WorkerState.launching.value,
         next_launch_at=None,
         inference_rev=inference_rev(ts),  # the block this job holds (_restart_stale)
+        telemetry=None,  # the job before's: nothing this job reported
     )
     for a in store.list_agents(worker=wid):
         _send_assign(store, wid, a, type_name, ts, spec.tools_version, spec.comms, spec.world,
@@ -1047,6 +1051,8 @@ def rebuild_from_jobs(store: Store, jobs: JobsClient, now: datetime) -> list[Act
                 launched_at=w["launched_at"] or t,
                 # one heartbeat interval of grace before the age rules apply
                 last_heartbeat=t if w["last_heartbeat"] is not None else None,
+                # the adopted job's own (unknown: None, restarted by _restart_stale)
+                inference_rev=j.env.get("INFERENCE_REV"),
             )
             actions.append(Action("adopt", wid, j.job_id))
     return actions

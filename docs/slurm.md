@@ -123,7 +123,8 @@ sbatch --parsable [-p <partition>] [-A <account>] -c <cpus> --mem=<mem> --time=<
 ```
 
 The env file holds `WORKER_ID WORKER_INCARNATION SWARM TYPE DEADLINE DRAIN_WINDOW BUCKET RUN
-FLOCK_URL WORK_ROOT PYTHONUNBUFFERED`, the type's `env`, and when configured
+FLOCK_URL WORK_ROOT PYTHONUNBUFFERED INFERENCE_REV` (the inference block the job holds, read back
+when a restored controller re-adopts it), the type's `env`, and when configured
 `FLOCK_CTL_HOST_FILE FLOCK_VENV FLOCK_SECRETS_FILE FLOCK_CONTAINER_IMAGE` (and, with
 `container_root`, `HOME HF_HOME TMPDIR`). A comment names the secrets the worker
 expects from the cluster's secrets file: `FLOCK_TOKEN HF_TOKEN` plus the launch's (provider
