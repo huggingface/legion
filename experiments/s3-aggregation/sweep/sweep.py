@@ -43,7 +43,7 @@ REPO = HERE.parents[2]
 MODEL = "Qwen/Qwen3.5-27B"
 SECRET = re.compile(r"hf_[A-Za-z0-9]{30,}")
 lock, init_lock = threading.Lock(), threading.Lock()
-LOST = "controller lost"
+LOST, GONE = "controller lost", "no controller left"
 
 
 def load(name: str, path: Path):
@@ -137,9 +137,13 @@ def attempt(args, root: Path, secrets: Path, problem: int, n: int, name: str) ->
     run_dir, src = root / "runs" / name, root / "src" / name
     if run_dir.exists() and (any((run_dir / "launch").glob("*.env"))
                              or (run_dir / "hosts" / "controller.host").exists()):
-        # a previous driver launched it and stopped before its row: finish it from here
-        say(name, "adopting the run a previous driver launched")
-        return finish(args, run_dir, name, problem, n, (run_dir / "cluster.env").stat().st_mtime)
+        # a previous driver launched it and stopped before its row: finish it from here, or,
+        # with its controller gone (released, cancelled or reclaimed), score what it left
+        alive = bool(controller_state(name))
+        say(name, "adopting the run a previous driver launched" + ("" if alive else
+                                                                    " (no controller left)"))
+        return finish(args, run_dir, name, problem, n, (run_dir / "cluster.env").stat().st_mtime,
+                      None if alive else GONE)
     if run_dir.exists():
         shutil.rmtree(run_dir)  # init failed before: nothing ran
     started = time.time()
@@ -174,6 +178,8 @@ def finish(args, run_dir: Path, name: str, problem: int, n: int, started: float,
         say(name, "controller lost (spot reclaim?): cancelling its jobs")
         for job in (f"flock-ctl-{name}", f"{name}-agent-w0000"):
             subprocess.run(["scancel", "-n", job], check=False)
+        release = subprocess.CompletedProcess([], 1)
+    elif why == GONE:  # its rewards and export are on disk, or it doesn't count
         release = subprocess.CompletedProcess([], 1)
     else:
         say(name, "loop:", why, "- releasing")
@@ -250,7 +256,7 @@ def main(argv=None) -> int:
     parser.add_argument("--agents", default="1,2,4,8,16")
     parser.add_argument("--parallel", type=int, default=8, help="teams at once")
     parser.add_argument("--team-timeout", type=float, default=2400, help="s until a release")
-    parser.add_argument("--max-reruns", type=int, default=3,
+    parser.add_argument("--max-reruns", type=int, default=5,
                         help="runs again of a team whose run doesn't count (why_invalid)")
     parser.add_argument("--root", type=Path, default=REPO / ".flock" / "s3-sweep")
     parser.add_argument("--bucket", default="lewtun/s3-aggregation-sweep",
