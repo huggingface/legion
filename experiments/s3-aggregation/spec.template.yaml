@@ -11,7 +11,7 @@ inference:
 task:
   repo: https://huggingface.co/datasets/HuggingFaceSwarms/s3-aggregation   # private for now
   selector: TEAM                              # team.py: agg-pPP-nNN
-  revision: 3170d7b16d7aa6cf683cd6d9612e54c76ff346e7
+  revision: 69ae06b9db2fff3b526fbccb8b2f8cd1bdfba2fc
 agents:                                       # team.py: count N, roles/slot-NN.md per agent
   count: 1
 resources:
