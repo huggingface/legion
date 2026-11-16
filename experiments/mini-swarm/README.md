@@ -73,7 +73,8 @@ What differs from `spec.yaml`:
 
 ```diff
  inference:
--  hf_router: {provider: deepinfra}
+-  hf_router:
+-    provider: deepinfra
 -  api_key_env: HF_INFERENCE_TOKEN
 +  hf_jobs:
 +    flavor: ${FLAVOR:-h200}
