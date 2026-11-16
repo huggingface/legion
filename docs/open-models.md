@@ -217,8 +217,11 @@ With `hf_jobs`, nobody starts a server by hand or copies a URL. `flock launch`:
 
 From there on everything is the `urls` path: the model check, the context window read from the
 servers, preflight and Pi's model config. The run's end cancels the jobs: `flock stop --delete`,
-or a local run that ends by itself. `flock update` starts the servers a changed block or model
-needs before it applies, and the apply cancels the ones the spec no longer uses.
+or a local run that ends by itself. `flock update` of a changed `hf_jobs` block or model starts
+its new servers first. The apply then pins them, and, as for any block change, the type's
+workers restart on them. The old servers serve the draining turns and are cancelled after the
+types' longest `turn_timeout`. With `hf_jobs`, `max_working` is also the servers'
+`max_num_seqs`, so changing it starts new servers too.
 
 ```text
 servers Qwen/Qwen3.8-27B (hf_jobs a100-large, namespace you, types agent, context 131072):

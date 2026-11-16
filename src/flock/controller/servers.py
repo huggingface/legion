@@ -132,6 +132,7 @@ class _Run:
     state: str = "starting"  # starting, ready, failed, stopped
     error: str | None = None
     checked: float = 0.0
+    retire_at: float | None = None  # no longer in the spec: cancelled at this time (`prune`)
 
 
 def _dt(t: float | None) -> datetime | None:
@@ -170,6 +171,7 @@ class Servers:
                     not s.ended for s in run.servers) >= g.block.replicas
                 if live:
                     run.group.types = g.types  # the types it serves may have changed
+                    run.retire_at = None  # in the spec again
                     continue
                 try:
                     servers = self.starter(g.kind).start(g)
@@ -210,9 +212,11 @@ class Servers:
         self._reattached = True
         now = self.clock()
         with self.lock:
-            for runs in self.runs.values():
-                for run in runs.values():
-                    if run.state == "starting" or (
+            for swarm, runs in self.runs.items():
+                for key, run in runs.items():
+                    if run.retire_at is not None and now >= run.retire_at:
+                        self.stop(swarm, keep=set(runs) - {key})
+                    elif run.state == "starting" or (
                             run.state == "ready" and now - run.checked >= READY_CHECK_S):
                         self._check(run, now)
 
@@ -261,6 +265,8 @@ class Servers:
         keep, out = set(keep), []
         with self.lock:
             for key, run in self.runs.get(swarm, {}).items():
+                if key not in keep:
+                    run.retire_at = None
                 live = [s for s in run.servers if not s.ended]
                 if key in keep or not live:
                     if key not in keep and run.state in ("starting", "ready"):
@@ -278,9 +284,19 @@ class Servers:
                          ", ".join(s.job_id or "?" for s in live))
         return out
 
-    def prune(self, spec: SwarmSpec) -> list[str]:
-        """After an apply: stop the swarm's groups the spec no longer uses."""
-        return self.stop(spec.swarm, keep=[g.key for g in groups(spec, self.label)])
+    def prune(self, spec: SwarmSpec, grace: float = 0.0) -> list[str]:
+        """After an apply: cancel the swarm's groups the spec no longer uses, after `grace` s
+        (the turns their agents' draining workers still run on them; 0: now)."""
+        keep = {g.key for g in groups(spec, self.label)}
+        if grace <= 0:
+            return self.stop(spec.swarm, keep=keep)
+        with self.lock:
+            for key, run in self.runs.get(spec.swarm, {}).items():
+                if key not in keep and run.state in ("starting", "ready") and run.retire_at is None:
+                    run.retire_at = self.clock() + grace
+                    log.info("servers %s for %s: no longer in the spec, cancelled in %.0f s",
+                             key, run.group.model, grace)
+        return []
 
     # ------------------------------------------------------------------ the spec
 

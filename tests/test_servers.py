@@ -153,6 +153,34 @@ def test_each_model_gets_its_own_servers(controller, hub, proxy, store):
                     "big": [url("a100x4", MODEL, "0"), url("a100x4", MODEL, "1")]}
 
 
+def test_a_changed_block_moves_the_type_to_new_servers(controller, hub, proxy, store, clock):
+    """`flock update` of the hf_jobs block starts new servers and the apply pins them (a block
+    change: the type's workers restart on them); the old ones serve the draining workers' turns
+    until turn_timeout, then are cancelled."""
+    app, c = controller()
+
+    def up(body) -> str:
+        c.post("/swarms/s/servers", json=body)
+        job = hub.runs[-1]["id"]
+        hub.set_stage(job, "RUNNING")
+        proxy.up.add(job)
+        app.state.servers.tick()
+        r = c.put("/swarms/s", json=body)
+        assert r.status_code == 200, r.text
+        return job
+
+    old = up(spec())
+    new = up(spec({"hf_jobs": {**HF_JOBS, "flavor": "a100x4"}, "max_working": 3}))
+    pinned = store.get_swarm("s")["spec"].types["agent"].resolved_model.inference
+    assert (pinned.hf_jobs.flavor, pinned.urls) == ("a100x4", [f"https://{new}--8000.hf.jobs/v1"])
+    assert hub.cancelled == []
+    clock.advance(30 * 60)  # turn_timeout
+    app.state.servers.tick()
+    assert hub.cancelled == [old]
+    assert [(r["job_id"], r["state"]) for r in c.get("/swarms/s/servers").json()] == [
+        (old, "stopped"), (new, "ready")]
+
+
 def test_vllm_args_rules(controller, hub):
     """Keys flock owns are refused; max_num_seqs and tensor_parallel_size are filled in unless
     vllm_args sets them; an entry overrides by key, `true`/`false` are flags."""

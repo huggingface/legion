@@ -77,6 +77,7 @@ from flock.models import (
     WorkerState,
     WorkerStatus,
     loop_refusals,
+    parse_duration,
     type_spec_rev,
     worker_type_spec,
 )
@@ -993,7 +994,10 @@ def create_app(
         worlds.commit(swarm)  # a replaced world stops only now, after every check passed
         if spec.world is None or spec.world.endpoint != worlds.url(swarm):
             worlds.stop(swarm)  # the block went away or now names a url
-        servers.prune(spec)  # hf_jobs servers of a block or model the spec no longer uses
+        # hf_jobs servers of a block or model the spec no longer uses, once the turns of the
+        # agents on them (their workers drain) are over
+        servers.prune(spec, grace=max((parse_duration(ts.turn_timeout).total_seconds()
+                                       for ts in spec.types.values()), default=0))
         return swarm_status(store, spec, clock().timestamp(), servers)
 
     # ------------------------------------------------------------- health (docs/health.md)
