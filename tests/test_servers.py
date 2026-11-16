@@ -65,7 +65,8 @@ def controller(store, hub, proxy, clock):
         servers = Servers({}, {"hf_jobs": HFJobsServers(hub, KEY, proxy.transport(), epoch)},
                           clock=epoch)
         app = create_app(store, TOKEN, clock=clock, secret_source={"HF_TOKEN": KEY},
-                         inference_transport=proxy.transport(), servers=servers,
+                         inference_transport=proxy.transport(),
+                         preflight_transport=proxy.transport(), servers=servers,
                          servers_interval=0, loop_interval=0)
         return app, TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"})
     return make
@@ -172,9 +173,14 @@ def test_a_changed_block_moves_the_type_to_new_servers(controller, hub, proxy, s
         assert r.status_code == 200, r.text
         return job
 
+    from flock.controller.reconcile import inference_rev
+
     old = up(spec())
+    rev = inference_rev(store.get_swarm("s")["spec"].types["agent"])
     body = spec({"hf_jobs": {**HF_JOBS, "flavor": "a100x4"}, "max_working": 3})
     new = up(body)
+    # a new revision: reconcile restarts the type's workers on the new servers
+    assert inference_rev(store.get_swarm("s")["spec"].types["agent"]) != rev
     pinned = store.get_swarm("s")["spec"].types["agent"].resolved_model.inference
     assert (pinned.hf_jobs.flavor, pinned.urls) == ("a100x4", [f"https://{new}--8000.hf.jobs/v1"])
     assert hub.cancelled == []
@@ -294,7 +300,7 @@ def test_a_refused_update_cancels_the_servers_it_started(controller, hub, proxy,
     new = SwarmSpec.model_validate({**spec({"hf_jobs": {**HF_JOBS, "flavor": "a100x4"},
                                             "max_working": 3}), "naming": "words"})
     with pytest.raises(SpecError, match="naming"):
-        ops.update(Client(), new, write_spec(tmp_path / "spec.yaml", new))
+        ops.update(Client(), new, write_spec(tmp_path / "spec.yaml", new), preflight=False)
     assert running(hub) == {old}
     pinned = store.get_swarm("s")["spec"].types["agent"].resolved_model.inference.urls
     assert pinned == [f"https://{old}--8000.hf.jobs/v1"]
