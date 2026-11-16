@@ -1,7 +1,7 @@
 #!/bin/bash
 # source scripts/slurm/podman-node.sh: rootless podman for this shell on a cluster node with no
 # user systemd, for a `compute: local` run with `environment.backend: podman` there
-# (docs/open-models.md "One GPU node"). The same setup worker.sbatch gives a Slurm worker: this
+# (docs/open-models.md "On the HF cluster"). The same setup worker.sbatch gives a Slurm worker: this
 # shell's own podman storage under /tmp, explicit engine flags, netavark's DNS daemon kept in
 # this job, and podman's health checks (flock.harbor.podman_healthchecks) in the background.
 # `podman_node_cleanup` stops this shell's containers and the health checks; the storage stays
