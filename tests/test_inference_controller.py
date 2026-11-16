@@ -3,14 +3,18 @@ context window, status, preflight, max_working."""
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 
 import httpx
 import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from fastapi.testclient import TestClient
 
 from flock.controller.api import create_app
+from flock.controller.jobs import FakeJobsClient
+from flock.controller.reconcile import reconcile
 from flock.models import AgentHeartbeat, SwarmSpec, TokenUsage, WorkerHeartbeat
 
 from . import fake_models
@@ -97,33 +101,38 @@ async def test_servers_you_run_are_free_and_status_shows_each_block(client, cloc
     assert "types.local.inference:Qwen/Small" in page and "working 1 / max 2" in page
 
 
-async def test_a_changed_block_restarts_its_types_workers(client, jobs, settings, tick, clock):
+def local_spec(**inference) -> SwarmSpec:
+    return pspec(ROUTER, local={**HB, "model": "Qwen/Small", "replicas": 1,
+                                "inference": {**GPU1, **inference}})
+
+
+MOVED = {"urls": ["http://qwen-job-2:8000/v1"], "api_key_env": "NEW_KEY"}
+
+
+def drains(store, wid) -> int:
+    return sum(json.loads(c["body"])["kind"] == "drain" for c in store.commands_for(wid))
+
+
+async def test_a_changed_block_restarts_its_types_workers(client, store, jobs, settings, tick,
+                                                          clock):
     """Workers hold the block's key (job secrets) and their Trials its endpoints and allowlist:
-    a change restarts the type's workers, which relaunch with the new block; max_working (the
-    controller's) restarts nothing."""
+    a change restarts the type's workers at the next pass, and they relaunch with the new
+    block; max_working (the controller's) restarts nothing."""
     settings.secret_source = {"VLLM_API_KEY": "v", "NEW_KEY": "n"}
-
-    def spec(**inference):
-        return pspec(ROUTER, local={**HB, "model": "Qwen/Small", "replicas": 1,
-                                    "inference": {**GPU1, **inference}})
-
-    async def drains(wid):
-        cmds = (await client.get(f"/workers/{wid}/commands?wait=0")).json()["commands"]
-        return [c["kind"] for c in cmds if c["kind"] == "drain"]
-
-    assert (await put(client, spec())).status_code == 200
+    assert (await put(client, local_spec())).status_code == 200
     tick()
     (first,) = jobs.launches
     wid = first["worker_id"]
     assert first["secrets"]["VLLM_API_KEY"] == "v"
-    assert (await put(client, spec(max_working=5))).status_code == 200
-    assert await drains(wid) == []
-    moved = spec(urls=["http://qwen-job-2:8000/v1"], api_key_env="NEW_KEY")
-    assert (await put(client, moved)).status_code == 200
-    assert await drains(wid) == ["drain"]
+    assert (await put(client, local_spec(max_working=5))).status_code == 200
+    tick()
+    assert drains(store, wid) == 0
+    assert (await put(client, local_spec(**MOVED))).status_code == 200
+    tick()
+    assert drains(store, wid) == 1
     events = (await client.get("/swarms/p/events")).json()["events"]
-    assert [e["data"] for e in events if e["type"] == "workers_restarted"] == [
-        {"type": "local", "workers": [wid], "why": "inference changed"}]
+    assert [e["data"] for e in events if e["type"] == "restart"] == [
+        {"target": wid, "detail": "inference changed"}]
     jobs.set_stage(first["job_id"], "COMPLETED")  # the drained worker exits
     tick()
     clock.advance(60)
@@ -132,6 +141,80 @@ async def test_a_changed_block_restarts_its_types_workers(client, jobs, settings
     assert second["worker_id"] == wid and second["job_id"] != first["job_id"]
     assert second["secrets"]["NEW_KEY"] == "n" and "VLLM_API_KEY" not in second["secrets"]
     assert second["spec"].resolved_model.inference.urls == ["http://qwen-job-2:8000/v1"]
+
+
+def test_a_launch_that_raced_an_update_restarts(app, store, clock, settings):
+    """The update lands while the backend creates the job, so the job holds the old block: the
+    next pass restarts it."""
+    settings.secret_source = {"VLLM_API_KEY": "v", "NEW_KEY": "n"}
+    c = TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"})
+
+    class Racing(FakeJobsClient):
+        def launch(self, *args, **kwargs):
+            job = super().launch(*args, **kwargs)
+            if len(self.launches) == 1:  # the job of the old block is being created
+                assert c.put("/swarms/p", json=local_spec(**MOVED).model_dump(
+                    mode="json")).status_code == 200
+            return job
+
+    jobs = Racing()
+    assert c.put("/swarms/p", json=local_spec().model_dump(mode="json")).status_code == 200
+    reconcile(store, jobs, clock(), settings)
+    (first,) = jobs.launches
+    assert "VLLM_API_KEY" in first["secrets"] and drains(store, first["worker_id"]) == 0
+    reconcile(store, jobs, clock(), settings)
+    assert drains(store, first["worker_id"]) == 1
+
+
+async def test_a_lost_drain_is_sent_again(client, store, jobs, settings, tick, clock):
+    """A drain whose delivery was lost (the poll's response) goes again until the worker
+    reports draining; the worker's drain is idempotent."""
+    settings.secret_source = {"VLLM_API_KEY": "v", "NEW_KEY": "n"}
+    assert (await put(client, local_spec())).status_code == 200
+    tick()
+    wid = jobs.launches[0]["worker_id"]
+    await client.post(f"/workers/{wid}/heartbeat", json=hb(clock, wid, []))
+    assert (await put(client, local_spec(**MOVED))).status_code == 200
+    tick()
+    assert drains(store, wid) == 1
+    await client.get(f"/workers/{wid}/commands?wait=0")  # delivered, and the response lost
+    clock.advance(30)
+    await client.post(f"/workers/{wid}/heartbeat", json=hb(clock, wid, []))  # not draining
+    tick()
+    assert drains(store, wid) == 1  # sent again
+    tick()
+    assert drains(store, wid) == 1  # once while it is queued
+    await client.get(f"/workers/{wid}/commands?wait=0")
+    clock.advance(30)
+    beat = {**hb(clock, wid, []), "draining": True}
+    await client.post(f"/workers/{wid}/heartbeat", json=beat)
+    tick()
+    assert drains(store, wid) == 0  # it drains
+
+
+async def test_a_controller_only_change_keeps_the_pinned_window(store, clock, jobs, settings):
+    """max_working is the controller's: its change keeps the window the workers' Trials hold
+    (no call, even when the server now reports another) and restarts nothing."""
+    reply = {"qwen-job": fake_models.listing(["Qwen/Small"], 32768)}
+    seen: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.host)
+        return httpx.Response(200, json=reply[request.url.host])
+
+    app = create_app(store, TOKEN, clock=clock, secret_source={"VLLM_API_KEY": "v"},
+                     inference_transport=httpx.MockTransport(handle))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t",
+                                 headers={"Authorization": f"Bearer {TOKEN}"}) as c:
+        assert (await put(c, local_spec())).status_code == 200
+        reconcile(store, jobs, clock(), settings)
+        reply["qwen-job"] = fake_models.listing(["Qwen/Small"], 8192)
+        seen.clear()
+        assert (await put(c, local_spec(max_working=5))).status_code == 200
+        reconcile(store, jobs, clock(), settings)
+        st = (await c.get("/swarms/p")).json()
+    assert seen == [] and st["spec"]["types"]["local"]["resolved_model"]["context_window"] == 32768
+    assert drains(store, jobs.launches[0]["worker_id"]) == 0
 
 
 # --------------------------------------------------------------------------- the apply's check

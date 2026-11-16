@@ -223,6 +223,11 @@ class Inference(BaseModel):
             raise ValueError("metrics scrapes your servers' vLLM metrics: it needs urls")
         return self
 
+    def held(self) -> Inference:
+        """The block as workers (its key) and Trials (endpoints, Pi's config) hold it: without
+        the controller's `max_working`."""
+        return self.model_copy(update={"max_working": None})
+
     @property
     def endpoints(self) -> list[str]:
         """The servers' base URLs, as written: `urls`, or the router's."""
@@ -1076,11 +1081,13 @@ class SwarmSpec(BaseModel):
     def _resolve_models(self) -> SwarmSpec:
         """Apply-time pinning: each type's inference block and price go into the spec
         (`resolved_model`), so the stored spec carries what admission and cost derive from. The
-        context window the controller pinned stays while the block and the model are the same."""
+        context window the controller pinned stays while the block (but `max_working`, the
+        controller's) and the model are the same."""
         for type_name, ts in self.types.items():
             old, ts.resolved_model = ts.resolved_model, resolve_model(self, ts, type_name=type_name)
             new = ts.resolved_model
-            if old is not None and (old.inference, old.model_id) == (new.inference, new.model_id):
+            if old is not None and (old.inference.held(), old.model_id) == (
+                    new.inference.held(), new.model_id):
                 new.context_window = old.context_window
         for type_name, ts in self.types.items():
             cap = ts.loop.while_.agent_usd if ts.loop else None

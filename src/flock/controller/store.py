@@ -113,7 +113,8 @@ CREATE TABLE IF NOT EXISTS workers (
   log_path TEXT,  -- the current job's log file (compute slurm)
   preempted INTEGER NOT NULL DEFAULT 0,  -- the current job's last heartbeat said `preempted`
   drained INTEGER NOT NULL DEFAULT 0,  -- the current job's last heartbeat said `drained`
-  telemetry TEXT  -- the last heartbeat's mem/restore/tools/knobs_rev (JSON)
+  telemetry TEXT,  -- the last heartbeat's mem/restore/tools/knobs_rev (JSON)
+  inference_rev TEXT  -- reconcile.inference_rev of the type spec the current job was launched with
 );
 CREATE INDEX IF NOT EXISTS workers_by_swarm ON workers (swarm, type, idx);
 CREATE TABLE IF NOT EXISTS commands (

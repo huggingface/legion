@@ -8,6 +8,7 @@ calls it every few seconds in a thread (Hub calls block). A worker row is a stab
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -288,21 +289,42 @@ def rotate_worker(store: Store, swarm: str, w: Row, now: float) -> None:
         type="memory_rotation", ts=datetime.fromtimestamp(now, UTC), agent="", data=data)])
 
 
-def restart_workers(store: Store, swarm: str, type_name: str, now: float, why: str) -> list[str]:
-    """Drain the type's live workers: each ends in a planned restart, and its agents resume on
-    a new job, launched with the current spec and secrets. `workers_restarted` on the swarm
-    stream names them."""
-    drained = []
-    for w in store.list_workers(swarm, type_name):
-        if w["job_id"] is not None and not w["draining"] and w["retire_at"] is None:
-            store.enqueue_command(w["id"], DrainCommand().model_dump_json())
-            store.update_worker(w["id"], draining=1)
-            drained.append(w["id"])
-    if drained:
-        store.append_events(swarm, swarm_stream(swarm), [Event(
-            type="workers_restarted", ts=datetime.fromtimestamp(now, UTC), agent="",
-            data={"type": type_name, "workers": drained, "why": why})])
-    return drained
+def inference_rev(ts: TypeSpec | None) -> str | None:
+    """What a worker launched for `ts` holds of its inference block: the key (job secrets),
+    and the endpoints, Pi's config and the context window its Trials get. A worker launched
+    with another revision restarts (`_restart_stale`)."""
+    r = ts.resolved_model if ts is not None else None
+    if r is None:
+        return None
+    held = [r.inference.held().model_dump(mode="json"), r.model_id, r.context_window]
+    return hashlib.sha256(json.dumps(held, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def _restart_stale(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec | None) -> None:
+    """Workers launched with another inference revision than the type's now (docs/live.md):
+    drained, each ends in a planned restart and its agents resume on a new job, launched with
+    the current block and key. Checked every pass, so a launch that raced the update is caught
+    by the next one. Each is a `restart` event on the swarm stream."""
+    rev = inference_rev(ts)
+    stale = [w for w in p.store.list_workers(spec.swarm, type_name)
+             if rev is not None and w["job_id"] is not None and w["inference_rev"] not in (None, rev)
+             and not w["draining"] and w["retire_at"] is None]
+    for w in stale:
+        p.store.enqueue_command(w["id"], DrainCommand().model_dump_json())
+        p.store.update_worker(w["id"], draining=1)
+        p.act("restart", w["id"], "inference changed")
+
+
+def _redrain(p: _Pass, w: Row) -> None:
+    """A drain the controller sent (`draining`) that the worker's last heartbeat does not
+    report, with none queued: its delivery was lost (the poll's response), so it goes again.
+    The worker's drain is idempotent."""
+    if (w["draining"] and w["job_id"] is not None
+            and json.loads(w["telemetry"] or "{}").get("draining") is False
+            and not any(json.loads(c["body"]).get("kind") == "drain"
+                        for c in p.store.commands_for(w["id"]))):
+        p.store.enqueue_command(w["id"], DrainCommand().model_dump_json())
+        p.act("redrain", w["id"])
 
 
 def rotatable(w: Row, now: float, lv: Liveness) -> bool:
@@ -473,6 +495,9 @@ def _reconcile_type(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec | No
     store = p.store
     for w in store.list_workers(spec.swarm, type_name):
         _refresh_worker(p, spec, w, ts)
+    _restart_stale(p, spec, type_name, ts)
+    for w in store.list_workers(spec.swarm, type_name):
+        _redrain(p, w)
     # `flock stop --release`: every worker drains (its agents sync) and exits; the rows stay
     # and nothing launches until `flock launch` clears the flag.
     released = ts is not None and bool(store.swarm_flags(spec.swarm).get("released"))
@@ -869,6 +894,7 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
         log_path=log_path,
         state=WorkerState.launching.value,
         next_launch_at=None,
+        inference_rev=inference_rev(ts),  # the block this job holds (_restart_stale)
     )
     for a in store.list_agents(worker=wid):
         _send_assign(store, wid, a, type_name, ts, spec.tools_version, spec.comms, spec.world,
@@ -892,7 +918,7 @@ def record_heartbeat(store: Store, worker_id: str, hb: WorkerHeartbeat, now: dat
         "draining": int(hb.draining or w["draining"]),  # a drain we sent stays until the job ends
         "state": (WorkerState.draining if hb.draining else WorkerState.running).value,
         "telemetry": hb.model_dump_json(include={"mem", "restore", "tools", "knobs_rev",
-                                                 "wants_rotation"}),
+                                                 "wants_rotation", "draining"}),
     }
     if hb.preempted:  # the next reconcile pass ends the slot as a planned restart
         fields["preempted"] = 1

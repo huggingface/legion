@@ -230,7 +230,7 @@ is a crash at once, without waiting for `worker_dead_after`. Raise the keys with
 | other type fields (`max_turns`, `max_budget_usd`, `turn_timeout`, ...) | the next turn boundary |
 | `compute.worker_unknown_after`, `worker_dead_after`, `crash_backoff` | at once (the controller) |
 | `compute.kind`, `swarm` | refused |
-| a Harbor spec's `inference` | `max_working` at once (the controller); any other change restarts the type's workers (`workers_restarted` on the swarm stream): they drain, and their agents resume on new workers with the new key, endpoints and allowlist |
+| a Harbor spec's `inference` | `max_working` at once (the controller); any other change restarts the type's workers (a `restart` event on the swarm stream per worker, at the next reconcile pass): they drain, and their agents resume on new workers with the new key, endpoints and allowlist |
 | a Harbor spec's `task`, `tools`, `resources`, `environment`, `model`, `team_file`, `role_file`, `limits.agent_*` or `limits.trial_hours` (its roles have agents) | refused: the workers prepared them at launch. Counts, loops, `workers:` and the run's limits change as above. A task branch that moved since the launch is not a change: the run keeps its pinned revision |
 
 A turn boundary is a prompt that starts a new turn. A prompt that joins a turn in flight

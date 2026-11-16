@@ -132,15 +132,16 @@ def check(spec: SwarmSpec, secrets: Mapping[str, str],
           transport: httpx.BaseTransport | None = None,
           previous: SwarmSpec | None = None) -> None:
     """Pin each type's context window into `spec`, or raise InferenceError naming the type. A
-    type whose block and model are those of `previous` (the applied spec) keeps its window
-    without a call, so a re-apply does not need the servers up."""
+    type whose block (but `max_working`, the controller's) and model are those of `previous`
+    (the applied spec) keeps its window without a call: a re-apply does not need the servers
+    up, and the window stays the one its workers' Trials hold."""
     listings: dict[tuple[str, str | None], Any] = {}
     with httpx.Client(transport=transport or TRANSPORT) as client:
         for name, ts in spec.types.items():
             r = ts.resolved_model
             old = previous.types[name].resolved_model if previous and name in previous.types else None
-            if (old is not None and old.context_window
-                    and (old.inference, old.model_id) == (r.inference, r.model_id)):
+            if (old is not None and old.context_window and (old.inference.held(), old.model_id)
+                    == (r.inference.held(), r.model_id)):
                 r.context_window = old.context_window
                 continue
             where = f"types.{name}.model {r.model_id!r} on {r.provider_name}"
