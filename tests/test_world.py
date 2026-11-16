@@ -41,7 +41,7 @@ from flock.world.host import WorldError, WorldHost, check_tools, derived_token, 
 from flock.world.protocol import TOKEN_ENV, WorldManifest, agent_token
 from flock.world.server import create_app
 
-from .conftest import FAKE_PROVIDERS, HB, TOKEN, Clock
+from .conftest import FAKE_INFERENCE, HB, TOKEN, Clock
 
 ROOT = Path(__file__).resolve().parent.parent
 TASKBOARD = Path(__file__).resolve().parent / "fixtures" / "taskboard"
@@ -240,7 +240,7 @@ def test_taskboard_claims_are_exclusive_and_released_when_an_agent_is_done(tmp_p
 def raw(world: dict | None = None, **types) -> dict:
     return {"swarm": "sw", "compute": "local",
             "world": world if world is not None else {"command": "flock world serve tb:TB"},
-            "providers": FAKE_PROVIDERS, "types": types or {"dev": {**HB, "model": "fake:m"}}}
+            "inference": FAKE_INFERENCE, "types": types or {"dev": {**HB, "model": "m"}}}
 
 
 def test_world_spec_validates():
@@ -257,15 +257,15 @@ def test_world_spec_validates():
         SwarmSpec.model_validate(jobs)
     jobs["world"] = {"command": ["x"], "url": "http://world.invalid/"}  # one block, both scales
     assert SwarmSpec.model_validate(jobs).world.url == "http://world.invalid"
-    no_world = {**raw(dev={**HB, "model": "fake:m", "tools": ["world:claim"]})}
+    no_world = {**raw(dev={**HB, "model": "m", "tools": ["world:claim"]})}
     del no_world["world"]
     with pytest.raises(ValidationError, match="swarm-level `world:` block"):
         SwarmSpec.model_validate(no_world)
     with pytest.raises(ValidationError, match="world: false"):
-        SwarmSpec.model_validate(raw(dev={**HB, "model": "fake:m", "world": False,
+        SwarmSpec.model_validate(raw(dev={**HB, "model": "m", "world": False,
                                           "tools": ["world:claim"]}))
     with pytest.raises(ValidationError, match="bad world tool"):
-        SwarmSpec.model_validate(raw(dev={**HB, "model": "fake:m",
+        SwarmSpec.model_validate(raw(dev={**HB, "model": "m",
                                           "tools": ["world:no-dash"]}))
 
 
@@ -297,10 +297,10 @@ def test_cli_resolves_world_dir_next_to_the_spec(tmp_path):
 
 def world_spec(url: str, token_env: str | None = "WORLD_TOKEN", **types) -> SwarmSpec:
     w = {"url": url, **({"token_env": token_env} if token_env else {})}
-    types = types or {"dev": {**HB, "model": "fake:m", "replicas": 2,
+    types = types or {"dev": {**HB, "model": "m", "replicas": 2,
                               "agents_per_worker": 2}}
     return SwarmSpec.model_validate({"swarm": "sw", "compute": "local", "world": w,
-                                     "providers": FAKE_PROVIDERS, "types": types})
+                                     "inference": FAKE_INFERENCE, "types": types})
 
 
 @pytest.fixture
@@ -339,7 +339,7 @@ async def test_apply_fetches_the_manifest(controller, store, taskboard):
 
 async def test_apply_refuses_a_world_it_cannot_use(controller, taskboard):
     put = controller.state.put
-    sel = {"dev": {**HB, "model": "fake:m", "tools": ["world:claim_task", "world:fly"]}}
+    sel = {"dev": {**HB, "model": "m", "tools": ["world:claim_task", "world:fly"]}}
     r = await put(world_spec(taskboard.url, **sel))
     assert r.status_code == 400 and "unknown world tool(s) fly; world taskboard has: list_tasks" \
         in r.json()["detail"]
@@ -352,7 +352,7 @@ async def test_apply_refuses_a_world_it_cannot_use(controller, taskboard):
         dead = f"http://127.0.0.1:{s.getsockname()[1]}"
     r = await put(world_spec(dead))
     assert r.status_code == 400 and "cannot reach" in r.json()["detail"]
-    clash = world_spec(taskboard.url, dev={**HB, "model": "fake:m"})
+    clash = world_spec(taskboard.url, dev={**HB, "model": "m"})
     clash.world.manifest = fetch_manifest(taskboard.url, SECRET)
     with pytest.raises(WorldError, match=r"world tool\(s\) list_tasks have the name of a folder"):
         check_tools(clash, lambda t: ["list_tasks"])
@@ -436,7 +436,7 @@ async def test_a_refused_reapply_keeps_the_running_world(store, tmp_path):
                          secret_source={})
     body = {"swarm": "sw", "compute": "local",
             "world": {"dir": str(tmp_path), "command": [sys.executable, "world.py"]},
-            "providers": FAKE_PROVIDERS, "types": {"dev": {**HB, "model": "fake:m", "replicas": 0}}}
+            "inference": FAKE_INFERENCE, "types": {"dev": {**HB, "model": "m", "replicas": 0}}}
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t",
                                      headers={"Authorization": f"Bearer {TOKEN}"}) as c:
@@ -509,7 +509,7 @@ async def test_apply_starts_a_command_world_and_remove_stops_it(store, tmp_path)
         "swarm": "sw", "compute": "local",
         "world": {"dir": str(d), "command": [sys.executable, "-m", "flock.cli", "world", "serve",
                                              "taskboard:TaskBoard"]},
-        "providers": FAKE_PROVIDERS, "types": {"dev": {**HB, "model": "fake:m"}}})
+        "inference": FAKE_INFERENCE, "types": {"dev": {**HB, "model": "m"}}})
     transport = httpx.ASGITransport(app=app)
     try:
         async with httpx.AsyncClient(transport=transport, base_url="http://t",

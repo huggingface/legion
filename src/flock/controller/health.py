@@ -3,7 +3,7 @@ usage per hour and hourly per-agent rollups for the run viewer.
 
 Every SAMPLE_S the controller probes each swarm's world (`GET /manifest` timed, `GET /metrics`
 when the manifest lists `metrics-v1`, the Slurm job state when `world.slurm_job_name` is set)
-and the providers with `metrics: true` (vLLM Prometheus text), then builds one snapshot per
+and the inference blocks with `metrics: true` (vLLM Prometheus text), then builds one snapshot per
 swarm from the store (heartbeats, telemetry), the swarm stream and in-memory counters fed by
 `post_events`. Agent event files are never read; the swarm stream is tailed by byte offset.
 The 30 s snapshots stay in memory (6 h); every 10th one, slimmed, is stored (48 h) and
@@ -661,7 +661,7 @@ class Health:
         old = self.store.get_control(spec.swarm, "vllm") or {}
         servers: dict[str, list[list[float]]] = {}
         now = time.time()
-        for name, p in spec.providers.items():
+        for name, p in spec.inference_blocks().items():
             if not p.metrics:
                 continue
             q, hosts = out.setdefault(name, {}), per.setdefault(name, {})

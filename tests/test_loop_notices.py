@@ -232,7 +232,7 @@ async def test_harbor_types_get_the_line(sim):
     wake = "message_board.mention"
     event = ("resource", {"resource": "message_board", "kind": "mention", "data": {
         "msg_id": 11, "thread": 12, "from": "alice", "identity_type": "user"}})
-    got = await started(sim, {**CTRL, "on": [wake]}, model="fake:m", secrets=[])
+    got = await started(sim, {**CTRL, "on": [wake]}, model="m", secrets=[])
     assert got[A0]["loop"]["kind"] == "loop"
     await sim.events(A0, event)
     sim.tick(2.1)

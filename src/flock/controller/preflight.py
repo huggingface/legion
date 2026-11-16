@@ -1,10 +1,11 @@
-"""Preflight: one small tool-calling request per provider-backed model in a spec.
+"""Preflight: one small tool-calling request per model and inference block in a spec.
 
-Run by the controller, which holds the provider keys (the same secrets it hands to jobs, read
-by the names in `api_key_env`). Each probe is two streamed turns, the way a harness starts: turn
-one asks the model to call a trivial tool; turn two sends the model's output back with the tool's
-result and must complete. A server that accepts turn one but fails the follow-up (some HF router
-providers do) fails preflight. Zero reported usage is a warning.
+Run by the controller, which holds the inference keys (the same secrets it hands to jobs, read
+by the names in `api_key_env`). Each probe first checks that the endpoints serve the model (the
+inference check's `GET /models`, controller/inference.py), then runs two turns, the way a
+harness starts: turn one asks the model to call a trivial tool; turn two sends the model's
+output back with the tool's result and must complete. A server that accepts turn one but fails
+the follow-up (some HF router providers do) fails preflight. Zero reported usage is a warning.
 Harbor's Pi speaks Chat Completions, so models are probed there, non-streamed. A tool call the
 model writes as text is no tool call: Pi takes only `tool_calls`.
 """
@@ -20,6 +21,7 @@ from typing import Any
 
 import httpx
 
+from flock.controller.inference import InferenceError, aget, served_window
 from flock.models import (
     Harness,
     PreflightReport,
@@ -47,7 +49,7 @@ TOOL_SCHEMA: dict[str, Any] = {
 def chat_request(r: ResolvedModel) -> dict[str, Any]:
     """Turn one: non-streamed, temperature 0. A model's `extra` is not sent: Pi does not."""
     return {
-        "model": r.model_id,
+        "model": r.request_model,
         "messages": [{"role": "user", "content": PROMPT}],
         "tools": [{"type": "function", "function": {"name": "get_time", "description": TOOL_DESCRIPTION,
                                                     "parameters": TOOL_SCHEMA}}],
@@ -91,11 +93,11 @@ def visible(content: Any) -> Any:
     return "" if content.lstrip().startswith("<think>") else content
 
 
-async def _probe_chat(client, r: ResolvedModel, key: str, result: PreflightResult,
+async def _probe_chat(client, r: ResolvedModel, key: str | None, result: PreflightResult,
                       timeout: float) -> int:
-    """Two Chat Completions turns; returns tokens reported. Raises ProbeError. With
-    `base_urls`, every server is probed (an error names the one that failed)."""
-    urls, total = r.provider.endpoints or [r.provider.base_url], 0
+    """Two Chat Completions turns; returns tokens reported. Raises ProbeError. With several
+    `urls`, every server is probed (an error names the one that failed)."""
+    urls, total = r.inference.endpoints, 0
     for base in urls:
         try:
             total += await _probe_chat_at(client, base, r, key, result, timeout)
@@ -106,9 +108,10 @@ async def _probe_chat(client, r: ResolvedModel, key: str, result: PreflightResul
     return total
 
 
-async def _probe_chat_at(client, base: str, r: ResolvedModel, key: str, result: PreflightResult,
-                         timeout: float) -> int:
-    url, headers = f"{base}/chat/completions", {"Authorization": f"Bearer {key}"}
+async def _probe_chat_at(client, base: str, r: ResolvedModel, key: str | None,
+                         result: PreflightResult, timeout: float) -> int:
+    url = f"{base}/chat/completions"
+    headers = {**r.inference.headers, **({"Authorization": f"Bearer {key}"} if key else {})}
     body = chat_request(r)
     msg, tok1 = await _chat_turn(client, url, body, headers, timeout)
     calls = [c for c in msg.get("tool_calls") or [] if isinstance(c, dict)]
@@ -122,30 +125,45 @@ async def _probe_chat_at(client, base: str, r: ResolvedModel, key: str, result: 
     return tok1 + tok2
 
 
+def hint(r: ResolvedModel) -> str:
+    """The likely cause of a failed tool call, for the error."""
+    if r.inference.hf_router is not None:
+        return (f" (try another provider in {r.provider_name}.hf_router.provider: "
+                "some fail tool calls)")
+    return (" (check the server's tool-calling flags, e.g. vLLM's --enable-auto-tool-choice "
+            "--tool-call-parser for the model family)")
+
+
 async def probe(
     client: httpx.AsyncClient, r: ResolvedModel, key: str | None, types: list[str],
     api: str | None = None,
 ) -> PreflightResult:
-    """Turn one asks for a tool call; turn two sends the call back with its result, the way a
-    harness does on its first tool use (Chat Completions, not streamed)."""
-    p = r.provider
+    """The model check, then turn one asks for a tool call and turn two sends the call back
+    with its result, the way a harness does on its first tool use (Chat Completions, not
+    streamed). `key` None with a key named: not probed (unverified)."""
+    p = r.inference
     api = api or "chat_completions"
     result = PreflightResult(model=r.qualified, provider=r.provider_name, types=types, api=api,
                              ok=False)
-    if not key:
+    if p.key_env and not key:
         result.unverified = True
-        result.warning = (f"unverified: secret {p.api_key_env} is not set on the controller, "
+        result.warning = (f"unverified: secret {p.key_env} is not set on the controller, "
                           "so the model was not probed")
         return result
-    timeout = p.timeout_s or DEFAULT_TIMEOUT_S
+    timeout = DEFAULT_TIMEOUT_S
     t0 = time.monotonic()
     tok2 = 0
     try:
+        served_window(p, r.model_id, {u: await aget(client, u, key) for u in p.endpoints})
         tok1 = await _probe_chat(client, r, key, result, timeout)
+    except InferenceError as e:
+        result.latency_ms = int((time.monotonic() - t0) * 1000)
+        result.error = str(e)[:400]
+        return result
     except ProbeError as e:
         result.latency_ms = int((time.monotonic() - t0) * 1000)
         turn = "follow-up turn (tool result sent back)" if result.tool_call_seen else "first turn"
-        result.error = f"{turn}: {e}"[:400]
+        result.error = f"{turn}: {e}"[:400] + hint(r)
         return result
     except (httpx.HTTPError, ValueError, KeyError) as e:
         result.latency_ms = int((time.monotonic() - t0) * 1000)
@@ -153,7 +171,7 @@ async def probe(
         return result
     result.latency_ms = int((time.monotonic() - t0) * 1000)
     if not result.tool_call_seen:
-        result.error = "the reply has no tool call; agents on this model cannot use tools"
+        result.error = "the reply has no tool call; agents on this model cannot use tools" + hint(r)
         return result
     result.follow_up_ok = result.ok = True
     result.usage_reported = (tok1 + tok2) > 0
@@ -170,15 +188,12 @@ def api_for(harness: Harness) -> str:
 
 
 def models_to_probe(spec: SwarmSpec) -> list[tuple[ResolvedModel, list[str], str]]:
-    """Distinct provider-backed (provider, model id, reasoning, API) in the spec, with their
-    types and the API to probe."""
+    """Distinct (inference block, model id, reasoning, API) in the spec, with their types and
+    the API to probe."""
     seen: dict[tuple, tuple[ResolvedModel, list[str], str]] = {}
-    from harbor.agents.agent_auth_resolution import parse_model_name  # lazy: a heavy import
     for type_name, ts in spec.types.items():
         r = ts.resolved_model
         api = api_for(ts.harness)
-        # Harbor's Pi sends the id without the provider prefix
-        r = r.model_copy(update={"model_id": parse_model_name(r.model_id)[1]})
         key = (r.provider_name, r.model_id, r.reasoning, api)
         seen.setdefault(key, (r, [], api))[1].append(type_name)
     return list(seen.values())
@@ -188,7 +203,8 @@ async def run_preflight(
     spec: SwarmSpec, secrets: Mapping[str, str], client: httpx.AsyncClient
 ) -> PreflightReport:
     results = await asyncio.gather(*(
-        probe(client, r, secrets.get(r.provider.api_key_env), types, api)
+        probe(client, r, secrets.get(r.inference.key_env) if r.inference.key_env else None,
+              types, api)
         for r, types, api in models_to_probe(spec)
     ))
     return PreflightReport(swarm=spec.swarm, ok=all(x.ok or x.unverified for x in results),

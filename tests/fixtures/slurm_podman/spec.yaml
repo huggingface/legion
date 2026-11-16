@@ -4,12 +4,11 @@ name: slurm-podman
 namespace: ns
 bucket: hf://buckets/ns/runs
 compute: {kind: slurm, cpus: 4, mem: 7G, time: '2:00:00'}
-model: huggingface/Qwen/Qwen3.8-27B:deepinfra
+model: Qwen/Qwen3.8-27B
 pricing: [0.2, 2.5, 0.2]
 inference:
-  base_url: https://router.huggingface.co/v1
+  hf_router: {provider: deepinfra}
   api_key_env: HF_INFERENCE_TOKEN
-  api_format: openai_chat_completions
 task:
   repo: https://huggingface.co/datasets/harborframework/terminal-bench-2.1
   dataset: terminal-bench-2.1@2.1.0

@@ -3,8 +3,8 @@ workers, frozen clock). Not a test module: tests/test_admission.py drives it, an
 standalone against any controller version (`python -m tests.admission_sim`) for before/after
 numbers.
 
-Shape: 3 self-hosted providers with `max_working`, one agent type
-per provider (334 + 333 + 333 agents), 25 agents per worker, so 42 workers. One round is 3 s:
+Shape: 3 servers you run, each its own type's `inference` with `max_working`, one agent type
+per server (334 + 333 + 333 agents), 25 agents per worker, so 42 workers. One round is 3 s:
 the driver prompts every agent the controller lists idle that has no pending prompt, every
 worker polls its commands once (in worker-id order), turns
 last 5-15 rounds (15-45 s), events are flushed every round and heartbeats go out every 10
@@ -27,31 +27,29 @@ from flock.controller.reconcile import AgentState, Settings, agent_state, reconc
 from flock.controller.store import Store
 from flock.models import AgentHeartbeat, Event, PromptCommand, SwarmSpec, WorkerHeartbeat
 
+from . import fake_models
 from .conftest import HB
 
 TOKEN = "sim-token"
+MODEL = "LFM2.5-2.6B"
 ROUND = 3.0  # s
 HEARTBEAT_ROUNDS = 10  # 30 s
 def sim_types(agents: int = 1000) -> dict[str, tuple[str, int]]:
-    """type -> (provider, replicas): `agents` split over 3 types (334 + 333 + 333)."""
+    """type -> (server, replicas): `agents` split over 3 types (334 + 333 + 333)."""
     return {f"painter-{c}": (f"gpu{i + 1}", agents // 3 + (i < agents % 3))
             for i, c in enumerate("abc")}
 
 
 def sim_spec(max_working: int, per_worker: int = 25, agents: int = 1000) -> SwarmSpec:
     shape = sim_types(agents)
-    providers = {
-        prov: {"type": "openai_compat", "base_url": f"http://{prov}:8000/v1",
-               "api_key_env": "VLLM_API_KEY", "self_hosted": True, "max_working": max_working}
-        for prov, _ in shape.values()
-    }
     types = {
-        name: {**HB, "model": f"{prov}:LFM2.5-2.6B", "replicas": n,
-               "agents_per_worker": per_worker}
+        name: {**HB, "model": MODEL, "replicas": n, "agents_per_worker": per_worker,
+               "inference": {"urls": [f"http://{prov}:8000/v1"], "api_key_env": "VLLM_API_KEY",
+                             "max_working": max_working}}
         for name, (prov, n) in shape.items()
     }
     return SwarmSpec.model_validate({"swarm": "px", "namespace": "ns", "bucket": "hf://buckets/ns/b",
-                                     "providers": providers, "types": types})
+                                     "types": types})
 
 
 @dataclass
@@ -61,7 +59,7 @@ class SimResult:
     ever: int  # agents that had at least one turn
     all_by: int | None  # first round at which every agent had had a turn
     turns: int
-    peak_in_turn: dict[str, int]  # per provider, true agents in a turn (worker view)
+    peak_in_turn: dict[str, int]  # per server, true agents in a turn (worker view)
     mean_in_turn: dict[str, float]
     coverage: list[int] = field(default_factory=list)  # agents with >= 1 turn, per round
 
@@ -83,7 +81,8 @@ async def simulate(rounds: int = 60, max_working: int = 128, seed: int = 0,
     jobs = FakeJobsClient()
     settings = Settings(public_url="http://sim", token=TOKEN, secret_source={"VLLM_API_KEY": "k"},
                         rng=random.Random(seed))
-    app = create_app(store, TOKEN, clock=clock, enforce_max_working=True)
+    app = create_app(store, TOKEN, clock=clock, enforce_max_working=True,
+                     inference_transport=fake_models.transport(fake_models.listing([MODEL])))
     spec = sim_spec(max_working, agents=agents)
     prov_of = {name: prov for name, (prov, _) in sim_types(agents).items()}
     transport = httpx.ASGITransport(app=app)

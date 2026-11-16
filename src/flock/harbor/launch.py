@@ -8,7 +8,7 @@ import signal
 import threading
 import uuid
 from datetime import datetime, timezone
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from harbor.models.trial.config import (
     AgentConfig,
@@ -17,6 +17,8 @@ from harbor.models.trial.config import (
     TrialConfig,
 )
 from harbor.trial.trial import Trial
+
+from flock.models import NO_KEY_ENV, loopback_url
 
 from .config import PI_VERSION, Config
 from .harnesses.pi import attach_pi_setup, terminal_pi_error
@@ -48,8 +50,29 @@ def environment_config(config):
     return EnvironmentConfig(type=backend, delete=backend != "podman")
 
 
-def build_trial_config(config, resolved, run_dir, name, agent_instructions, api_key):
-    inference = config.inference
+# Where a podman container reaches the machine it runs on: podman puts the name in every
+# container's /etc/hosts (the host's address; a server must listen there, not only on 127.0.0.1)
+PODMAN_HOST = "host.containers.internal"
+
+
+def agent_url(url, backend):
+    """`url` as an agent's container reaches it: with podman, `localhost` (this machine) is
+    PODMAN_HOST. Other URLs, and other backends, as written."""
+    if backend != "podman" or not loopback_url(url):
+        return url
+    parts = urlsplit(url)
+    port = f":{parts.port}" if parts.port else ""
+    return urlunsplit(parts._replace(netloc=PODMAN_HOST + port))
+
+
+def build_trial_config(
+    config, resolved, run_dir, name, agent_instructions, api_key, inference=None
+):
+    """`inference`: the agent's endpoints (default: the config's); the agent `name` calls one
+    of its URLs, and its container may reach all of them."""
+    inference = inference or config.inference
+    backend = config.environment.backend
+    key_name = inference.key_env or NO_KEY_ENV
     agent_kwargs = {"version": PI_VERSION, "max_turns": config.limits.agent_max_turns}
     if inference.reasoning_effort is not None:
         agent_kwargs["reasoning_effort"] = inference.reasoning_effort
@@ -67,17 +90,19 @@ def build_trial_config(config, resolved, run_dir, name, agent_instructions, api_
         agent=AgentConfig(
             name="pi",
             override_timeout_sec=config.limits.agent_timeout_seconds,
-            model_name=config.model,
-            base_url=inference.base_url,
-            model_api_key_name=inference.api_key_env,
-            model_api_format=inference.api_format,
+            # the id as the servers take it (`<model>:<provider>` on the router), unparsed
+            model_name=inference.request_model(config.model),
+            skip_model_parsing=True,
+            base_url=agent_url(inference.endpoint_for(name), backend),
+            model_api_key_name=key_name,
+            model_api_format="openai_chat_completions",
             env={
-                inference.api_key_env: api_key,
+                key_name: api_key,
                 "FLOCK_TOOLS_MANIFEST": TOOLS_MANIFEST,
             },
-            extra_allowed_hosts=[
-                urlsplit(inference.base_url).hostname,
-            ],
+            extra_allowed_hosts=sorted(
+                {urlsplit(agent_url(u, backend)).hostname for u in inference.endpoints}
+            ),
             kwargs=agent_kwargs,
         ),
         environment=environment_config(config),

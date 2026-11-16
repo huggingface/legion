@@ -13,12 +13,14 @@ import yaml
 from fastapi.testclient import TestClient
 
 from flock import ops
+from flock.controller import inference
 from flock.controller.api import create_app
 from flock.controller.jobs import FakeJobsClient
 from flock.controller.reconcile import Settings, reconcile
 from flock.controller.store import Store
 from flock.models import SwarmSpec
 
+from . import fake_models
 from .tinyrun import TinyRun
 
 TOKEN = "test-token"
@@ -37,10 +39,10 @@ class Clock:
         return self.t
 
 
-# A provider-backed placeholder model for specs whose harness never runs (`fake:m`), with the
-# smallest `harbor:` block a harbor type validates with (no Trial ever starts from it).
-FAKE_PROVIDERS = {"fake": {"type": "openai_compat", "base_url": "http://fake.invalid/v1",
-                           "api_key_env": "FAKE_KEY", "self_hosted": True}}
+# A placeholder server for specs whose harness never runs (model `m`; tests/fake_models.py
+# answers its GET /models), with the smallest `harbor:` block a harbor type validates with (no
+# Trial ever starts from it).
+FAKE_INFERENCE = {"urls": ["http://fake.invalid/v1"], "api_key_env": "FAKE_KEY"}
 SHA = "0" * 40
 HARBOR = {"task": {"registry_commit": SHA, "task": {"git_commit_id": SHA}},
           "config": {"task": {}}}  # pinned, as the compile step writes it
@@ -74,14 +76,14 @@ def make_spec(swarm: str = "demo", **types: dict) -> SwarmSpec:
         base = {
             "harness": "harbor",
             "harbor": HARBOR,
-            "model": "fake:m",
+            "model": "m",
             "secrets": ["ANTHROPIC_API_KEY"],
             "env": {"MSGBOARD_URL": "https://example.invalid"},
         }
         full[name] = {**base, **overrides}
     return SwarmSpec.model_validate(
         {"swarm": swarm, "namespace": "ns", "bucket": "hf://buckets/ns/sh",
-         "providers": FAKE_PROVIDERS, "types": full}
+         "inference": FAKE_INFERENCE, "types": full}
     )
 
 
@@ -142,6 +144,12 @@ def slurm(tmp_path, monkeypatch) -> Slurm:
     monkeypatch.setenv("PATH", f"{STUBS}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("SLURM_STUB_DIR", str(d))
     return Slurm(d)
+
+
+@pytest.fixture(autouse=True)
+def fake_model_servers(monkeypatch):
+    """Every apply's inference check (flock.controller.inference) asks the fake model server."""
+    monkeypatch.setattr(inference, "TRANSPORT", fake_models.transport())
 
 
 @pytest.fixture(autouse=True)

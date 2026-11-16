@@ -29,6 +29,8 @@ from starlette.requests import Request
 from flock.controller.comms import CommsError
 from flock.controller.comms import resolve as comms_resolve
 from flock.controller.health import Health
+from flock.controller.inference import InferenceError
+from flock.controller.inference import check as inference_check
 from flock.controller.loop import LoopEngine, loop_status, swarm_stream
 from flock.controller.preflight import run_preflight
 from flock.controller.reconcile import agent_state, record_heartbeat, worker_state
@@ -324,15 +326,16 @@ def swarm_status(store: Store, spec: SwarmSpec, now: float) -> SwarmStatus:
             loop=loop_status(store, spec.swarm, type_name),
         )
     providers: dict[str, ProviderStatus] = {}
-    for name, prov in spec.providers.items():
+    for name, inference in spec.inference_blocks().items():
         users = [t for t, ts in spec.types.items() if ts.provider_name == name]
         providers[name] = ProviderStatus(
             name=name,
-            type=prov.type,
-            self_hosted=prov.self_hosted,
+            endpoint=inference.describe(),
             types=users,
+            models={spec.types[t].resolved_model.model_id: spec.types[t].resolved_model.context_window
+                    for t in users},
             working=sum(types[t].agents_by_state.get("working", 0) for t in users if t in types),
-            max_working=prov.max_working,
+            max_working=inference.max_working,
             zero_usage_agents=sum(
                 1 for a in agents if a["type"] in users and a["turns"] > 0
                 and not any(sum(u.model_dump().values()) for u in agent_tokens(a).values())),
@@ -543,13 +546,14 @@ def _status_page(store: Store, now: float, sampler: Health | None = None) -> str
                 f'<div class="agents">{links}{more}</div></details>'
             )
         provs = " · ".join(
-            f"<code>{e(pv.name)}</code> {e(pv.type)}{' self-hosted' if pv.self_hosted else ''}, "
-            f"working {pv.working}" + (f" / max {pv.max_working}" if pv.max_working else "")
+            f"<code>{e(pv.name)}</code> {e(pv.endpoint)}, "
+            + "".join(f"<code>{e(m)}</code> context {w or '?'}, " for m, w in pv.models.items())
+            + f"working {pv.working}" + (f" / max {pv.max_working}" if pv.max_working else "")
             + (f", <strong>{pv.zero_usage_agents} agents report zero tokens (cost unknown)</strong>"
                if pv.zero_usage_agents else "")
             for pv in st.providers.values()
         )
-        provs = f'<p class="sub">providers: {provs}</p>' if provs else ""
+        provs = f'<p class="sub">inference: {provs}</p>' if provs else ""
         provs += _health_line(sampler, spec.swarm)
         parts.append(
             f'<section class="swarm"><div class="head"><span class="kicker">swarm</span>'
@@ -644,6 +648,7 @@ def create_app(
     stats: Callable[[], dict] | None = None,
     secret_source: Mapping[str, str] | None = None,
     preflight_transport: httpx.AsyncBaseTransport | None = None,
+    inference_transport: httpx.BaseTransport | None = None,
     enforce_max_working: bool | None = None,
     namespace: str | None = None,
     compute: str | None = None,
@@ -657,7 +662,8 @@ def create_app(
     checkpoint: Callable[[], int] | None = None,
 ) -> FastAPI:
     """`secret_source` holds provider keys for preflight (default: the process environment,
-    where the Space puts its secrets); `preflight_transport` lets tests fake the providers.
+    where the Space puts its secrets); `preflight_transport` lets tests fake the providers, and
+    `inference_transport` the `GET /models` of the apply's inference check.
     `enforce_max_working` defaults to FLOCK_MAX_WORKING_ENFORCE (on unless "0").
     `namespace`, when set (job mode), is the only namespace a spec may launch workers in: a
     network group spans one namespace, so workers elsewhere could never reach the controller.
@@ -918,6 +924,11 @@ def create_app(
                                          "running Harbor type's task, tools, resources, settings "
                                          "and instructions are fixed at launch; revert the "
                                          "change, or use a new type name")
+        try:  # each model where its `inference` says, its context window pinned (docs/open-models.md)
+            inference_check(spec, secret_source, transport=inference_transport,
+                            previous=prev["spec"] if prev else None)
+        except InferenceError as e:
+            raise HTTPException(400, str(e)) from None
         try:  # channel name -> id once, kickoff once (docs/comms.md)
             comms_resolve(spec, prev["spec"] if prev else None, secret_source,
                           transport=comms_transport, dry_run=dry_run)
@@ -1319,9 +1330,9 @@ def create_app(
             return []
         out = []
         r = ts.resolved_model
-        if r is not None and r.provider.max_working is not None:
+        if r is not None and r.inference.max_working is not None:
             out.append((frozenset(t for t, x in spec.types.items()
-                                  if x.provider_name == r.provider_name), r.provider.max_working))
+                                  if x.provider_name == r.provider_name), r.inference.max_working))
         if ts.max_working is not None:
             out.append((frozenset({type_name}), ts.max_working))
         return out

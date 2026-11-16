@@ -52,8 +52,8 @@ def test_verdict_levels():
 
 def _vllm_spec() -> SwarmSpec:
     data = make_spec(researcher={"replicas": 2}).model_dump(mode="json")
-    data["providers"]["v"] = {"type": "openai_compat", "base_urls": ["http://g1/v1", "http://g2/v1"],
-                              "api_key_env": "K", "self_hosted": True, "metrics": True}
+    data["inference"] = {"urls": ["http://g1/v1", "http://g2/v1"], "api_key_env": "K",
+                         "metrics": True}
     return SwarmSpec.model_validate(data)
 
 
@@ -77,11 +77,11 @@ async def test_dead_server_flags_its_agents(store, clock, tick):
     h.tick(t)
     body = h.latest("demo")["body"]
     assert body["alerts"] == [] and fs.dead_servers({"body": body}) == set()  # one miss: no alert
-    assert body["providers"]["v"] == {"waiting": 1.0, "running": 2.0}  # summed
+    assert body["providers"]["inference"] == {"waiting": 1.0, "running": 2.0}  # summed
     await h.probe(t)
     h.tick(t)
     body = h.latest("demo")["body"]
-    g1, g2 = body["provider_servers"]["v"]["g1"], body["provider_servers"]["v"]["g2"]
+    g1, g2 = (body["provider_servers"]["inference"][h] for h in ("g1", "g2"))
     assert g1 == {"up": True, "fails": 0, "dead": False, "waiting": 1.0, "running": 2.0,
                   "agents": 1}
     assert g2["dead"] and g2["agents"] == 1 and g2["dead_agents"] == ["researcher-0001"]

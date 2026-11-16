@@ -16,7 +16,7 @@ from flock.world.__main__ import world_app
 from flock.world.host import derived_token, world_admin_token
 from flock.world.server import create_app
 
-from .conftest import FAKE_PROVIDERS, HB, TOKEN, wire
+from .conftest import FAKE_INFERENCE, HB, TOKEN, wire
 
 SECRET = "world-secret"
 ADMIN_SECRET = "admin-secret-value"
@@ -227,7 +227,7 @@ def test_knob_types_are_checked():
 def test_world_admin_token_is_never_the_world_secret():
     def spec(world):
         return SwarmSpec.model_validate({"swarm": "sw", "compute": "local", "world": world,
-                                         "providers": FAKE_PROVIDERS, "types": {"dev": {**HB, "model": "fake:m"}}})
+                                         "inference": FAKE_INFERENCE, "types": {"dev": {**HB, "model": "m"}}})
     local = spec({"command": ["python", "w.py"]})
     assert world_admin_token(local, TOKEN, {}) == derived_token(TOKEN, "flock-world-admin:sw")
     assert world_admin_token(local, TOKEN, {}) != derived_token(TOKEN, "sw")  # the world secret
@@ -251,7 +251,7 @@ def _swarm(world_client, store, clock):
                          loop_interval=0, world_transport=_forward(world_client))
     spec = SwarmSpec.model_validate({
         "swarm": "sw", "compute": "local", "world": {"url": "http://w.invalid", "token_env": "WORLD_SECRET"},
-        "providers": FAKE_PROVIDERS, "types": {"dev": {**HB, "model": "fake:m", "replicas": 1}}})
+        "inference": FAKE_INFERENCE, "types": {"dev": {**HB, "model": "m", "replicas": 1}}})
     return app, spec.model_dump(mode="json")
 
 

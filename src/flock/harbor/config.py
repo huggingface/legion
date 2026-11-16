@@ -10,6 +10,8 @@ import yaml
 from huggingface_hub import get_token
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from flock.models import NO_KEY, Inference
+
 PI_VERSION = "1.5.0"
 # Flock's own resource providers and tools, shipped inside the package.
 BUILTIN = Path(__file__).resolve().parent / "builtin"
@@ -49,30 +51,22 @@ class TaskSettings(Settings):
         return value
 
 
-class InferenceSettings(Settings):
-    base_url: str = "https://router.huggingface.co/v1"
-    api_key_env: str = Field(default="HF_TOKEN", pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
-    api_format: Literal["openai_chat_completions"] = "openai_chat_completions"
-    reasoning_effort: (
-        Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"] | None
-    ) = None
-
-    @field_validator("base_url")
-    @classmethod
-    def endpoint(cls, value):
-        url = urlsplit(value)
-        if (
-            url.scheme not in ("https", "http")
-            or not url.hostname
-            or url.username
-            or url.password
-            or url.query
-            or url.fragment
-        ):
-            raise ValueError(
-                "inference.base_url must be an HTTP(S) URL without credentials"
-            )
-        return value.rstrip("/")
+def inference_key(inference: Inference, environ=None) -> str:
+    """The inference key for `inference`. HF_TOKEN falls back to the logged-in token
+    (`hf auth login`), as for the Space board; servers that take no key get a placeholder, since
+    Pi needs a key all the same."""
+    environ = os.environ if environ is None else environ
+    name = inference.key_env
+    if name is None:
+        return NO_KEY
+    key = environ.get(name) or (get_token() if name == "HF_TOKEN" else None)
+    if not key:
+        raise ValueError(
+            f"Set {name}"
+            + (" or run `hf auth login`" if name == "HF_TOKEN" else "")
+            + " before running an experiment"
+        )
+    return key
 
 
 class RoleSettings(Settings):
@@ -128,7 +122,7 @@ class Config(Settings):
     name: str = Field(default="pi-team", pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
     harness: Literal["pi"] = "pi"
     model: str = Field(min_length=1)
-    inference: InferenceSettings = Field(default_factory=InferenceSettings)
+    inference: Inference = Field(default_factory=Inference)
     task: TaskSettings
     team_file: Path | None = None
     resources_dir: Path = BUILTIN / "resources"
@@ -185,24 +179,18 @@ class Config(Settings):
         return spec
 
     def api_key(self):
-        """The inference credential. HF_TOKEN falls back to the logged-in token
-        (`hf auth login`), as for the Space board."""
-        name = self.inference.api_key_env
-        key = os.environ.get(name) or (get_token() if name == "HF_TOKEN" else None)
-        if not key:
-            raise ValueError(
-                f"Set {name}"
-                + (" or run `hf auth login`" if name == "HF_TOKEN" else "")
-                + " before running an experiment"
-            )
-        return key
+        """The inference credential (`inference_key`)."""
+        return inference_key(self.inference)
 
     def check_model_connection(self, api_key):
         from harbor.agents.installed.pi import Pi
 
-        environment = {**os.environ, self.inference.api_key_env: api_key}
+        from flock.models import NO_KEY_ENV
+
+        name = self.inference.key_env or NO_KEY_ENV
+        environment = {**os.environ, name: api_key}
         Pi.resolve_model_connection_config(
-            self.model,
+            self.inference.request_model(self.model),
             lambda key, *others: next(
                 (
                     (name, environment[name])
@@ -211,7 +199,8 @@ class Config(Settings):
                 ),
                 None,
             ),
-            base_url=self.inference.base_url,
-            model_api_key_name=self.inference.api_key_env,
-            model_api_format=self.inference.api_format,
+            skip_model_parsing=True,
+            base_url=self.inference.endpoints[0],
+            model_api_key_name=name,
+            model_api_format="openai_chat_completions",
         )

@@ -209,7 +209,6 @@ def check_spec(spec: SwarmSpec, spec_file: str):
     refused, warnings = loop_problems(spec)
     if refused:
         raise SpecError(refused)
-    warnings += extra_warnings(spec)
     try:
         return prepare(spec, spec_file), warnings
     except ToolsError as e:
@@ -218,14 +217,6 @@ def check_spec(spec: SwarmSpec, spec_file: str):
 
 def provider_backed(spec: SwarmSpec) -> bool:
     return any(ts.resolved_model is not None for ts in spec.types.values())
-
-
-def extra_warnings(spec: SwarmSpec) -> list[str]:
-    """Harbor's Pi cannot add request-body fields: a model's `extra` is kept but not sent."""
-    return [f"warning: type {name}: `extra` is kept in the spec but not sent by the "
-            f"{ts.harness.value} harness (docs/open-models.md)"
-            for name, ts in spec.types.items()
-            if ts.resolved_model is not None and ts.resolved_model.extra]
 
 
 def preflight_lines(results: list[dict]) -> list[str]:
@@ -586,7 +577,7 @@ def _values(api: Client, env_files=()) -> dict[str, str]:
 
 def _secret_names(spec: SwarmSpec) -> list[str]:
     """The secrets the spec names: provider keys, the board invite, the world token, types'."""
-    names = [*(p.api_key_env for p in spec.providers.values()),
+    names = [*(p.key_env for p in spec.inference_blocks().values()),
              spec.comms.invite_env if spec.comms else None,
              spec.world.token_env if spec.world else None,
              *(s for ts in spec.types.values() for s in ts.secrets)]

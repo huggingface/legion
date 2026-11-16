@@ -79,7 +79,8 @@ class HarborHost:
                                         h.task["registry_commit"], h.task["dataset"])
             self.task_path = await sources.download_task(task, self.root / "sources")
         if self.resources is None:
-            key = secret_env().get(config.inference.api_key_env)
+            name = spec.resolved_model.inference.key_env if spec.resolved_model else None
+            key = secret_env().get(name) if name else None
             # a resource without the add hook gets the type's roster, as the upstream launcher
             # gives it; one with it is told each agent placed here (adapters/harbor.py)
             with exposed():  # the plugins read their tokens (token_env) from os.environ

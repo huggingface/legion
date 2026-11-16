@@ -31,7 +31,7 @@ def test_upstream_configs_load_unchanged(example):
 
 LANES = """
 name: lanes
-model: huggingface/${MODEL:-Qwen/Qwen3.8-27B}
+model: ${MODEL:-Qwen/Qwen3.8-27B}
 task:
   repo: https://huggingface.co/datasets/a/b
   selector: lanes
@@ -79,7 +79,7 @@ def six_lane_spec(tmp_path, text=LANES, env=None):
 
 def test_six_lane_spec_loads(tmp_path):
     spec = six_lane_spec(tmp_path)
-    assert spec.model == "huggingface/Qwen/Qwen3.8-27B"
+    assert spec.model == "Qwen/Qwen3.8-27B"
     answers, safety = spec.agents.roles["answers"], spec.agents.roles["safety"]
     assert (answers.count, answers.ramp.every, safety.count, safety.ramp.start) == (24, 600, 6, 3)
     assert safety.role_file == tmp_path / "prompts" / "lanes" / "safety.md"
@@ -128,7 +128,7 @@ def test_six_lane_spec_loads(tmp_path):
         ),
         (lambda d: d["loop"]["while"].update(budget_usd=50),
          "would apply to each of the 2 roles sharing the run's loop"),
-        (lambda d: d["agents"]["roles"]["safety"].update(model="huggingface/other/M"),
+        (lambda d: d["agents"]["roles"]["safety"].update(model="other/M"),
          "agents.roles.safety has its own model: budgets need its pricing"),
         (lambda d: d.update(environment={"backend": "docker"}) or d.update(compute="hf-jobs"),
          "compute hf-jobs cannot run containers"),
@@ -161,8 +161,12 @@ def test_placeholders_take_json_types(value, typed):
 
 COMPILE = """
 name: lanes
-model: huggingface/Qwen/Qwen3.8-27B
-inference: {max_working: 40, reasoning_effort: high, api_key_env: HF_INFERENCE_TOKEN}
+model: Qwen/Qwen3.8-27B
+inference:
+  hf_router: {provider: cerebras}
+  max_working: 40
+  reasoning_effort: high
+  api_key_env: HF_INFERENCE_TOKEN
 task: {repo: https://huggingface.co/datasets/a/b, selector: lanes}
 team_file: team.md
 resources: {message_board: {url: https://board.example, channels: [general]}}
@@ -174,7 +178,8 @@ agents:
       role_file: answers.md
       ramp: {start: 1, add: 1, every: 10m}
     safety:
-      model: huggingface/other/Model
+      model: other/Model
+      inference: {urls: ['https://vllm.example/v1'], api_key_env: VLLM_KEY}
       pricing: [1, 2, 0.1]
       workers: {agents_per_worker: 1, max_extra: 2}
       loop: {prompt: 'Safety round {round}.', every: 5m, on: [message_board.mention], while: {until: 2h}}
@@ -204,19 +209,20 @@ def test_compile_gives_one_harbor_type_per_role(tmp_path):
     assert (swarm.swarm, swarm.namespace, swarm.bucket, swarm.compute.kind) == (
         "lanes", "", "", "local",
     )
-    provider = swarm.providers["inference"]
-    assert (provider.type, provider.base_url, provider.api_key_env, provider.max_working) == (
-        "openai_compat", "https://router.huggingface.co/v1", "HF_INFERENCE_TOKEN", 40,
-    )
-    assert provider.pricing == {"*": [0.3, 1.2, 0.03], "huggingface/other/Model": [1, 2, 0.1]}
+    blocks = swarm.inference_blocks()  # the run's, and the role's own
+    assert blocks["inference"].model_dump(exclude_defaults=True) == {
+        "hf_router": {"provider": "cerebras"}, "api_key_env": "HF_INFERENCE_TOKEN",
+        "max_working": 40, "reasoning_effort": "high"}
+    assert blocks["types.safety.inference"].model_dump(exclude_defaults=True) == {
+        "urls": ["https://vllm.example/v1"], "api_key_env": "VLLM_KEY"}
     assert swarm.limits.model_dump() == {"alive": 10, "spawned_total": None, "budget_usd": 400}
     assert swarm.spawn["answers"].types == {"safety": 2}
     assert list(swarm.types) == ["answers", "safety"]
 
     answers, safety = swarm.types["answers"], swarm.types["safety"]
     assert answers.harness.value == safety.harness.value == "harbor"
-    assert answers.model == "inference:huggingface/Qwen/Qwen3.8-27B"
-    assert answers.harness_model == "huggingface/Qwen/Qwen3.8-27B"
+    assert answers.model == answers.harness_model == "Qwen/Qwen3.8-27B"
+    assert answers.resolved_model.request_model == "Qwen/Qwen3.8-27B:cerebras"
     assert answers.resolved_model.pricing == [0.3, 1.2, 0.03]
     assert answers.replicas == 0  # the ramp raises them to max
     assert answers.replicas_ramp.model_dump(include={"start", "add", "every", "max"}) == {
@@ -241,14 +247,8 @@ def test_compile_gives_one_harbor_type_per_role(tmp_path):
     assert h.roster == {} and swarm.naming == "words"  # the controller names them, and sends
     # each assign the roster: the run's names and their roles (reconcile.harbor_roster)
     assert h.resources == {"message_board": {"url": "https://board.example", "channels": ["general"]}}
-    assert h.config == {
-        "model": "huggingface/Qwen/Qwen3.8-27B",
-        "inference": {
-            "base_url": "https://router.huggingface.co/v1",
-            "api_key_env": "HF_INFERENCE_TOKEN",
-            "api_format": "openai_chat_completions", "reasoning_effort": "high",
-            "max_working": 40,
-        },
+    assert h.config == {  # inference is the type's (resolved_model): `flock update` may move it
+        "model": "Qwen/Qwen3.8-27B",
         "task": {"repo": "https://huggingface.co/datasets/a/b",
                  "dataset": None, "selector": "lanes", "revision": "main"},
         "environment": {"backend": "hf-sandbox", "flavor": "cpu-basic"},
@@ -258,9 +258,9 @@ def test_compile_gives_one_harbor_type_per_role(tmp_path):
     }
     assert Spec.model_validate(h.config).model == h.config["model"]  # the worker rebuilds it
 
-    assert safety.model == "inference:huggingface/other/Model"
+    assert safety.model == safety.harbor.config["model"] == "other/Model"
     assert safety.resolved_model.pricing == [1, 2, 0.1]
-    assert safety.harbor.config["model"] == "huggingface/other/Model"
+    assert safety.resolved_model.request_model == "other/Model"
     assert (safety.replicas, safety.replicas_ramp, safety.agents_per_worker) == (1, None, 1)
     assert safety.workers.model_dump() == {"initial": None, "max_extra": 2}
     assert (safety.harbor.role, safety.harbor.role_text) == ("safety", "")
@@ -293,6 +293,29 @@ def test_compile_keeps_hub_and_admin_tokens_from_agents(tmp_path, edit, error):
     data.pop("compute", None)
     (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
     compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
+
+
+@pytest.mark.parametrize(("edit", "error"), [
+    (lambda d: None, "cannot reach"),  # hf-sandbox
+    (lambda d: d.update(environment={"backend": "hf-sandbox"}, compute="hf-jobs",
+                        namespace="ns", bucket="hf://buckets/ns/b"), "cannot reach"),
+    (lambda d: d.update(environment={"backend": "podman"}, compute="slurm", bucket="hf://b/x"),
+     "each worker's own node"),
+])
+def test_servers_on_this_machine_need_agents_on_it(tmp_path, edit, error):
+    """`localhost` is the machine flock runs on: refused where the agents run elsewhere."""
+    data = load_spec_yaml(COMPILE)
+    data["inference"] = {"urls": ["http://localhost:8000/v1"]}
+    edit(data)
+    for name in ("team.md", "answers.md", "round.md"):
+        (tmp_path / name).write_text("x")
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    with pytest.raises(ValueError, match=f"inference.urls: http://localhost:8000/v1 .*{error}"):
+        compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
+    data.update(environment={"backend": "podman"}, compute="local")  # agents on this machine
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    swarm = compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
+    assert swarm.inference.urls == ["http://localhost:8000/v1"]
 
 
 def test_a_space_board_is_public_and_on_one_worker(tmp_path):
@@ -397,7 +420,7 @@ def test_an_upstream_config_compiles():
     assert ts.harbor.role is None and ts.harbor.roster == {} and swarm.naming == "words"
     assert ts.secrets == []  # a managed board, docker: the worker reads no token
     assert ts.harbor.team == (EXAMPLES.parent / "prompts" / "team.md").read_text()
-    assert swarm.providers["inference"].pricing == {"*": [0.0, 0.0, 0.0]}
+    assert ts.pricing is None and ts.resolved_model.pricing == [0.0, 0.0, 0.0]
 
 
 def test_a_missing_resource_module_is_refused_at_compile(tmp_path):
@@ -451,7 +474,7 @@ def test_harbor_agents_get_flock_names_and_their_roles_reach_each_assign(
 
 
 CONSECUTIVE = """name: crew
-model: m/x
+model: m
 task: {repo: https://huggingface.co/datasets/a/b, selector: lanes}
 naming: consecutive-id
 agents:

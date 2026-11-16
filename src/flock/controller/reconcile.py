@@ -320,7 +320,7 @@ def vllm_busy(servers: dict[str, list[list[float]]], h: RampHold, now: float) ->
     """Why a ramp step must wait (None: it may go), from the controller's vLLM samples
     (`[ts, waiting, running, completed]` per server, health.py). Was load_guard.capacity_ok."""
     if not servers:
-        return "HOLD: no vLLM metrics (set `metrics: true` on the provider)"
+        return "HOLD: no vLLM metrics (set `inference.metrics: true`)"
     details = []
     for i, url in enumerate(sorted(servers), 1):
         pts = [x for x in servers[url] if now - x[0] <= VLLM_WINDOW_S]
@@ -608,7 +608,7 @@ def _send_assign(store: Store, worker_id: str, a: Row, type_name: str, ts: TypeS
     # where pending prompts are not delivered until the budget is raised or the hold lifted.
     flags = store.swarm_flags(a["swarm"])
     hard = flags.get("budget_stop") == "hard" or store.held(a, flags)  # or paused
-    hold = bool(resume) and (hard or bool(r and r.provider.max_working))
+    hold = bool(resume) and (hard or bool(r and r.inference.max_working))
     held, resume = (resume, None) if hold else (None, resume)
     if ts.harbor and not ts.harbor.roster:  # words: the run's agents (harbor_roster), with roles
         if roster is None:
@@ -795,8 +795,8 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
     }
     secrets = {"FLOCK_TOKEN": s.token}
     names = list(ts.secrets)
-    if ts.resolved_model is not None:  # the provider's key, by name, for the worker to inject
-        names.append(ts.resolved_model.provider.api_key_env)
+    if ts.resolved_model and ts.resolved_model.inference.key_env:  # the key, by name, for the worker
+        names.append(ts.resolved_model.inference.key_env)
     for name in dict.fromkeys(names):
         if name in s.secret_source:
             secrets[name] = s.secret_source[name]

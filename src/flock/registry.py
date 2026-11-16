@@ -14,16 +14,14 @@ from typing import Any
 class HarnessEntry:
     adapter: str  # "module:function"; function(workdir, agent name, TypeSpec) -> HarnessAdapter
     # (harbor's also takes `host=`, the worker's HarborHost)
-    provider_type: str  # the provider `type` a provider-backed model must have
-    api: str  # the wire API it speaks to that provider (preflight probes this one)
+    api: str  # the wire API it speaks to its inference endpoints (preflight probes this one)
 
 
 HARNESSES: dict[str, HarnessEntry] = {
     # one Harbor Trial per agent on the upstream Harbor task path (flock.harbor). Harbor installs Pi
     # (flock.harbor.config.PI_VERSION) in the task's container and the Trial delivers the
     # instructions
-    "harbor": HarnessEntry("flock.worker.adapters.harbor:make_adapter", "openai_compat",
-                           "chat_completions"),
+    "harbor": HarnessEntry("flock.worker.adapters.harbor:make_adapter", "chat_completions"),
 }
 
 # `compute.kind` / FLOCK_COMPUTE -> "module:function"; function(env, deployment, data_dir) ->

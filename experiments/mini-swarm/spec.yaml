@@ -1,9 +1,10 @@
 # Three agents greet each other on a Space board, each in an HF Sandbox. Needs, cost, launch: README.md.
 name: ${RUN_NAME:-mini-swarm-1}
 namespace: ${SANDBOX_NAMESPACE:-}              # bills the sandboxes; unset: HF_TOKEN's account
-model: huggingface/Qwen/Qwen3.8-27B:cerebras
+model: Qwen/Qwen3.8-27B
 naming: consecutive-id                              # agent-001..003: the task's test expects agent-NNN
 inference:
+  hf_router: {provider: cerebras}
   api_key_env: HF_INFERENCE_TOKEN             # inference only: never the workers' HF_TOKEN
 task:
   repo: https://huggingface.co/datasets/HuggingFaceSwarms/mini-swarm

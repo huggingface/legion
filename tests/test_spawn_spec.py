@@ -14,18 +14,18 @@ from flock.models import (
     root_depth,
 )
 
-from .conftest import FAKE_PROVIDERS, HB
+from .conftest import FAKE_INFERENCE, HB
 
 
 def spec(spawn=None, limits=None, types=None) -> SwarmSpec:
-    base = {**HB, "model": "fake:m"}
+    base = {**HB, "model": "m"}
     types = types or {
-        "leader": {**HB, "model": "fake:lead", "replicas": 1,
+        "leader": {**HB, "model": "lead", "replicas": 1,
                    "workers": {"initial": 1, "max_extra": 0}},
         "analyst": {"replicas": 0, "workers": {"initial": 1, "max_extra": 3}},
         "helper": {"replicas": 0, "workers": {"initial": 0, "max_extra": 2}},
     }
-    body = {"swarm": "s", "namespace": "ns", "bucket": "hf://buckets/ns/b", "providers": FAKE_PROVIDERS,
+    body = {"swarm": "s", "namespace": "ns", "bucket": "hf://buckets/ns/b", "inference": FAKE_INFERENCE,
             "types": {k: {**base, **v} for k, v in types.items()}}
     if spawn is not None:
         body["spawn"] = spawn

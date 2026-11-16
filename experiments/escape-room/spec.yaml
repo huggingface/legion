@@ -1,8 +1,9 @@
 # Four agents solve one AgentEscapeBench room (difficulty 20) in local Docker, sharing a board.
 # What it needs, cost and how to launch: README.md.
 name: ${RUN_NAME:-escape-room-1}
-model: huggingface/Qwen/Qwen3.8-27B:deepinfra
+model: Qwen/Qwen3.8-27B
 inference:
+  hf_router: {provider: deepinfra}
   reasoning_effort: low
 task:
   repo: https://huggingface.co/datasets/HuggingFaceSwarms/AgentEscapeBench-harbor

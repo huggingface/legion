@@ -16,7 +16,7 @@ from flock.models import PreflightReport, PreflightResult
 from flock.ops import read_spec
 from flock.specrender import read_env_file
 
-from .conftest import FAKE_PROVIDERS, HB
+from .conftest import FAKE_INFERENCE, HB
 
 runner = CliRunner()
 SPEC = {
@@ -24,9 +24,9 @@ SPEC = {
     "namespace": "ns",
     "bucket": "hf://buckets/ns/sh",
     "world": {"url": "http://${WORLD_HOST}:7860", "token_env": "PYBOT_WORLD_TOKEN"},
-    "providers": FAKE_PROVIDERS,
+    "inference": FAKE_INFERENCE,
     "types": {"researcher": {
-        **HB, "model": "fake:m", "replicas": 2, "agents_per_worker": 2,
+        **HB, "model": "m", "replicas": 2, "agents_per_worker": 2,
         "secrets": ["ANTHROPIC_API_KEY"], "system_prompt_file": "prompts/system.md",
         "env": {"MSGBOARD_URL": "${BOARD_URL:-https://board.invalid}"}}},
 }

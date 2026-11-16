@@ -1,7 +1,8 @@
 name: ${RUN_NAME:-programbench-repo}
 compute: local
-model: huggingface/Qwen/Qwen3.8-27B:deepinfra
+model: Qwen/Qwen3.8-27B
 inference:
+  hf_router: {provider: deepinfra}
   api_key_env: HF_INFERENCE_TOKEN
   reasoning_effort: low
 task:

@@ -29,7 +29,7 @@ BOARD = Path(flock.harbor.__file__).with_name("builtin") / "resources" / "messag
 
 SPEC = """
 name: host
-model: huggingface/moonshotai/Kimi-K2.5
+model: moonshotai/Kimi-K2.5
 inference: {api_key_env: HF_INFERENCE_TOKEN}
 task:
   repo: https://huggingface.co/datasets/harborframework/terminal-bench-2.1

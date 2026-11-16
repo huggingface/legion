@@ -34,7 +34,7 @@ from .test_worker_host import RESOURCE, TOOL
 runner = CliRunner()
 SPEC = """
 name: crew
-model: huggingface/moonshotai/Kimi-K2.5
+model: moonshotai/Kimi-K2.5
 task:
   repo: https://huggingface.co/datasets/harborframework/terminal-bench-2.1
   selector: regex-log

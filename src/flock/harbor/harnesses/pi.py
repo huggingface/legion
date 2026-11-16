@@ -3,7 +3,6 @@
 import json
 import shlex
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from harbor.trial.hooks import TrialEvent
 
@@ -26,11 +25,8 @@ HF_CHAT_EXTENSION = """export default function (pi) {
 
 
 def attach_pi_setup(trial, inference):
-    if (
-        inference.api_format != "openai_chat_completions"
-        or urlsplit(inference.base_url).hostname != "router.huggingface.co"
-        or inference.reasoning_effort in (None, "off")
-    ):
+    """`inference`: the agent's block (flock.models.Inference)."""
+    if inference.hf_router is None or inference.reasoning_effort in (None, "off"):
         return
 
     prepared = False
