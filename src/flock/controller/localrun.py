@@ -441,9 +441,37 @@ def _log_to(path: Path) -> logging.Handler:
     return handler
 
 
+async def _servers(http: httpx.AsyncClient, spec: SwarmSpec, say) -> bool:
+    """`hf_jobs`: start the servers and wait until they answer, as `flock launch` does."""
+    from flock.ops import SERVERS_POLL_S, server_line
+
+    r = await http.post(f"/swarms/{spec.swarm}/servers", json=spec.model_dump(mode="json"),
+                        timeout=120)
+    seen: set[str] = set()
+    while r.status_code < 400:
+        rows = r.json()
+        for line in map(server_line, rows):
+            if line not in seen:
+                seen.add(line)
+                say(line)
+        if any(x["state"] in ("failed", "stopped") for x in rows):
+            return False
+        if all(x["state"] == "ready" for x in rows):
+            return True
+        await asyncio.sleep(SERVERS_POLL_S)
+        r = await http.get(f"/swarms/{spec.swarm}/servers")
+    say(f"servers refused ({r.status_code}): {r.text}")
+    return False
+
+
 async def _apply(http: httpx.AsyncClient, opts: RunOptions, say) -> bool:
+    from flock.ops import has_servers
+
     spec = opts.spec
     body = spec.model_dump(mode="json")
+    if has_servers(spec) and not await _servers(http, spec, say):
+        say("the inference servers did not start: not starting")
+        return False
     if opts.preflight:
         r = await http.post(f"/swarms/{spec.swarm}/preflight", json=body, timeout=300)
         if r.status_code >= 400:

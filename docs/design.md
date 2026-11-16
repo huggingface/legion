@@ -69,9 +69,9 @@ One package with three entry points: `flock` (CLI and library: `init`, `launch`,
 Harbor spec (`flock.harbor.spec`) into a swarm spec with one type per role, packs the run's
 tools and resources folders and applies it.
 
-### Adding a harness or a compute backend
+### Adding a harness, a compute backend or a server starter
 
-Both are one module plus one entry in `src/flock/registry.py`; the spec loader, controller,
+Each is one module plus one entry in `src/flock/registry.py`; the spec loader, controller,
 worker and CLI read nothing else, and `tests/test_registry.py` checks every entry.
 
 - **Harness**: write `src/flock/worker/adapters/<name>.py` with a class implementing
@@ -81,6 +81,10 @@ worker and CLI read nothing else, and `tests/test_registry.py` checks every entr
   (`controller/jobs.py`) and a `<name>_jobs_client(env, dep, data_dir)` function, and add a
   `COMPUTE` entry (`compute.kind` / `FLOCK_COMPUTE` name -> that function). Every kind but
   `local` needs `bucket` and `world.url` in the spec.
+- **Server starter** (inference servers flock starts itself, like `hf_jobs`): add the block as a
+  field of `Inference`, write `src/flock/controller/<name>.py` with a `Starter`
+  (`controller/servers.py`: start or reattach, check readiness, logs, stop) and a
+  `<name>(env)` function, and add a `SERVERS` entry (the block's key -> that function).
 
 ## Agent lifecycle
 
@@ -177,8 +181,12 @@ Each type sets `harness: harbor`, its `harbor:` block (written by the compile st
 
 `types.<t>.model` is a Hub id (with `urls`, the name the servers serve) and one `inference` block
 (`Inference`) says where it runs: the HF router (`hf_router`, the default; flock sends
-`<model>:<provider>`) or OpenAI-compatible servers you run (`urls`, each agent calling one by
-rendezvous hashing). The swarm's block serves every type that does not set its own. Validation
+`<model>:<provider>`), OpenAI-compatible servers you run (`urls`, each agent calling one by
+rendezvous hashing) or vLLM servers flock starts on HF Jobs (`hf_jobs`). The swarm's block serves
+every type that does not set its own. For `hf_jobs` the controller starts one group of jobs per
+model before preflight (`POST /swarms/{swarm}/servers`, `controller/servers.py`), waits until
+each answers, pins their URLs into the resolved block as `urls`, reattaches to them by label
+after a restart and cancels them when the run ends; from there on it is the `urls` path. Validation
 pins each type's block and `[input, output, cached]` price into the spec
 (`types.<t>.resolved_model`, under the block's name: `inference` or `types.<t>.inference`), and
 the apply checks the model against each endpoint's `GET /models` and pins the context window it
@@ -217,6 +225,7 @@ proxy may still require its own authentication.
 | GET | `/swarms` | list swarms |
 | POST, GET | `/swarms/{swarm}/tools[/{version}]` | upload / fetch the run's packed tools and resources folders |
 | POST | `/swarms/{swarm}/preflight` | probe each model on its inference block |
+| POST, GET, DELETE | `/swarms/{swarm}/servers` | start (or reattach to) the spec's `hf_jobs` servers; their status; cancel them |
 | GET, DELETE | `/swarms/{swarm}` | spec and aggregates; drain and remove everything |
 | GET | `/swarms/{swarm}/agents` | paginated agent list |
 | GET | `/agents/{name}` | one agent's status |
@@ -275,5 +284,6 @@ does not reprice history.
 | Launch fails transiently | retry, 30 s doubling to 5 min; last error in status |
 | Turn exceeds its timeout | turn killed, agent `stuck` once, then idle |
 | Session cannot resume | fresh session, `session_restarted`, `resumed: false` |
-| Controller restarts | restore its state (Checkpoint and resume), check workers against the backend's jobs, wait for heartbeats |
+| Controller restarts | restore its state (Checkpoint and resume), check workers against the backend's jobs, reattach to `hf_jobs` servers by label, wait for heartbeats |
+| An `hf_jobs` server fails to start | the launch stops with the reason and the job's last log lines; its jobs are cancelled |
 | Rate limits (429) | back off, honour `Retry-After`, keep launch spacing |
