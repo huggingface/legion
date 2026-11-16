@@ -2,9 +2,11 @@
 # requires-python = ">=3.12"
 # dependencies = ["matplotlib>=3.8"]
 # ///
-"""The sweep's figure, CSVs and table from `<root>/rows.jsonl` (sweep.py's rows, one per team):
+"""The sweep's figure, CSVs and table from sweep.py's rows (`<root>/rows.jsonl`, one per team):
 
-    uv run experiments/s3-aggregation/sweep/plot.py <root>
+    uv run experiments/s3-aggregation/sweep/plot.py <root>                  # one grid, into <root>
+    uv run experiments/s3-aggregation/sweep/plot.py --series Qwen3.5-27B=<root> \
+        --series Qwen3.5-2B=<root> --out <dir>                             # one series per model
 
 - `scaling.png`, five panels against the swarm size N: success (%) in the style of the s³
   paper's Figure 5 (information aggregation), with 95% Wilson intervals over the problems; then
@@ -17,6 +19,7 @@
   the median wall time.
 """
 
+import argparse
 import csv
 import json
 import math
@@ -24,7 +27,8 @@ import statistics
 import sys
 from pathlib import Path
 
-SURFACE, INK, INK_2, GRID, SERIES = "#fcfcfb", "#0b0b0b", "#52514e", "#e4e3df", "#2a78d6"
+SURFACE, INK, INK_2, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#e4e3df"
+SERIES = ["#2a78d6", "#eb6834", "#1baf7a"]  # the reference palette's first slots, in order
 
 
 def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
@@ -85,18 +89,21 @@ def write_csv(path: Path, rows: list[dict]) -> None:
         writer.writerows(rows)
 
 
-def table(summary: list[dict]) -> str:
-    head = ("| N | teams | success | 95% CI | mean reward | input / cached / output tokens per"
-            " team | posts per agent | wall time |")
-    lines = [head, "|---|---|---|---|---|---|---|---|"]
-    for s in summary:
-        lines.append(
-            f"| {s['agents']} | {s['teams']} | {s['successes']}/{s['teams']} "
+def table(series: list[tuple[str, list[dict], list[dict]]]) -> str:
+    head = ("| model | N | teams | success | 95% CI | mean reward | input / cached / output "
+            "tokens per team | posts per agent | wall time |")
+    lines = [head, "|---|---|---|---|---|---|---|---|---|"]
+    for model, _, summary in series:
+        lines += [row(model, s) for s in summary]
+    return "\n".join(lines) + "\n"
+
+
+def row(model: str, s: dict) -> str:
+    return (f"| {model} | {s['agents']} | {s['teams']} | {s['successes']}/{s['teams']} "
             f"({100 * s['success_rate']:.0f}%) | {100 * s['ci_low']:.0f}-{100 * s['ci_high']:.0f}% "
             f"| {s['mean_reward']:.2f} | {s['input_uncached_per_team'] / 1e3:.0f}k / "
             f"{s['cached_per_team'] / 1e3:.0f}k / {s['output_per_team'] / 1e3:.1f}k "
             f"| {s['posts_per_agent']:.1f} | {s['wall_s'] / 60:.1f} min (median) |")
-    return "\n".join(lines) + "\n"
 
 
 def quartiles(values: list[float]) -> tuple[float, float, float]:
@@ -104,19 +111,13 @@ def quartiles(values: list[float]) -> tuple[float, float, float]:
     return (statistics.median(values), q[0], q[2])
 
 
-def figure(path: Path, teams: list[dict], summary: list[dict], title: str) -> None:
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    plt.rcParams.update({"font.size": 10, "axes.edgecolor": GRID, "axes.labelcolor": INK_2,
-                         "xtick.color": INK_2, "ytick.color": INK_2, "text.color": INK})
+def panels(teams: list[dict], summary: list[dict]) -> list[tuple]:
+    """(label, [(middle, low, high) per N], y limits) for each panel."""
     ns = [s["agents"] for s in summary]
     by_n = {n: [t for t in teams if t["agents"] == n] for n in ns}
-    rate = [(100 * s["success_rate"], 100 * s["ci_low"], 100 * s["ci_high"]) for s in summary]
-    panels = [
-        ("Success (%)", rate, (0, 105)),
+    return [
+        ("Success (%)", [(100 * s["success_rate"], 100 * s["ci_low"], 100 * s["ci_high"])
+                         for s in summary], (0, 105)),
         ("Input tokens per team (M)",
          [tuple(v / 1e6 for v in mean_ci([t["input_uncached"] + t["cached"] for t in by_n[n]]))
           for n in ns], None),
@@ -128,22 +129,39 @@ def figure(path: Path, teams: list[dict], summary: list[dict], title: str) -> No
         ("Board posts per agent", [mean_ci([t["posts_per_agent"] for t in by_n[n]]) for n in ns],
          None),
     ]
-    fig, axes = plt.subplots(1, len(panels), figsize=(17, 3.7), facecolor=SURFACE)
-    for ax, (label, points, ylim) in zip(axes, panels, strict=True):
+
+
+def figure(path: Path, series: list[tuple[str, list[dict], list[dict]]], title: str) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    plt.rcParams.update({"font.size": 10, "axes.edgecolor": GRID, "axes.labelcolor": INK_2,
+                         "xtick.color": INK_2, "ytick.color": INK_2, "text.color": INK})
+    fig, axes = plt.subplots(1, 5, figsize=(17, 3.9), facecolor=SURFACE)
+    for k, (model, teams, summary) in enumerate(series):
+        ns = [s["agents"] for s in summary]
+        offset = (k - (len(series) - 1) / 2) * 0.18  # side by side, so the bars don't hide
+        for ax, (label, points, ylim) in zip(axes, panels(teams, summary), strict=True):
+            ax.errorbar([n + offset for n in ns], [p[0] for p in points],
+                        yerr=[[p[0] - p[1] for p in points], [p[2] - p[0] for p in points]],
+                        color=SERIES[k], linewidth=2, marker="o", markersize=7, capsize=3,
+                        elinewidth=1.5, label=model)
+            ax.set_ylabel(label)
+            ax.set_xticks(ns)
+            if ylim:
+                ax.set_ylim(*ylim)
+            else:
+                ax.set_ylim(bottom=0)
+    for ax in axes:
         ax.set_facecolor(SURFACE)
         ax.grid(axis="y", color=GRID, linewidth=0.8)
         ax.set_axisbelow(True)
         ax.spines[["top", "right"]].set_visible(False)
-        ax.set_xticks(ns)
         ax.set_xlabel("Swarm size N")
-        ax.set_ylabel(label)
-        middle = [p[0] for p in points]
-        ax.errorbar(ns, middle, yerr=[[p[0] - p[1] for p in points], [p[2] - p[0] for p in points]],
-                    color=SERIES, linewidth=2, marker="o", markersize=7, capsize=3, elinewidth=1.5)
-        if ylim:
-            ax.set_ylim(*ylim)
-        else:
-            ax.set_ylim(bottom=0)
+    if len(series) > 1:
+        axes[0].legend(frameon=False, loc="lower left", fontsize=9)
     fig.suptitle(title, fontsize=11, color=INK, x=0.01, ha="left")
     fig.text(0.01, 0.01, "One attempt per problem. Success: share of teams with any agent right, "
              "95% Wilson intervals. Tokens and posts: means, 95% intervals. Wall time (init to "
@@ -152,17 +170,34 @@ def figure(path: Path, teams: list[dict], summary: list[dict], title: str) -> No
     fig.savefig(path, dpi=200, facecolor=SURFACE)
 
 
-def main(argv=None) -> int:
-    root = Path((argv or sys.argv[1:])[0])
+def load(root: Path) -> tuple[list[dict], list[dict]]:
     rows = [json.loads(line) for line in (root / "rows.jsonl").read_text().splitlines() if line]
     teams = sorted((team_row(r) for r in rows), key=lambda t: (t["agents"], t["problem"]))
-    summary = by_n(teams)
-    write_csv(root / "teams.csv", teams)
-    write_csv(root / "by_n.csv", summary)
-    (root / "by_n.md").write_text(table(summary))
-    figure(root / "scaling.png", teams, summary,
-           "s3-aggregation with flock: success and cost against swarm size (Qwen3.5-27B)")
-    print(table(summary))
+    return teams, by_n(teams)
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="The sweep's figure, CSVs and table.")
+    parser.add_argument("root", nargs="?", type=Path, help="one grid; outputs go there too")
+    parser.add_argument("--series", action="append", default=[], help="MODEL=ROOT, repeatable")
+    parser.add_argument("--out", type=Path, help="where --series outputs go")
+    args = parser.parse_args(argv)
+    if args.root:  # the grid's model, from one of its team specs
+        spec = next(args.root.glob("src/*/spec.yaml"), None)
+        model = next((x.split(": ", 1)[1].strip() for x in spec.read_text().splitlines()
+                      if x.startswith("model: ")), args.root.name) if spec else args.root.name
+        sources, out = [(model.split("/")[-1], args.root)], args.root
+    else:
+        sources = [(s.split("=", 1)[0], Path(s.split("=", 1)[1])) for s in args.series]
+        out = args.out
+        out.mkdir(parents=True, exist_ok=True)
+    series = [(model, *load(root)) for model, root in sources]
+    write_csv(out / "teams.csv", [{"model": m} | t for m, teams, _ in series for t in teams])
+    write_csv(out / "by_n.csv", [{"model": m} | s for m, _, summary in series for s in summary])
+    (out / "by_n.md").write_text(table(series))
+    figure(out / "scaling.png", series, "s3-aggregation with flock: success and cost against "
+           f"swarm size ({', '.join(m for m, _, _ in series)})")
+    print(table(series))
     return 0
 
 
