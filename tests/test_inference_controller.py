@@ -246,7 +246,8 @@ async def test_a_server_that_wants_a_key_the_controller_lacks(store, clock):
 
 
 def fake_provider(tool_call: bool = True, status: int = 200, follow_up_fails: bool = False,
-                  zero_usage: bool = False, text_call: bool = False) -> tuple[FastAPI, list[dict]]:
+                  zero_usage: bool = False, text_call: bool = False,
+                  no_call_on: str | None = None) -> tuple[FastAPI, list[dict]]:
     """A tiny OpenAI-compatible Chat Completions server. `follow_up_fails` refuses the turn
     carrying the tool result, as the HF router did on its auto provider."""
     fake = FastAPI()
@@ -270,7 +271,7 @@ def fake_provider(tool_call: bool = True, status: int = 200, follow_up_fails: bo
         if follow_up and follow_up_fails:
             return JSONResponse({"error": {"message": "bad tool message"}}, status_code=400)
         msg: dict = {"role": "assistant", "content": "It is noon UTC."}
-        if tool_call and not follow_up:
+        if tool_call and not follow_up and request.url.hostname != no_call_on:
             msg = ({"role": "assistant", "content": 'hmm</think>{"tool": "get_time", "timezone": "UTC"}'}
                    if text_call
                    else {"role": "assistant", "content": None, "tool_calls": [
@@ -423,6 +424,21 @@ async def test_preflight_sends_the_router_provider_and_bill_to_as_pi_does(prefli
     assert len(rep["results"]) == 1 and rep["ok"]
     assert {(x["model"], x["bill_to"]) for x in seen} == {
         ("deepseek-ai/DeepSeek-V4.1-Flash-1017:novita", "huggingface")}
+
+
+async def test_preflight_needs_a_tool_call_from_every_server(preflight_client):
+    fake, _ = fake_provider(no_call_on="a")
+    urls = {"urls": ["http://a/v1", "http://b/v1"], "api_key_env": "VLLM_API_KEY"}
+    spec = pspec(urls, pixel={**HB, "model": "Qwen/Small"})
+    async with await preflight_client(fake, SECRETS) as c:
+        [x] = (await c.post("/swarms/p/preflight", json=spec.model_dump(mode="json"))).json()["results"]
+    assert not x["ok"] and not x["tool_call_seen"]
+    assert x["error"].startswith("http://a/v1: the reply has no tool call")
+    urls["urls"].reverse()  # a server after one that passed
+    spec = pspec(urls, pixel={**HB, "model": "Qwen/Small"})
+    async with await preflight_client(fake, SECRETS) as c:
+        [x] = (await c.post("/swarms/p/preflight", json=spec.model_dump(mode="json"))).json()["results"]
+    assert not x["ok"] and x["error"].startswith("http://a/v1: the reply has no tool call")
 
 
 async def test_preflight_checks_the_model_is_served_first(preflight_client):

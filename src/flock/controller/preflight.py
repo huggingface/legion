@@ -63,6 +63,10 @@ class ProbeError(Exception):
     pass
 
 
+class NoToolCall(ProbeError):
+    """A server answered turn one without a tool call."""
+
+
 async def _chat_turn(client, url, body, headers, timeout) -> tuple[dict[str, Any], int]:
     """One non-streamed Chat Completions call -> (assistant message, tokens reported)."""
     resp = await client.post(url, json=body, headers=headers, timeout=timeout)
@@ -95,8 +99,9 @@ def visible(content: Any) -> Any:
 
 async def _probe_chat(client, r: ResolvedModel, key: str | None, result: PreflightResult,
                       timeout: float) -> int:
-    """Two Chat Completions turns; returns tokens reported. Raises ProbeError. With several
-    `urls`, every server is probed (an error names the one that failed)."""
+    """Two Chat Completions turns on every server; returns tokens reported. Raises ProbeError
+    (NoToolCall: a server made no tool call). With several `urls`, the error names the server
+    that failed."""
     urls, total = r.inference.endpoints, 0
     for base in urls:
         try:
@@ -104,7 +109,7 @@ async def _probe_chat(client, r: ResolvedModel, key: str | None, result: Preflig
         except ProbeError as e:
             if len(urls) == 1:
                 raise
-            raise ProbeError(f"{base}: {e}") from e
+            raise type(e)(f"{base}: {e}") from e
     return total
 
 
@@ -117,7 +122,7 @@ async def _probe_chat_at(client, base: str, r: ResolvedModel, key: str | None,
     calls = [c for c in msg.get("tool_calls") or [] if isinstance(c, dict)]
     result.tool_call_seen = bool(calls)
     if not calls:
-        return tok1
+        raise NoToolCall("the reply has no tool call; agents on this model cannot use tools")
     sent = {"role": "assistant", "content": visible(msg.get("content")), "tool_calls": calls}
     body2 = {**body, "messages": [*body["messages"], sent, *(
         {"role": "tool", "tool_call_id": c.get("id"), "content": TOOL_RESULT} for c in calls)]}
@@ -161,6 +166,10 @@ async def probe(
         result.latency_ms = int((time.monotonic() - t0) * 1000)
         result.error = str(e)[:400]
         return result
+    except NoToolCall as e:
+        result.latency_ms = int((time.monotonic() - t0) * 1000)
+        result.error = str(e)[:400] + hint(r)
+        return result
     except ProbeError as e:
         result.latency_ms = int((time.monotonic() - t0) * 1000)
         turn = "follow-up turn (tool result sent back)" if result.tool_call_seen else "first turn"
@@ -171,9 +180,6 @@ async def probe(
         result.error = f"{type(e).__name__}: {e}"[:300]
         return result
     result.latency_ms = int((time.monotonic() - t0) * 1000)
-    if not result.tool_call_seen:
-        result.error = "the reply has no tool call; agents on this model cannot use tools" + hint(r)
-        return result
     result.follow_up_ok = result.ok = True
     result.usage_reported = (tok1 + tok2) > 0
     if not result.usage_reported:
