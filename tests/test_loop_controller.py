@@ -937,10 +937,18 @@ async def test_success_heartbeat_stops_once_and_survives_restart(sim, enabled):
     assert winner["agent"] == A0
     assert sim.store.swarm_flags("demo")["released"]["reason"] == "task_success"
     commands = await sim.commands()
-    assert {c["agent"] for c in commands if c["kind"] == "stop"} == {A0, A1}
+    stops = [c["agent"] for c in commands if c["kind"] == "stop"]
+    assert sorted(stops) == sorted([A0, A1])
     assert not sim.store.pending_counts("demo")
     events = [e for e in sim.swarm_events() if e[0] == "task_success"]
     assert len(events) == 1
+    competing = {**evidence, "trial_id": "trial-2"}
+    body["agents"][1]["trial"] = {"id": "trial-2", "success": competing}
+    assert (await sim.c.post(f"/workers/{W0}/heartbeat", json=body)).status_code == 200
+    assert sim.store.get_control("demo", "success") == winner
+    r = await sim.c.post("/swarms/demo/resume", json={"release": True})
+    assert r.status_code == 409
+    assert "launch a new run" in r.json()["detail"]
     # A new engine replays the persisted decision rather than starting more loops.
     restarted = LoopEngine(sim.store, clock=sim.clock, send=sim.loops.send)
     restarted.tick()

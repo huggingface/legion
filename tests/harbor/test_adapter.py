@@ -42,6 +42,7 @@ class Fakes:
         self.trials, self.pi, self.root, self.uploads, self.net = [], [], [], [], []
         self.reward = 1.0
         self.success_response = None
+        self.success_gate = None
         self.success_calls = []
         self.pi_env = []  # each `pi --print` exec's env
         self.probe_ok, self.upload_fails, self.kill_fails = True, False, False
@@ -71,6 +72,13 @@ class FakeEnv:
         parts = shlex.split(command)
         original = parts[parts.index("-c") + 1]
         self.fakes.success_calls.append((original, service, timeout_sec))
+        if self.fakes.success_gate is not None:
+            await self.fakes.success_gate.wait()
+        if original == "after-first-turn":
+            from ..worker_fakes import until
+
+            await until(lambda: bool(self.fakes.pi))
+            original = '{"success": true}'
         return ExecResult(return_code=0, stdout="compose provider banner" + CHECK_START
                           + (self.fakes.success_response or original) + CHECK_END)
 
@@ -904,7 +912,9 @@ async def test_sidecar_success_survives_until_verification(fakes, tmp_path, body
     try:
         await a.start(a.workdir, None, ts)
         # Checks also run while no model turn is active.
-        await asyncio.sleep(.05)
+        from ..worker_fakes import until
+
+        await until(lambda: bool(fakes.success_calls))
         status = a.trial_status()
         assert bool(status["success"]) is success
         assert fakes.success_calls == [("check", "puzzle", 5)]
@@ -915,5 +925,43 @@ async def test_sidecar_success_survives_until_verification(fakes, tmp_path, body
             saved = a.home / "results" / a.trial.config.trial_name / "result.json"
             assert saved in a.artifact_files()
             assert "config" not in json.loads(saved.read_text())
+    finally:
+        await a.close(0)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("late_check", [False, True])
+async def test_success_at_trial_expiry_is_retained_until_release(
+        fakes, tmp_path, clock, enabled, late_check):
+    from ..worker_fakes import until
+
+    ts = type_spec(trial_hours=1)
+    ts.harbor.config.update(stop_on_success=enabled,
+                           success_check={"service": "puzzle", "command": '{"success": true}'})
+    a = make_adapter(tmp_path / "work" / "agent-0000", "agent-0000", ts)
+    if late_check:
+        fakes.success_gate = asyncio.Event()
+    try:
+        _, events = await start(a)
+        await until(lambda: bool(fakes.success_calls))
+        winning_trial = a.trial_status()["id"]
+        clock[0] += 3600
+        await until(lambda: not a.alive())
+        if late_check:
+            fakes.success_gate.set()
+        await until(lambda: a.trial_status()["success"] is not None
+                    and a.trial_status()["success"]["verification"] == "passed")
+        # A prompt between detection and the controller's heartbeat must not replace the win.
+        await a.start(a.workdir, None, ts)
+        await a.send("next turn")
+        if enabled:
+            assert a.trial_status()["id"] == winning_trial
+            assert a.trial_status()["success"]["verification"] == "passed"
+            assert len(fakes.trials) == 1
+        else:
+            await read(events, "turn_ended")
+            assert len(fakes.trials) == 2
+        await a.close(timeout=2)
+        assert any(p.name == "result.json" for p in a.artifact_files())
     finally:
         await a.close(0)

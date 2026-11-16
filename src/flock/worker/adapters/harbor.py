@@ -236,7 +236,8 @@ class HarborAdapter:
         """A Trial for the queued prompts, unless one is up or starting (or the session must
         restart: the runtime's next start gets the ResumeError)."""
         if (self.alive() or self._creating or self._closing or self._resume_failed
-                or self._prompts.empty()):
+                or self._prompts.empty()
+                or (self._success and self.spec.harbor.config.get("stop_on_success"))):
             return
         self._creating = True  # until the task has the new Trial's `_run`
         self._starting = asyncio.create_task(self._restart(), name=f"trial-{self.agent}")
@@ -287,6 +288,12 @@ class HarborAdapter:
             raise RuntimeError("harness harbor needs the type's `harbor:` block")
         if self._closes:  # the exit path closed this agent while its burst got here
             raise RuntimeError("agent closed")
+        # A final in-flight check can report success as the old Trial expires.
+        # Keep that Trial (and its verifier result) until the controller releases us.
+        if self._success_watcher is not None:
+            await self._success_watcher
+        if self._success and h.config.get("stop_on_success"):
+            return
         if self.host is not None:
             await self.host.prepare(self.spec)
             self.resources, self.bundle = self.host.resources, self.host.bundle
@@ -406,6 +413,8 @@ class HarborAdapter:
                                      "observed_at": datetime.now(UTC).isoformat(),
                                      "evidence": body.get("evidence"),
                                      "verification": "pending"}
+                    if self._run.done():
+                        self._verify_success(_result(self._run))
                     return
             except asyncio.CancelledError:
                 raise
@@ -430,16 +439,20 @@ class HarborAdapter:
         except Exception as e:  # noqa: BLE001 - a leftover network holds a subnet, not the run
             log.warning("%s: Trial network not removed: %s", self.agent, e)
 
+    def _verify_success(self, result: Any) -> None:
+        if self._success is not None:
+            verifier = getattr(result, "verifier_result", None)
+            rewards = getattr(verifier, "rewards", None)
+            self._success.update(verification=("passed" if rewards and
+                rewards.get("reward") == 1 and not result.exception_info else "failed"),
+                rewards=rewards)
+
     def _ended(self, trial: Any, task: asyncio.Task) -> None:
         """Done callback of a Trial's run(): roll over after trial_hours, report a failure
         (now, or at the next burst)."""
         self.result = _result(task)
-        if trial is self.trial and self._success is not None:
-            verifier = getattr(self.result, "verifier_result", None)
-            rewards = getattr(verifier, "rewards", None)
-            self._success.update(verification=("passed" if rewards and
-                rewards.get("reward") == 1 and not self.result.exception_info else "failed"),
-                rewards=rewards)
+        if trial is self.trial:
+            self._verify_success(self.result)
         if trial is not self.trial or not trial.agent.channel.ready.is_set():
             return  # superseded, or never ready: whoever started it reports that
         try:  # unmounted (hf-sandbox): Harbor's download at the end beats FlockPi's last one

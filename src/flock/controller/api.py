@@ -1645,6 +1645,8 @@ def add_pause_routes(api: APIRouter, loops: LoopEngine) -> None:
             return {"swarm": swarm, "held": _held_view(fn(swarm, **kw)) or {"types": {}, "agents": {}}}
         except KeyError as e:
             raise HTTPException(404, str(e.args[0])) from None
+        except ValueError as e:
+            raise HTTPException(409, str(e)) from None
 
     @api.post("/swarms/{swarm}/pause")
     def pause(swarm: str, req: HoldRequest) -> dict:

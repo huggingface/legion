@@ -383,9 +383,12 @@ def stop(
                "are older than their last turns")])
     if down.get("ended"):
         typer.echo("released: every agent synced, controller checkpointed, nothing runs; "
-                   "`flock launch FOLDER` starts it again and resumes")
+                   + ("this swarm succeeded; launch a new run" if done.get("success") else
+                      "`flock launch FOLDER` starts it again and resumes"))
     elif "unsynced" in done:
-        typer.echo(f"released: every agent synced, compute freed; `flock launch {swarm}` resumes")
+        typer.echo("released: every agent synced, compute freed; "
+                   + ("this swarm succeeded; launch a new run" if done.get("success") else
+                      f"`flock launch {swarm}` resumes"))
 
 
 @app.command()

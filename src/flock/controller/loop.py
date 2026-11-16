@@ -388,6 +388,7 @@ class LoopEngine:
                             self.store.put_loop_agent(a["name"], swarm, a["type"], st)
                         self.store.enqueue_command(a["worker"],
                                                    StopCommand(agent=a["name"]).model_dump_json())
+                        self._stops[a["name"]] = now
             return h
 
     def resume(self, swarm: str, types: list[str] | None = None, agents: list[str] | None = None,
@@ -431,6 +432,8 @@ class LoopEngine:
         """Accept only worker heartbeat evidence, never model/transcript events."""
         with self._lock:
             winner = self.store.get_control(spec.swarm, "success")
+            if not spec.stop_on_success and winner is None:
+                return
             for report in agents:
                 agent = self.store.get_agent(report.name)
                 trial = report.trial or {}
@@ -469,16 +472,7 @@ class LoopEngine:
             if name in spec.types and loop["state"] in ("running", "final"):
                 self._stop(spec.swarm, name, spec.types[name], loop, "task_success",
                            final=False, now=now)
-        # Re-send stops while shutdown is incomplete, including after a controller restart.
-        now = self.clock().timestamp()
-        workers = {w["id"]: w for w in self.store.list_workers(spec.swarm)}
-        for agent in self.store.list_agents(spec.swarm):
-            if (agent["worker"] and not agent["removing"] and
-                    self.turn_state(agent, workers.get(agent["worker"]), now) == AgentState.working
-                    and now - self._stops.get(agent["name"], -RESTOP_EVERY) >= RESTOP_EVERY):
-                self.store.enqueue_command(agent["worker"],
-                    StopCommand(agent=agent["name"]).model_dump_json())
-                self._stops[agent["name"]] = now
+        self._keep_stopped(spec, now)
 
     def hard_stopped(self, swarm: str) -> bool:
         return (self.store.swarm_flags(swarm).get("budget_stop") == "hard"
@@ -747,8 +741,9 @@ class LoopEngine:
                 continue
             self.store.enqueue_command(a["worker"], StopCommand(agent=a["name"]).model_dump_json())
             self._stops[a["name"]] = now
-            self._event(spec.swarm, "budget_stop", {"phase": "hard", "restop": a["name"],
-                                                    "budget_usd": spec.limits.budget_usd})
+            if self.store.swarm_flags(spec.swarm).get("budget_stop") == "hard":
+                self._event(spec.swarm, "budget_stop", {"phase": "hard", "restop": a["name"],
+                                                       "budget_usd": spec.limits.budget_usd})
 
     # ------------------------------------------------------------------ lifecycle
     def _mode(self, spec: SwarmSpec, type_name: str, lp: LoopSpec) -> str:

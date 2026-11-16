@@ -301,6 +301,8 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
         "inference", "task", "environment", "tools_dir", "tools", "resources_dir", "namespace", "success_check"})
     if spec.success_check is None:
         config.pop("success_check", None)
+    if spec.stop_on_success:
+        config["stop_on_success"] = True
     config["limits"] = spec.limits.model_dump(
         include={"agent_max_turns", "agent_timeout_seconds", "trial_hours"}
     )
