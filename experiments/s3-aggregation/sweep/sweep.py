@@ -104,9 +104,13 @@ def profile(root: Path, n: int) -> Path:
 
 def wait_done(run_dir: Path, task: str, n: int, timeout: float) -> str:
     """Poll `flock status` until the loop is done and every agent is idle: 'done', or why not."""
-    deadline = time.monotonic() + timeout
+    deadline, unanswered = time.monotonic() + timeout, 0
     while time.monotonic() < deadline:
-        text = flock(run_dir, "status", task, timeout=120).stdout
+        status = flock(run_dir, "status", task, timeout=120)
+        text = status.stdout
+        unanswered = unanswered + 1 if status.returncode != 0 else 0
+        if unanswered >= 3:  # no controller: already released (an adopted run), or gone
+            return "no controller answers"
         if re.search(r"crashloop|launch_refused", text):
             return "worker failed: " + " ".join(text.split())[:300]
         if re.search(r"^loop agent: done", text, re.MULTILINE) and re.search(
@@ -119,10 +123,12 @@ def wait_done(run_dir: Path, task: str, n: int, timeout: float) -> str:
 def attempt(args, root: Path, secrets: Path, problem: int, n: int, name: str) -> dict | None:
     """One run of a team as swarm `name`: its row, or None when it could not start."""
     run_dir, src = root / "runs" / name, root / "src" / name
+    if run_dir.exists() and (any((run_dir / "launch").glob("*.env"))
+                             or (run_dir / "hosts" / "controller.host").exists()):
+        # a previous driver launched it and stopped before its row: finish it from here
+        say(name, "adopting the run a previous driver launched")
+        return finish(args, run_dir, name, problem, n, (run_dir / "cluster.env").stat().st_mtime)
     if run_dir.exists():
-        if any((run_dir / "launch").glob("*.env")):  # a worker ran: look before running again
-            say(name, "has a run directory but no row: remove", run_dir, "to run it again")
-            return None
         shutil.rmtree(run_dir)  # init failed before: nothing ran
     started = time.time()
     write_experiment(src, problem, n, name, args.urls, args.model)
@@ -144,7 +150,14 @@ def attempt(args, root: Path, secrets: Path, problem: int, n: int, name: str) ->
     launch = flock(run_dir, "launch", str(run_dir / "experiment"))
     if launch.returncode != 0:
         say(name, "launch failed:", launch.stdout[-600:], launch.stderr[-600:])
-    why = wait_done(run_dir, name, n, args.team_timeout) if launch.returncode == 0 else "launch"
+        return finish(args, run_dir, name, problem, n, started, "launch")
+    return finish(args, run_dir, name, problem, n, started)
+
+
+def finish(args, run_dir: Path, name: str, problem: int, n: int, started: float,
+           why: str | None = None) -> dict:
+    """Wait for a launched team, release it (its Trials are graded) and make its row."""
+    why = why or wait_done(run_dir, name, n, args.team_timeout)
     say(name, "loop:", why, "- releasing")
     release = flock(run_dir, "stop", name, "--release")
     ended = time.time()
