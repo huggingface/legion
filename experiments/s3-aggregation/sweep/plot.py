@@ -15,8 +15,8 @@
   across a driver restart waited for it). The paper's right panel is token efficiency, which
   needs a token allowance our agents don't have; its Figure 10 shows tokens per team;
 - `teams.csv`: one row per team; `by_n.csv` and `by_n.md`: per N, the teams, success rate and
-  interval, mean reward, tokens per team (input, cached, output), board posts per agent and
-  the median wall time.
+  interval, mean reward, tokens per team (input, cached when the server reports it, output),
+  board posts per agent and the median wall time.
 """
 
 import argparse
@@ -90,20 +90,25 @@ def write_csv(path: Path, rows: list[dict]) -> None:
 
 
 def table(series: list[tuple[str, list[dict], list[dict]]]) -> str:
-    head = ("| model | N | teams | success | 95% CI | mean reward | input / cached / output "
-            "tokens per team | posts per agent | wall time |")
+    # a server that reports no cache hits (vLLM by default) gets no cached column
+    cached = any(s["cached_per_team"] for _, _, summary in series for s in summary)
+    tokens = "input / cached / output" if cached else "input / output"
+    head = (f"| model | N | teams | success | 95% CI | mean reward | {tokens} tokens per team "
+            "| posts per agent | median wall time |")
     lines = [head, "|---|---|---|---|---|---|---|---|---|"]
     for model, _, summary in series:
-        lines += [row(model, s) for s in summary]
+        lines += [row(model, s, cached) for s in summary]
     return "\n".join(lines) + "\n"
 
 
-def row(model: str, s: dict) -> str:
+def row(model: str, s: dict, cached: bool) -> str:
+    tokens = (f"{s['input_uncached_per_team'] / 1e3:.0f}k / "
+              + (f"{s['cached_per_team'] / 1e3:.0f}k / " if cached else "")
+              + f"{s['output_per_team'] / 1e3:.1f}k")
     return (f"| {model} | {s['agents']} | {s['teams']} | {s['successes']}/{s['teams']} "
             f"({100 * s['success_rate']:.0f}%) | {100 * s['ci_low']:.0f}-{100 * s['ci_high']:.0f}% "
-            f"| {s['mean_reward']:.2f} | {s['input_uncached_per_team'] / 1e3:.0f}k / "
-            f"{s['cached_per_team'] / 1e3:.0f}k / {s['output_per_team'] / 1e3:.1f}k "
-            f"| {s['posts_per_agent']:.1f} | {s['wall_s'] / 60:.1f} min (median) |")
+            f"| {s['mean_reward']:.2f} | {tokens} | {s['posts_per_agent']:.1f} "
+            f"| {s['wall_s'] / 60:.1f} min |")
 
 
 def quartiles(values: list[float]) -> tuple[float, float, float]:
@@ -112,17 +117,17 @@ def quartiles(values: list[float]) -> tuple[float, float, float]:
 
 
 def panels(teams: list[dict], summary: list[dict]) -> list[tuple]:
-    """(label, [(middle, low, high) per N], y limits) for each panel."""
+    """(label, [(middle, low, high) per N], y limits or "log") for each panel: tokens on a log
+    scale, since two models' teams can differ by more than an order of magnitude."""
     ns = [s["agents"] for s in summary]
     by_n = {n: [t for t in teams if t["agents"] == n] for n in ns}
     return [
         ("Success (%)", [(100 * s["success_rate"], 100 * s["ci_low"], 100 * s["ci_high"])
                          for s in summary], (0, 105)),
-        ("Input tokens per team (M)",
-         [tuple(v / 1e6 for v in mean_ci([t["input_uncached"] + t["cached"] for t in by_n[n]]))
-          for n in ns], None),
-        ("Generated tokens per team (k)",
-         [tuple(v / 1e3 for v in mean_ci([t["output"] for t in by_n[n]])) for n in ns], None),
+        ("Input tokens per team",
+         [mean_ci([t["input_uncached"] + t["cached"] for t in by_n[n]]) for n in ns], "log"),
+        ("Generated tokens per team", [mean_ci([t["output"] for t in by_n[n]]) for n in ns],
+         "log"),
         ("Wall time per team (min)",
          [tuple(v / 60 for v in quartiles([t["wall_s"] for t in by_n[n] if t["wall_s"]]))
           for n in ns], None),
@@ -131,11 +136,20 @@ def panels(teams: list[dict], summary: list[dict]) -> list[tuple]:
     ]
 
 
+def tokens(value: float, _=None) -> str:
+    """A log axis tick as a token count: 100, 10k, 1M."""
+    for size, unit in ((1e6, "M"), (1e3, "k")):
+        if value >= size:
+            return f"{value / size:g}{unit}"
+    return f"{value:g}"
+
+
 def figure(path: Path, series: list[tuple[str, list[dict], list[dict]]], title: str) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.ticker import FuncFormatter
 
     plt.rcParams.update({"font.size": 10, "axes.edgecolor": GRID, "axes.labelcolor": INK_2,
                          "xtick.color": INK_2, "ytick.color": INK_2, "text.color": INK})
@@ -143,17 +157,22 @@ def figure(path: Path, series: list[tuple[str, list[dict], list[dict]]], title: 
     for k, (model, teams, summary) in enumerate(series):
         ns = [s["agents"] for s in summary]
         offset = (k - (len(series) - 1) / 2) * 0.18  # side by side, so the bars don't hide
-        for ax, (label, points, ylim) in zip(axes, panels(teams, summary), strict=True):
+        for ax, (label, points, scale) in zip(axes, panels(teams, summary), strict=True):
             ax.errorbar([n + offset for n in ns], [p[0] for p in points],
-                        yerr=[[p[0] - p[1] for p in points], [p[2] - p[0] for p in points]],
+                        yerr=[[max(0.0, p[0] - p[1]) for p in points],  # Wilson at 0/n: 1e-15
+                              [max(0.0, p[2] - p[0]) for p in points]],
                         color=SERIES[k], linewidth=2, marker="o", markersize=7, capsize=3,
                         elinewidth=1.5, label=model)
             ax.set_ylabel(label)
             ax.set_xticks(ns)
-            if ylim:
-                ax.set_ylim(*ylim)
-            else:
-                ax.set_ylim(bottom=0)
+    for ax, (_, _, scale) in zip(axes, panels(*series[0][1:]), strict=True):  # every series in
+        if scale == "log":
+            ax.set_yscale("log")
+            ax.yaxis.set_major_formatter(FuncFormatter(tokens))
+        elif scale:
+            ax.set_ylim(*scale)
+        else:
+            ax.set_ylim(bottom=0)
     for ax in axes:
         ax.set_facecolor(SURFACE)
         ax.grid(axis="y", color=GRID, linewidth=0.8)
@@ -161,11 +180,11 @@ def figure(path: Path, series: list[tuple[str, list[dict], list[dict]]], title: 
         ax.spines[["top", "right"]].set_visible(False)
         ax.set_xlabel("Swarm size N")
     if len(series) > 1:
-        axes[0].legend(frameon=False, loc="lower left", fontsize=9)
+        axes[0].legend(frameon=False, loc="center right", fontsize=9)
     fig.suptitle(title, fontsize=11, color=INK, x=0.01, ha="left")
     fig.text(0.01, 0.01, "One attempt per problem. Success: share of teams with any agent right, "
-             "95% Wilson intervals. Tokens and posts: means, 95% intervals. Wall time (init to "
-             "release): median and interquartile range.", fontsize=8, color=INK_2)
+             "95% Wilson intervals. Tokens (log scale) and posts: means, 95% intervals. Wall time (init "
+             "to release): median and interquartile range.", fontsize=8, color=INK_2)
     fig.tight_layout(rect=(0, 0.05, 1, 0.94))
     fig.savefig(path, dpi=200, facecolor=SURFACE)
 
