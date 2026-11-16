@@ -1,0 +1,53 @@
+# s3-aggregation: N agents each hold a private number and list the team's numbers in ascending
+# order. The template of every team's spec: team.py fills in the team (TEAM below) and merges one
+# of `where:` into it. Don't launch this file; README.md.
+name: ${RUN_NAME:-TEAM}                       # team.py: the task's name
+model: Qwen/Qwen3.8-27B
+naming: consecutive-id                        # agent-001, ...: the role files go to them in order
+inference:
+  hf_router: {provider: deepinfra}
+  api_key_env: HF_INFERENCE_TOKEN             # inference only: never the workers' HF_TOKEN
+task:
+  repo: https://huggingface.co/datasets/HuggingFaceSwarms/s3-aggregation   # private for now
+  selector: TEAM                              # team.py: agg-pPP-nNN
+  revision: b064c6ff2ff7b5e294de976323c98d39a25009ca
+agents:                                       # team.py: count N, roles/slot-NN.md per agent
+  count: 1
+resources:
+  # The board rules: identical for every eval run, since they shape how agents talk.
+  # Enforced on podman (each agent's rule proxy); on HF Sandboxes there is no proxy, so they
+  # are not enforced and each Trial records a message_board.warning event (docs/comms.md).
+  message_board:
+    channels: [general]
+    wake: [mention, thread]
+    rules: {max_len: 1000, min_post_gap: 5s, max_posts: 40}
+workers:
+  agents_per_worker: 1                        # team.py: N, the whole team on one worker and board
+  turn_timeout: 10m
+loop:
+  prompt: Continue the task until it is complete, then stop.
+  every: turn_end
+  while: {until: 15m, max_rounds: 4}
+limits:
+  run_timeout_seconds: 1200
+  agent_max_turns: 60
+
+# Where the team runs: team.py merges one of these into the spec (--where).
+where:
+  # HF Sandboxes (cpu-basic), with the controller and the one worker on this machine and the
+  # board on a Space. Give each team a new Space and delete it afterwards: the instruction has no
+  # run tag, so an earlier team's posts on a reused board would read as this team's.
+  sandbox:
+    namespace: ${SANDBOX_NAMESPACE:-}         # bills the sandboxes; unset: HF_TOKEN's account
+    environment: {backend: hf-sandbox}
+    resources:
+      message_board:
+        space_id: ${BOARD_SPACE:-s3-TEAM}     # bare name: HF_TOKEN's account
+        private: false                        # a private Space's gate needs HF_TOKEN in every sandbox
+  # The HF cluster: a Slurm worker running the team in rootless podman, with a local board on
+  # that worker (a new one each run). Compiles; not yet run (the sweep's follow-up).
+  cluster:
+    namespace: ${NAMESPACE}
+    bucket: ${BUCKET}                         # the run's checkpoint bucket, hf://buckets/<ns>/<name>
+    compute: {kind: slurm, cpus: 16, mem: 32G, time: '3:00:00'}
+    environment: {backend: podman}
