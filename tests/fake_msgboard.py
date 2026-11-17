@@ -5,9 +5,9 @@ Follows the real board's API (`GET /v1/guide`) for the routes flock uses:
   scoped to; default: `invite` for every channel); joining again with the same name gives the
   same principal and a new token, and the old token stops working (401). Joining adds the
   principal to the invite's channels. A `private` channel is invisible (404, left out of
-  listings and search) to non-members. An `archived` channel is listed with `archived: true`
+  listings) to non-members. An `archived` channel is listed with `archived: true`
   and refuses posts with 409 channel_archived, like the real board.
-- GET /v1/channels?name=, POST /v1/channels/{id}/members, PATCH /v1/principals/{id}
+- GET /v1/channels?name=
 - GET /v1/health, GET /v1/join/{code} (404 or status active); POST /v1/channels {name} (409 channel_exists for a taken name);
   POST /v1/invites {kind, channels: names or ids, agent_name, max_uses, ...} -> 201 {id, code}: a
   named invite joins that name; a used-up one is 410 invite_inactive. GET /v1/invites lists them
@@ -17,18 +17,8 @@ Follows the real board's API (`GET /v1/guide`) for the routes flock uses:
   the same sender returns the first message (200). A reply joins its parent's thread. `@name`
   mentions a principal; `@all` / `@agents` / `@humans` mention every principal of that kind
   (`as` is the group name), like the real board.
-- GET /v1/channels/{id}/messages?after=|before=&limit=[&thread=]: `before` gives the newest
-  `limit` (oldest first), `after` the oldest; `has_more` and `next_cursor` as the real board.
-  GET /v1/messages/{id}
 - GET /v1/activity?after=&wait=&channels=: the caller's own messages are left out; without
   `after`, `next_cursor` means "now"; `wait` long-polls.
-- GET /v1/search?q=&sort=&limit=: every word must appear as a prefix, "phrases" as written,
-  `in:#channel`, `from:@name`, `after:` (date or 12h / 7d); sort newest | oldest | relevance
-  (term hits); snippets mark hits with \\x02 / \\x03 as FTS5 does.
-- PUT /v1/channels/{id}/messages/{mid}/reactions/{emoji}: idempotent per principal; messages carry
-  `reactions: [{emoji, count, by: [principal]}]` like the real board.
-- GET/PUT /v1/channels/{id}/doc {body, base_version}: a stale base_version is 409 doc_conflict with
-  `details.current`; `docs = False` makes the routes a code-less 404 (a board without channel documents).
 
 `serve(prefix="/boards/x")` mounts the board under a path prefix like the multi-board Space:
 `raw_paths` records every request path as sent, and a path outside the prefix is a 404.
@@ -47,7 +37,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, urlparse
 
 GROUPS = {"all": ("agent", "user"), "agents": ("agent",), "humans": ("user",),
           "everyone": ("agent", "user"), "people": ("user",)}
@@ -60,7 +50,6 @@ class Board:
         self.invite = invite
         self.channels = dict(channels or {12: "flock-test"})
         self.invites = dict(invites) if invites is not None else {invite: list(self.channels)}
-        self.dms = {}
         self.private = set(private or ())
         self.archived = set(archived or ())
         self.lock = threading.Condition()
@@ -72,9 +61,7 @@ class Board:
         self.idem: dict[tuple[int, str], dict] = {}
         self.requests: list[tuple[str, str, dict, str | None]] = []
         self.joins: list[str] = []
-        self.doc: dict[int, tuple[int, str]] = {}  # channel -> (version, body)
         self.invite_meta: dict[str, dict] = {}  # POST /v1/invites code -> agent_name, uses left
-        self.docs = True
         self.raw_paths: list[str] = []
         self.token_headers: list[str] = []  # which header carried each request's token
         self._n = 0
@@ -102,8 +89,6 @@ class Board:
             return tok
 
     def visible(self, pid: int, channel: int) -> bool:
-        if channel in self.dms:
-            return pid in self.members[channel]
         return channel in self.channels and (channel not in self.private or pid in self.members[channel])
 
     def names(self) -> set[str]:
@@ -146,61 +131,8 @@ class Board:
             out["reason"] = ("mention" if any(x["id"] == me for x in m["mentions"])
                              else "reply" if m["thread_id"] in mine else "channel")
             cid = m["channel_id"]
-            out["channel"] = {"id": cid, "name": self.channels[cid],
-                              "kind": "dm" if cid in self.dms else "public"}
-            if cid in self.dms:
-                out["channel"]["members"] = [self.principals[p] for p in self.members[cid]]
-                out["reason"] = "dm"
+            out["channel"] = {"id": cid, "name": self.channels[cid], "kind": "public"}
         return out
-
-    # ------------------------------------------------------------------ search
-    def search(self, q: str, sort: str, limit: int, me: int | None = None) -> dict:
-        tokens = re.findall(r'"[^"]*"|\S+', q)
-        words, phrases, where = [], [], []
-        for t in tokens:
-            m = re.match(r"^(in|from|after):(.+)$", t)
-            if m:
-                where.append((m.group(1), m.group(2)))
-            elif t.startswith('"'):
-                phrases.append(t.strip('"').lower())
-            else:
-                words.append(t.lower())
-        out = []
-        for msg in self.msgs:
-            if me is not None and not self.visible(me, msg["channel_id"]):
-                continue
-            body = msg["body"].lower()
-            toks = re.findall(r"\w+", body)
-            ok = all(any(x.startswith(w2) for x in toks) for w in words for w2 in re.findall(r"\w+", w))
-            ok = ok and all(p in body for p in phrases)
-            for op, val in where:
-                if op == "in":
-                    ok = ok and self.channels.get(msg["channel_id"]) == val.lstrip("#")
-                elif op == "from":
-                    ok = ok and msg["sender"]["external_id"] == val.lstrip("@")
-                elif op == "after":
-                    rel = re.fullmatch(r"(\d+)([hdw])", val)
-                    if rel:
-                        since = time.time() - int(rel.group(1)) * {"h": 3600, "d": 86400, "w": 604800}[rel.group(2)]
-                    else:
-                        since = time.mktime(time.strptime(val, "%Y-%m-%d"))
-                    ok = ok and msg["created_at"] >= since
-            if ok:
-                score = sum(sum(1 for x in toks if x.startswith(w)) for w in words)
-                snip = msg["body"]
-                for w in words:
-                    snip = re.sub(rf"(?i)\b({re.escape(w)}\w*)", "\x02\\1\x03", snip)
-                out.append((score, {**self._view(msg), "snippet": snip[:200],
-                                    "channel": {"id": msg["channel_id"],
-                                                "name": self.channels[msg["channel_id"]]}}))
-        if sort == "relevance":
-            out.sort(key=lambda x: (-x[0], -x[1]["id"]))
-        elif sort == "oldest":
-            out.sort(key=lambda x: x[1]["id"])
-        else:
-            out.sort(key=lambda x: -x[1]["id"])
-        return {"messages": [m for _, m in out[:limit]], "channels": [], "people": [],
-                "total": len(out), "next_offset": None}
 
 
 def make_handler(board: Board, prefix: str = "") -> type[BaseHTTPRequestHandler]:
@@ -247,7 +179,7 @@ def make_handler(board: Board, prefix: str = "") -> type[BaseHTTPRequestHandler]
                 return self.send(404, {"detail": "Not Found"})
             u = urlparse(self.path[len(prefix):])
             q = {k: v[0] for k, v in parse_qs(u.query).items()}
-            body = self.body() if method in ("POST", "PUT", "PATCH") else {}
+            body = self.body() if method == "POST" else {}
             me = self.who()
             board.requests.append((method, u.path, q, board.principals[me]["external_id"] if me else None))
             if method == "GET" and u.path == "/v1/health":
@@ -283,8 +215,6 @@ def make_handler(board: Board, prefix: str = "") -> type[BaseHTTPRequestHandler]
             if method == "GET" and u.path == "/v1/me":
                 p = board.principals[me]
                 return self.send(200, {**p, "role": "admin" if p["identity_type"] == "user" else "member"})
-            if method == "GET" and u.path == "/v1/principals":
-                return self.send(200, {"principals": list(board.principals.values())})
             if method == "POST" and u.path == "/v1/invites":  # agent invites, by channel name
                 board._n += 1
                 code = f"inv-{board._n}"
@@ -305,76 +235,37 @@ def make_handler(board: Board, prefix: str = "") -> type[BaseHTTPRequestHandler]
                 return self.send(200, {"id": meta["id"], "revoked": True})
             if method == "POST" and u.path == "/v1/channels" and body.get("name") in board.channels.values():
                 return self.fail(409, "channel_exists", "a channel with this name already exists")
-            if method == "POST" and u.path in ("/v1/channels", "/v1/dms"):
+            if method == "POST" and u.path == "/v1/channels":
                 with board.lock:
-                    pair = frozenset((me, body.get("with")))
-                    cid = next((c for c, p in board.dms.items() if p == pair), None) if u.path == "/v1/dms" else None
-                    if cid is None:
-                        cid = max(board.channels, default=0) + 1
-                        board.channels[cid] = body.get("name") or f"dm-{cid}"
-                        board.seq[cid] = 0
-                        board.members[cid] = set(pair) if u.path == "/v1/dms" else {me}
-                        if u.path == "/v1/dms":
-                            board.dms[cid] = pair
-                    result = {"id": cid, "name": board.channels[cid], "kind": "dm" if cid in board.dms else "public"}
-                    if cid in board.dms:
-                        result["members"] = [board.principals[p] for p in pair]
-                return self.send(201, result)
+                    cid = max(board.channels, default=0) + 1
+                    board.channels[cid] = body.get("name")
+                    board.seq[cid] = 0
+                    board.members[cid] = {me}
+                return self.send(201, {"id": cid, "name": board.channels[cid], "kind": "public"})
             if method == "GET" and u.path == "/v1/channels":
-                out = [{"id": c, "name": n, "kind": "dm" if c in board.dms else "public", "member": me in board.members[c],
+                out = [{"id": c, "name": n, "kind": "public", "member": me in board.members[c],
                         "last_seq": board.seq[c], "archived": c in board.archived}
                        for c, n in board.channels.items()
                        if q.get("name") in (None, n) and board.visible(me, c)]
                 return self.send(200, {"channels": out})
-            if m := re.fullmatch(r"/v1/channels/(\d+)/members", u.path):
+            if method == "POST" and (m := re.fullmatch(r"/v1/channels/(\d+)/messages", u.path)):
                 ch = int(m.group(1))
                 if not board.visible(me, ch):
                     return self.fail(404, "not_found", "channel not found")
-                board.members[ch].add(int(body.get("principal_id")))
-                return self.send(200, {"members": []})
-            if re.fullmatch(r"/v1/principals/\d+", u.path):
-                return self.send(200, {})
-            if method == "GET" and (m := re.fullmatch(r"/v1/messages/(\d+)", u.path)):
-                msg = next((x for x in board.msgs if x["id"] == int(m.group(1))), None)
-                if msg is None or not board.visible(me, msg["channel_id"]):
-                    return self.fail(404, "not_found")
-                return self.send(200, board._view(msg))
-            if m := re.fullmatch(r"/v1/channels/(\d+)/messages", u.path):
-                ch = int(m.group(1))
-                if not board.visible(me, ch):
-                    return self.fail(404, "not_found", "channel not found")
-                if method == "POST":
-                    if ch in board.archived:
-                        return self.fail(409, "channel_archived", "channel is archived")
-                    key = self.headers.get("Idempotency-Key")
-                    if not key:
-                        return self.fail(400, "bad_request", "Idempotency-Key header is required")
-                    with board.lock:
-                        if (me, key) in board.idem:
-                            return self.send(200, board.idem[(me, key)], {"Idempotent-Replayed": "true"})
-                        try:
-                            msg = board._post(me, ch, body.get("body") or "", body.get("reply_to"))
-                        except LookupError:
-                            return self.fail(404, "not_found", "reply_to not found")
-                        board.idem[(me, key)] = msg
-                    return self.send(201, board._view(msg))
-                limit = min(int(q.get("limit") or 100), 500)
+                if ch in board.archived:
+                    return self.fail(409, "channel_archived", "channel is archived")
+                key = self.headers.get("Idempotency-Key")
+                if not key:
+                    return self.fail(400, "bad_request", "Idempotency-Key header is required")
                 with board.lock:
-                    rows = [x for x in board.msgs if x["channel_id"] == ch]
-                    if "thread" in q:
-                        r = int(q["thread"])
-                        rows = [x for x in rows if x["id"] == r or x["thread_id"] == r]
-                    if "before" in q:
-                        rows = [x for x in rows if x["seq"] < int(q["before"])]
-                        page, more = rows[-limit:], len(rows) > limit
-                        cursor = page[0]["seq"] if page else int(q["before"]) - 1
-                    else:
-                        after = int(q.get("after") or 0)
-                        rows = [x for x in rows if x["seq"] > after]
-                        page, more = rows[:limit], len(rows) > limit
-                        cursor = page[-1]["seq"] if page else after
-                    out = [board._view(x) for x in page]
-                return self.send(200, {"messages": out, "next_cursor": cursor, "has_more": more})
+                    if (me, key) in board.idem:
+                        return self.send(200, board.idem[(me, key)], {"Idempotent-Replayed": "true"})
+                    try:
+                        msg = board._post(me, ch, body.get("body") or "", body.get("reply_to"))
+                    except LookupError:
+                        return self.fail(404, "not_found", "reply_to not found")
+                    board.idem[(me, key)] = msg
+                return self.send(201, board._view(msg))
             if method == "GET" and u.path == "/v1/activity":
                 follow = [int(x) for x in (q.get("channels") or "").split(",") if x.strip().isdigit()]
                 if q.get("channels") == "joined":
@@ -402,39 +293,6 @@ def make_handler(board: Board, prefix: str = "") -> type[BaseHTTPRequestHandler]
                         out = mine()
                 return self.send(200, {"messages": out, "next_cursor": out[-1]["id"] if out else after,
                                        "has_more": False})
-            if method == "GET" and u.path == "/v1/search":
-                with board.lock:
-                    return self.send(200, board.search(q.get("q") or "", q.get("sort") or "newest",
-                                                       int(q.get("limit") or 20), me))
-            if method == "PUT" and (m := re.fullmatch(r"/v1/channels/(\d+)/messages/(\d+)/reactions/(.+)", u.path)):
-                with board.lock:
-                    msg = next((x for x in board.msgs if x["id"] == int(m.group(2))), None)
-                    if msg is None:
-                        return self.fail(404, "not_found")
-                    emoji = unquote(m.group(3))
-                    r = next((x for x in msg["reactions"] if x["emoji"] == emoji), None)
-                    if r is None:
-                        msg["reactions"].append(r := {"emoji": emoji, "count": 0, "by": []})
-                    if all(p["id"] != me for p in r["by"]):
-                        r["by"].append(dict(board.principals[me]))
-                        r["count"] += 1
-                return self.send(200, board._view(msg))
-            if board.docs and (m := re.fullmatch(r"/v1/channels/(\d+)/doc", u.path)):
-                ch = int(m.group(1))
-                if not board.visible(me, ch):
-                    return self.fail(404, "not_found", "channel not found")
-                with board.lock:
-                    version, text = board.doc.get(ch, (0, ""))
-                    if method == "PUT":
-                        if body.get("base_version") != version:
-                            return self.send(409, {"error": {"code": "doc_conflict", "message": "someone saved",
-                                                             "details": {"current": {"version": version, "body": text}}}})
-                        if body["body"] != text:
-                            version, text = version + 1, body["body"]
-                            board.doc[ch] = (version, text)
-                return self.send(200, {"channel_id": ch, "version": version, "body": text})
-            if u.path.endswith("/doc"):  # board.docs is False: the route does not exist
-                return self.send(404, {"detail": "Not Found"})
             return self.fail(404, "not_found")
 
         def do_GET(self) -> None:
@@ -442,12 +300,6 @@ def make_handler(board: Board, prefix: str = "") -> type[BaseHTTPRequestHandler]
 
         def do_POST(self) -> None:
             self.route("POST")
-
-        def do_PUT(self) -> None:
-            self.route("PUT")
-
-        def do_PATCH(self) -> None:
-            self.route("PATCH")
 
         def do_DELETE(self) -> None:
             self.route("DELETE")

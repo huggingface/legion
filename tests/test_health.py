@@ -63,9 +63,14 @@ class FakeSlurm:
         return self.state
 
 
-def test_parse_vllm_sums_queues_and_takes_max_kv():
+def test_parse_vllm_sums_queues_takes_max_kv_and_counts_completions_but_not_aborts():
     assert parse_vllm(VLLM) == {"waiting": 3.0, "running": 5.0, "kv": 0.42}
     assert parse_vllm("vllm:kv_cache_usage_perc 0.5\ngarbage\n") == {"kv": 0.5}
+    text = ('vllm:num_requests_running{m="x"} 3\nvllm:num_requests_waiting 1\n'
+            'vllm:request_success_total{finished_reason="stop"} 7\n'
+            'vllm:request_success_total{finished_reason="length"} 2\n'
+            'vllm:request_success_total{finished_reason="abort"} 50\n')
+    assert parse_vllm(text) == {"running": 3, "waiting": 1, "completed": 9}
 
 
 async def test_probe_world_metrics_slurm_and_vllm(store):
@@ -170,12 +175,17 @@ def test_tokens_turn_total_wins_over_message_usage_and_cut_turns_count(store):
     # a turn cut by a worker death: message usage only, counted at the next session event
     h.on_events(a0, [_ev(a0["name"], "turn_started"), _ev(a0["name"], "message", msg)], T)
     h.on_events(a0, [_ev(a0["name"], "session_resumed")], T + 5)
+    # a turn whose total is missing: its message usage counts
+    msg = {"message": {"role": "assistant", "model": "m", "usage": {"input": 9, "output": 4}}}
+    h.on_events(a0, [_ev(a0["name"], "turn_started"), _ev(a0["name"], "message", msg),
+                     _ev(a0["name"], "turn_ended", {"usage_missing": True, "tokens": {
+                         "m": {"input": 0, "output": 0}}})], T + 5)
     h.tick(T + 10)
-    assert store.usage("demo") == [{"hour": "2026-09-21T14", "type": "researcher", "input": 22,
-                                    "output": 5, "cache_read": 10, "cache_write": 0,
+    assert store.usage("demo") == [{"hour": "2026-09-21T14", "type": "researcher", "input": 31,
+                                    "output": 9, "cache_read": 10, "cache_write": 0,
                                     "reasoning": 0}]
     body = h.latest("demo")["body"]
-    assert body["tokens"]["by_type"]["researcher"]["input"] == 22
+    assert body["tokens"]["by_type"]["researcher"]["input"] == 31
 
 
 def test_snapshot_workers_types_stuck_tool_rates_and_alerts(store):
@@ -458,18 +468,6 @@ async def test_squeue_failure_is_unknown_and_down_still_counts(store):
     assert h.world["demo"]["slurm_state"] == "unknown"
     evs = store.read_events(swarm_stream("demo"), 0)
     assert [e["type"] for e in evs] == ["world_down"] and evs[0]["data"]["slurm_state"] == "unknown"
-
-
-def test_turn_without_usage_counts_its_message_usage(store):
-    a0, _ = _fleet(store, T)
-    h = Health(store)
-    msg = {"message": {"role": "assistant", "model": "m", "usage": {"input": 9, "output": 4}}}
-    h.on_events(a0, [_ev(a0["name"], "turn_started"), _ev(a0["name"], "message", msg),
-                     _ev(a0["name"], "turn_ended", {"usage_missing": True, "tokens": {
-                         "m": {"input": 0, "output": 0}}})], T)
-    h.tick(T + 1)
-    (row,) = store.usage("demo")
-    assert (row["input"], row["output"]) == (9, 4)
 
 
 def test_interrupted_turn_counts_its_total_once_or_its_message_usage(store):

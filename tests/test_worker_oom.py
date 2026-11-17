@@ -26,7 +26,8 @@ class OomOnce(ScriptedAdapter):
         await super()._finish()
 
 
-async def test_oom_killed_turn_is_transient(tmp_path):
+async def test_oom_killed_turn_is_transient(tmp_path, monkeypatch):
+    monkeypatch.setattr("flock.worker.agents.LOOP_TRANSIENT_BACKOFF", 0.01)
     ad = OomOnce(tmp_path / "home")
     rt, _ = runtime(tmp_path, adapter=ad, idle_grace="5s")
     await rt.setup(restore=False)

@@ -10,8 +10,6 @@ from typer.testing import CliRunner
 from flock import cli
 from flock import client as flock_client
 
-from .conftest import wire
-
 LEADER = "leader-0000"
 runner = CliRunner()
 
@@ -66,9 +64,3 @@ def test_cli_does_not_retry_a_post_500(monkeypatch, sleeps):
     _edge_client(monkeypatch, handler)
     r = runner.invoke(cli.app, ["prompt", "leader-0000", "x"])
     assert r.exit_code == 1 and seen == ["POST"] and not sleeps  # may have been processed
-
-
-def test_cli_against_the_app_still_works(monkeypatch, app, sleeps):
-    wire(monkeypatch, app)
-    r = runner.invoke(cli.app, ["status"])
-    assert r.exit_code == 0 and not sleeps

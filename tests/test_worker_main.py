@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import timedelta
 
 import httpx
@@ -188,27 +187,6 @@ async def test_live_worker_knobs_beat_env_and_bump_knobs_rev(tmp_path, monkeypat
     await worker.client.aclose()
 
 
-async def test_memory_loop_samples_the_cgroup_and_logs(tmp_path, monkeypatch, caplog):
-    from flock.worker.cgroup import CgroupMem
-
-    from .test_worker_cgroup import v2
-
-    v2(tmp_path / "fs")
-    monkeypatch.setattr(wmain, "MEMORY_SAMPLE", 0.01)
-    monkeypatch.setenv("FLOCK_MEMORY_LOG_S", "0.02")
-    worker, _ = make_worker(tmp_path, FakeController())
-    worker.cgroup = CgroupMem(tmp_path / "fs", env={})
-    caplog.set_level("INFO", logger="flock.worker")
-    task = asyncio.create_task(worker.memory_loop())
-    try:
-        await until(lambda: "memory: rss" in caplog.text)
-    finally:
-        task.cancel()
-    assert worker.mem.limit_mb == 11264 and worker.mem.nonreclaim_mb == 1300
-    assert worker.heartbeat_payload().mem == worker.mem
-    await worker.client.aclose()
-
-
 async def test_drain_sequence_at_deadline(tmp_path):
     ctrl = FakeController()
     sync = RecordingSync(MemoryStore())
@@ -269,13 +247,6 @@ async def test_stale_slot_exits_zero_without_sync(tmp_path, status):
     ctrl.fail_next = [status] * 50
     assert await asyncio.wait_for(run, 5) == 0
     assert adapters["researcher-0001"].stops == 1 and sync.pushed == []
-
-
-def test_heartbeat_json_shape(tmp_path):
-    ctrl = FakeController()
-    worker, _ = make_worker(tmp_path, ctrl)
-    body = json.loads(worker.heartbeat_payload().model_dump_json())
-    assert body["worker"] == WID and body["agents"] == [] and body["draining"] is False
 
 
 async def test_worker_sends_its_incarnation_on_polls_and_heartbeats(tmp_path):
@@ -388,8 +359,14 @@ def test_memory_helpers_trim_and_cap_arenas_safely(monkeypatch):
 async def test_memory_loop_trims_and_logs_the_worker_sizes(tmp_path, monkeypatch, caplog):
     import logging
 
+    from flock.worker.cgroup import CgroupMem
+
+    from .test_worker_cgroup import v2
+
+    v2(tmp_path / "fs")
     ctrl = FakeController()
     w, _ = make_worker(tmp_path, ctrl)
+    w.cgroup = CgroupMem(tmp_path / "fs", env={})
     trims = []
     monkeypatch.setattr(wmain, "trim_heap", lambda: trims.append(1))
     monkeypatch.setenv("FLOCK_MEMORY_LOG_S", "0.01")
@@ -400,6 +377,8 @@ async def test_memory_loop_trims_and_logs_the_worker_sizes(tmp_path, monkeypatch
     task.cancel()
     report = w.memory_report()
     assert report["outbox_events"] == 0 and report["outbox_bytes"] == 0 and report["agents"] == 0
+    assert w.mem.limit_mb == 11264 and w.mem.nonreclaim_mb == 1300
+    assert w.heartbeat_payload().mem == w.mem
     if wmain.rss_mb() is not None:
         assert any("memory: rss" in r.message and "outbox_bytes" in r.message for r in caplog.records)
     monkeypatch.setenv("FLOCK_MEMORY_LOG_S", "0")  # log off; the cgroup is still sampled

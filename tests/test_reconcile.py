@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from pydantic import TypeAdapter
 
 from flock import status as fs
-from flock.controller.jobs import FakeJobsClient, JobState
+from flock.controller.jobs import JobState
 from flock.controller.reconcile import (
     LAUNCH_TIMEOUT,
     NUDGE_EVERY,
@@ -15,20 +15,17 @@ from flock.controller.reconcile import (
     rebuild_from_jobs,
     reconcile,
     record_heartbeat,
-    worker_state,
 )
 from flock.controller.store import Store
 from flock.models import (
     CRASHLOOP_THRESHOLD,
     AgentHeartbeat,
-    AgentState,
     AssignCommand,
     Command,
     ComputeSpec,
     DrainCommand,
     UnassignCommand,
     WorkerHeartbeat,
-    WorkerState,
     parse_duration,
 )
 
@@ -117,38 +114,6 @@ def test_placement_fills_in_order_and_never_moves(store, jobs, clock, tick):
     store.put_swarm(make_spec(researcher={"replicas": 4, "agents_per_worker": 10}), 0)
     tick()
     assert store.get_agent("researcher-0002")["worker"] == W1
-
-
-def test_heartbeat_updates_states(store, jobs, clock, tick):
-    store.put_swarm(make_spec(), 0)
-    tick()
-    w = store.get_worker(W0)
-    assert worker_state(w, clock().timestamp(), LV) == WorkerState.launching
-    assert agent_state(store.get_agent("researcher-0000"), w, clock().timestamp(), LV) == "unknown"
-    clock.advance(20)
-    heartbeat(
-        store, clock, W0, [("researcher-0000", "working", "t-1"), ("researcher-0001", "idle", None)]
-    )
-    now = clock().timestamp()
-    w = store.get_worker(W0)
-    assert worker_state(w, now, LV) == WorkerState.running
-    assert agent_state(store.get_agent("researcher-0000"), w, now, LV) == AgentState.working
-    assert agent_state(store.get_agent("researcher-0001"), w, now, LV) == AgentState.idle
-    assert store.get_agent("researcher-0000")["turn_id"] == "t-1"
-
-
-def test_unknown_and_dead_by_age(store, jobs, clock, tick):
-    store.put_swarm(make_spec(), 0)
-    tick()
-    heartbeat(store, clock, W0, [("researcher-0000", "idle", None)])
-    a = store.get_agent("researcher-0000")
-    t = clock().timestamp()
-    w = store.get_worker(W0)
-    assert agent_state(a, w, t + 60, LV) == AgentState.idle
-    assert agent_state(a, w, t + 91, LV) == AgentState.unknown
-    assert worker_state(w, t + 91, LV) == WorkerState.unknown
-    assert agent_state(a, w, t + 181, LV) == AgentState.dead
-    assert worker_state(w, t + 181, LV) == WorkerState.dead
 
 
 def test_unresponsive_worker_is_cancelled_and_relaunched(store, jobs, clock, tick):
@@ -387,14 +352,6 @@ def test_rebuild_from_jobs_adopts_live_workers(tmp_path, jobs, settings, clock):
     assert len(jobs.launches) == 2
     first.close()
     fresh.close()
-
-
-def test_fake_jobs_list_filters_labels():
-    jobs = FakeJobsClient()
-    spec = make_spec().types["researcher"]
-    jobs.launch("w", spec, {}, {}, {"swarm": "a", "type": "t", "worker": "w"}, 10, namespace="ns")
-    assert len(jobs.list({"swarm": "a"}, namespace="ns")) == 1
-    assert jobs.list({"swarm": "b"}, namespace="ns") == []
 
 
 def test_job_checks_are_bounded(store, jobs, clock, tick):

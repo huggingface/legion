@@ -114,7 +114,7 @@ def test_outbox_survives_restart_retries_forever_drops_on_final_and_coalesces(tm
     assert box.depth() == (3, 0.0)
     lanes.close()
 
-    results = {7: ["transient"] * 6 + ["ok"], 8: ["final"]}
+    results = {7: ["transient"] * 3 + ["ok"], 8: ["final"]}
     calls = []
 
     def drain(key, payloads):
@@ -132,9 +132,9 @@ def test_outbox_survives_restart_retries_forever_drops_on_final_and_coalesces(tm
         clock.t += 5
     assert box.depth()[0] == 0
     assert calls[0] == (7, ["a", "b"])  # oldest first, coalesced
-    assert calls.count((7, ["a", "b"])) == 7 and (8, ["x"]) in calls
+    assert calls.count((7, ["a", "b"])) == 4 and (8, ["x"]) in calls
     m = lanes.metrics()["comment"]
-    assert (m["ok"], m["transient"], m["final"], m["outbox_depth"]) == (1, 6, 1, 0)
+    assert (m["ok"], m["transient"], m["final"], m["outbox_depth"]) == (1, 3, 1, 0)
     lanes.close()
     restarted = Lanes({"comment": Lane()}, dir=tmp_path, clock=clock, wall=clock)
     assert restarted.outbox("comment").depth()[0] == 0

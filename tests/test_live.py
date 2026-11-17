@@ -310,7 +310,8 @@ def test_cli_update_keeps_live_replicas_and_checks(tmp_path, monkeypatch, app, s
     f.write_text(yaml.safe_dump(d))
     r = runner.invoke(cli.app, ["update", str(exp), "--check"])
     assert r.exit_code == 1 and "unknown tool(s) nope" in r.output, r.output
-    assert runner.invoke(cli.app, ["update", str(exp), "--replicas", "x"]).exit_code == 1
+    r = runner.invoke(cli.app, ["update", str(exp), "--replicas", "x"])
+    assert r.exit_code == 1 and "use keep or spec" in r.output, r.output
 
 
 async def test_put_replicas_keep_and_dry_run(client, store):

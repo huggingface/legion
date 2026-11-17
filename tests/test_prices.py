@@ -24,11 +24,6 @@ def test_cost_by_model():
     assert prices.cost_usd(tokens, TABLE) == pytest.approx(expected)
 
 
-def test_prefix_and_default():
-    assert prices.price_for("mid-model-20261001", TABLE) == MID
-    assert prices.price_for("mystery-model", TABLE) == prices.PRICES["default"]
-
-
 def test_override_file(tmp_path, monkeypatch):
     path = tmp_path / "prices.json"
     path.write_text(

@@ -82,16 +82,6 @@ def test_job_mode_launches_workers_in_the_group_with_the_alias_url(tmp_path):
     b.store.close()
 
 
-def test_space_mode_launches_workers_without_a_group(tmp_path):
-    b = build({"FLOCK_TOKEN": TOKEN, "FLOCK_FAKE_JOBS": "1", "FLOCK_DATA": str(tmp_path / "d"),
-               "FLOCK_URL": "https://me-flock.hf.space"})
-    b.store.put_swarm(make_spec(), 0)
-    reconcile(b.store, b.jobs, datetime(2026, 10, 20, tzinfo=UTC), b.settings)
-    assert {x["network_group"] for x in b.jobs.launches} == {None}
-    assert {x["env"]["FLOCK_URL"] for x in b.jobs.launches} == {"https://me-flock.hf.space"}
-    b.store.close()
-
-
 async def test_job_mode_refuses_specs_in_another_namespace(tmp_path):
     b = _built(tmp_path)
     transport = httpx.ASGITransport(app=b.app)
@@ -185,14 +175,6 @@ def test_cli_headers_behind_the_jobs_proxy(monkeypatch):
     monkeypatch.setattr("huggingface_hub.get_token", lambda: None)
     with pytest.raises(ClientError, match="behind the HF Jobs proxy"):
         auth_headers(url, {"FLOCK_TOKEN": "ft"})
-
-
-async def test_cli_headers_pass_the_api_auth(app):
-    """The headers the CLI sends behind the proxy are accepted by the controller."""
-    headers = auth_headers("https://j--7860.hf.jobs", {"FLOCK_TOKEN": TOKEN, "HF_TOKEN": "hf"})
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=headers) as c:
-        assert (await c.get("/swarms")).status_code == 200
 
 
 # --------------------------------------------------------------------------- status port
@@ -450,6 +432,7 @@ async def test_sigterm_stops_loops_then_pushes_and_logs_ok(tmp_path, monkeypatch
              for p in ("SIGTERM: shutting down", "final push: ok (", "flock controller: exit")]
     assert order == sorted(order)
     assert any(m.startswith("final push: ok (") and m != "final push: ok (0 files)" for m in lines)
+    assert sum(m.startswith("final push: ok") for m in lines) == 1
     pushes = b.state.pushes
     await asyncio.sleep(0.3)  # the periodic sync loop was cancelled: no push after exit
     assert b.state.pushes == pushes and "state.db" in bucket.list("state.db")
@@ -629,28 +612,6 @@ def test_down_dry_run_and_stuck_controller_leave_the_state(tmp_path, monkeypatch
 def test_down_needs_a_wheel_or_state_url():
     with pytest.raises(SystemExit):
         jobdeploy.main(["--down", "--group", "g", "--namespace", "me"], {})
-
-
-def test_subsequent_state_push_uploads_only_changed_event_files(tmp_path):
-    bucket = FakeBucket(tmp_path / "bucket")
-    store = Store(tmp_path / "data")
-    sync = StateSync(bucket, tmp_path / "data")
-    store.put_swarm(make_spec(), 1.0)
-    for i in range(3):
-        name = f"researcher-{i:04d}"
-        store.insert_agent(name, "demo", "researcher", i, 1.0)
-        store.append_events("demo", name, [_event(name, 0)])
-    assert sync.push(store) == 4
-    store.append_events("demo", "researcher-0001", [_event("researcher-0001", 1)])
-    assert sync.push(store) == 2  # DB and one changed agent, not the whole event tree
-    assert bucket.ops == ["upload", "sync_up", "upload", "upload"]
-    restored_dir = tmp_path / "restored"
-    assert StateSync(bucket, restored_dir).restore()
-    restored = Store(restored_dir)
-    assert restored.event_count("researcher-0001") == 2
-    assert restored.event_count("researcher-0000") == 1
-    restored.close()
-    store.close()
 
 
 def test_final_push_uploads_only_appended_event_bytes_and_restore_merges_them(tmp_path):

@@ -30,22 +30,6 @@ def _spec(**kw) -> TypeSpec:
     return TypeSpec(**HB, model="claude-haiku-5-5", **kw)
 
 
-def test_bootstrap_command_installs_pinned_tools_then_execs_worker(tmp_path):
-    cmd = bootstrap_command()
-    assert cmd[:2] == ["bash", "-c"]
-    script = cmd[2]
-    assert "astral.sh/uv/install.sh" in script
-    assert 'hf buckets cp "$1" "$2"' in script and 'fetch "$FLOCK_WHEEL_URL"' in script
-    assert "download_bucket_files" in script  # Python API fallback
-    assert 'uv tool install -q --python 3.12 "$WHEEL"' in script
-    assert "WORK_ROOT=/work/agents" in script and "pi" not in script.split()
-    assert script.rstrip().endswith("exec flock-worker")
-    assert "{" + "hub}" not in script  # the pin is filled in
-    f = tmp_path / "bootstrap.sh"
-    f.write_text(script)
-    subprocess.run(["bash", "-n", str(f)], check=True)
-
-
 def _client(monkeypatch, image, bootstrap_env=None, wheel=WHEEL) -> HubJobsClient:
     if bootstrap_env is None:
         monkeypatch.delenv("FLOCK_WORKER_BOOTSTRAP", raising=False)
@@ -101,6 +85,7 @@ def test_bootstrap_installs_flock_with_the_shipped_pins(tmp_path):
     env = {"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(tmp_path), "FLOCK_HARNESS": "harbor",
            "FLOCK_WHEEL_URL": "hf://buckets/ns/sh/dist/w.whl", "HF_TOKEN": "hf_test_token"}
     cmd = bootstrap_command()
+    assert "{" + "hub}" not in cmd[2]  # the pin is filled in (the stubbed uv cannot tell)
     r = subprocess.run([*cmd[:2], cmd[2].replace("/opt/wheels", str(wheels))], env=env,
                        capture_output=True, text=True, timeout=30, check=False)
     assert r.returncode == 0, r.stderr

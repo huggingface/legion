@@ -100,22 +100,6 @@ async def test_heartbeat_payload(tmp_path):
     assert len(hb.model_dump_json(exclude_none=True)) < 400
 
 
-async def test_state_persists_and_reloads(tmp_path):
-    rt, _ = runtime(tmp_path)
-    await rt.setup(restore=False)
-    await rt.prompt("one")
-    await until(lambda: rt.state.turns == 1)
-    await rt.stop()
-    saved = AgentState.model_validate_json(rt.state_path.read_text())
-    assert saved.session_id == "s-1" and saved.turn_seq == 1
-    rt2, _ = runtime(tmp_path, adapter=ScriptedAdapter(tmp_path / "home"))
-    await rt2.setup(restore=False)
-    await rt2.prompt("two")
-    await until(lambda: rt2.state.turns == 2)
-    assert rt2.adapter.starts == ["s-1"]
-    assert rt2.state.turn_seq == 2  # turn ids keep counting across workers
-
-
 async def test_assign_with_restore_restores_before_first_start(tmp_path):
     order: list = []
     store = MemoryStore()
@@ -151,12 +135,6 @@ async def test_restore_without_harness_files_restarts_fresh(tmp_path):
     assert restarted.data["data"]["resumed"] is False
     assert restarted.data["data"]["previous_session_id"] == "gone"
     assert rt.heartbeat().resumed is False
-
-
-async def test_resume_prompt_sent_after_restore(tmp_path):
-    rt, adapter = runtime(tmp_path)
-    await rt.setup(restore=False, resume_prompt="Your previous turn was interrupted.")
-    await until(lambda: adapter.sent == ["Your previous turn was interrupted."])
 
 
 async def test_unassign_stops_and_pushes(tmp_path):

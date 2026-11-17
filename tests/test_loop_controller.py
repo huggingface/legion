@@ -208,13 +208,19 @@ async def test_turn_end_under_max_working_runs_on_the_controller(store, clock, t
 
 async def test_max_turns_is_not_a_failed_turn_but_is_logged(sim):
     """Defect 5: a controller-side loop counts real errors (3 in a row end the agent's loop)
-    but not turns that ended at max_turns; each of those is a `loop_max_turns` event."""
+    but not turns that ended at max_turns (each is a `loop_max_turns` event) or stalled in
+    transport."""
     await sim.apply({"prompt": "p", "every": "5s"})
     await sim.heartbeat()
     sim.tick()
     got = prompts(await sim.commands())
     for _ in range(4):
         await sim.turn(A0, got[A0], status="error", reason="max_turns", num_turns=8)
+        sim.tick(5)
+        got = prompts(await sim.commands())
+        assert A0 in got
+    for reason in ("model_transport", "timeout") * 3:  # transport stalls are not errors either
+        await sim.turn(A0, got[A0], status="error", reason=reason)
         sim.tick(5)
         got = prompts(await sim.commands())
         assert A0 in got
@@ -231,21 +237,6 @@ async def test_max_turns_is_not_a_failed_turn_but_is_logged(sim):
         assert (A0 in got) == (i < 2)
     st = (await sim.c.get("/swarms/demo/loop")).json()[0]["per_agent"][A0]
     assert (st["phase"], st["done_reason"], st["errors"]) == ("done", "errors", 3)
-
-
-async def test_while_until_stops_and_runs_final(sim):
-    await sim.apply({"prompt": "p", "every": "10s", "while": {"until": "60s"},
-                     "final": {"prompt": "fin"}})
-    await sim.heartbeat()
-    sim.tick()
-    got = prompts(await sim.commands())
-    assert got[A0]["loop"]["wall_s"] == 60
-    await sim.turn(A0, got[A0])
-    await sim.turn(A1, got[A1])
-    sim.tick(61)
-    fin = prompts(await sim.commands())
-    assert {p["loop"]["kind"] for p in fin.values()} == {"final"}
-    assert fin[A0]["loop"]["why"] == "final: until"
 
 
 async def test_while_until_clock_time_stops_regardless_of_start(sim):
@@ -870,20 +861,6 @@ async def test_a_counted_wake_taken_back_restores_wake_and_round(sim, how):
     sim.tick(2.1)
     w = prompts(await sim.commands())[A0]["loop"]
     assert (w["round"], w["why"], w["wake"]) == (2, "wake: message_board.mention", True)
-
-
-async def test_transport_stalls_do_not_exhaust_controller_loop(sim):
-    await sim.apply({"prompt": "p", "every": "5s"})
-    await sim.heartbeat()
-    sim.tick()
-    got = prompts(await sim.commands())
-    for reason in ("model_transport", "timeout") * 3:
-        await sim.turn(A0, got[A0], status="error", reason=reason)
-        sim.tick(5)
-        got = prompts(await sim.commands())
-        assert A0 in got
-    state = (await sim.c.get("/swarms/demo/loop")).json()[0]["per_agent"][A0]
-    assert (state["phase"], state["errors"]) == ("looping", 0)
 
 
 async def test_a_loop_hashed_before_the_field_deletions_resumes_quietly(sim):

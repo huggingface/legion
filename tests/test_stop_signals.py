@@ -22,7 +22,8 @@ from .test_world import TASKBOARD
 SEQUENCES = [("SIGUSR1", "SIGUSR1"), ("SIGUSR1", "SIGTERM"), ("SIGTERM",)]
 
 
-@pytest.mark.parametrize("signals", SEQUENCES)
+# a single SIGTERM: test_controller_job.py::test_sigterm_stops_loops_then_pushes_and_logs_ok
+@pytest.mark.parametrize("signals", SEQUENCES[:2])
 async def test_controller_stops_once(tmp_path, monkeypatch, caplog, signals):
     import flock.controller.main as main_mod
 

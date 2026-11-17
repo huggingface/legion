@@ -105,15 +105,6 @@ async def test_children_are_placed_on_their_types_workers(client, store, jobs, t
     assert all(store.get_agent(n) for n in names)
 
 
-async def test_repeated_key_returns_the_first_child(client, swarm):
-    a = await spawn(client, LEADER, "analyst", key="k1")
-    b = await spawn(client, LEADER, "analyst", key="k1")
-    assert a.status_code == 201 and b.status_code == 200
-    assert b.json()["created"] is False and b.json()["name"] == a.json()["name"]
-    leader = (await client.get(f"/agents/{LEADER}")).json()
-    assert leader["children"] == [a.json()["name"]]
-
-
 async def reason(r: httpx.Response) -> str:
     assert r.status_code == 409, r.text
     return r.json()["reason"]

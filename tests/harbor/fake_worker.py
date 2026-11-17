@@ -1,8 +1,8 @@
-"""`flock-worker` with Harbor faked, the worker command of test_cli_launch.py's local run: its
-Trials are test_adapter.py's (the real FlockPi on a fake environment), container networks are
-faked at their command, the task download writes an empty folder, and the controller's model
-check asks tests/fake_models.py. `fake_harbor()` (also the task pin) is what
-tests/harbor/site/sitecustomize.py installs in every tiny run process."""
+"""Harbor faked for a `flock-worker` process: its Trials are test_adapter.py's (the real FlockPi
+on a fake environment), container networks are faked at their command, the task download writes
+an empty folder, and the controller's model check asks tests/fake_models.py. `fake_harbor()`
+(also the task pin) is what tests/harbor/site/sitecustomize.py installs in every tiny run
+process."""
 
 import sys
 from pathlib import Path
@@ -35,10 +35,3 @@ def fake_harbor():
     install(setattr)
     sources.download_task, sources.resolve_task = download, resolve
     inference.TRANSPORT = fake_models.transport()  # the controller's GET /models
-
-
-if __name__ == "__main__":
-    from flock.worker.main import main
-
-    fake_harbor()
-    main()

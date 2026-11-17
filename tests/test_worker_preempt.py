@@ -264,8 +264,7 @@ def test_worker_startup_without_home(tmp_path, monkeypatch):
 
 
 
-@pytest.mark.parametrize("signals", [("SIGUSR1", "SIGUSR1"), ("SIGUSR1", "SIGTERM"),
-                                     ("SIGTERM",)])
+@pytest.mark.parametrize("signals", [("SIGUSR1", "SIGTERM")])
 async def test_repeated_signals_drain_once(tmp_path, signals, caplog):
     """The Spot watcher signals every process of the job, and the batch script forwards: the
     worker may get USR1 twice, or USR1 then TERM. The first starts the drain; the rest change

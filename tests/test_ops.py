@@ -10,7 +10,7 @@ from typer.testing import CliRunner
 from flock import cli, ops
 from flock.client import Client, ClientError
 from flock.current import write_current
-from flock.ops import SpecError, launch, read_spec, update
+from flock.ops import SpecError, launch, read_spec
 from flock.worker.agents import VERIFY_WAIT
 
 from .conftest import make_spec, write_spec
@@ -18,12 +18,6 @@ from .conftest import make_spec, write_spec
 
 def _folder(tmp_path) -> str:
     return write_spec(tmp_path / "spec.yaml", make_spec())
-
-
-def test_update_refuses_an_unknown_replicas_mode(api, tmp_path):
-    f = _folder(tmp_path)
-    with pytest.raises(SpecError, match="use keep or spec"):
-        update(api, read_spec(f), f, replicas="all")
 
 
 def test_a_failed_call_after_the_preflight_keeps_what_was_done(api, tmp_path, monkeypatch):

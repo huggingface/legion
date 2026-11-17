@@ -4,17 +4,15 @@ agent's next round prompt, then forgets them. Controller only: workers never see
 
 from __future__ import annotations
 
-import json
-
 import httpx
 import pytest
 
 from flock.controller.api import create_app
 from flock.controller.loop import notice_line
-from flock.models import LoopMeta, SwarmSpec, worker_type_spec
+from flock.models import LoopMeta, worker_type_spec
 from flock.worker.loop import render
 
-from .conftest import TOKEN, make_spec
+from .conftest import TOKEN
 from .test_api import W0, hb_body
 from .test_loop_controller import A0, A1, Sim, board, prompts
 
@@ -80,8 +78,9 @@ def test_line_groups_by_thread_humans_first_and_caps():
 # ------------------------------------------------------------------ controller-side rounds
 async def test_notices_accumulate_render_once_then_clear(sim):
     await started(sim, CTRL)
-    await sim.events(A0, mention(11, 12, "alice"), reply(12, 40, A1),
-                     reply(12, 40, A1), reply(13, 40, "ochre-spoon"))
+    await sim.events(A0, board("mention", {"msg_id": 11, "thread": 12, "from": "alice",
+                                           "identity_type": "user"}),
+                     reply(12, 40, A1), reply(12, 40, A1), reply(13, 40, "ochre-spoon"))
     sim.tick(2.1)  # the mention wakes A0; its prompt names the four (one duplicate dropped)
     got = prompts(await sim.commands())
     assert list(got) == [A0]
@@ -123,7 +122,7 @@ async def test_a_notice_waits_for_the_next_round_of_any_kind(sim):
 
 
 async def test_off_by_default(sim):
-    await started(sim, {**CTRL, "notices": False})
+    await started(sim, {k: v for k, v in CTRL.items() if k != "notices"})
     spec = sim.store.get_swarm("demo")["spec"]
     assert "notices" not in spec.model_dump_json()
     await sim.events(A0, mention(11, 12, "alice"))
@@ -224,25 +223,3 @@ async def test_a_round_before_the_fetch_does_not_take_the_line(sim):
     await sim.events(A0, ("loop_prompt", {"kind": "loop", "round": 3, "why": "turn_end"}))
     sim.tick()
     assert [c["text"] for c in await sim.commands()] == ["round {round}"]
-
-
-async def test_harbor_types_get_the_line(sim):
-    """The line is plain text after the template. A harbor type's board events are `resource`
-    events from the message_board resource: wake `message_board.mention`."""
-    wake = "message_board.mention"
-    event = ("resource", {"resource": "message_board", "kind": "mention", "data": {
-        "msg_id": 11, "thread": 12, "from": "alice", "identity_type": "user"}})
-    got = await started(sim, {**CTRL, "on": [wake]}, model="m", secrets=[])
-    assert got[A0]["loop"]["kind"] == "loop"
-    await sim.events(A0, event)
-    sim.tick(2.1)
-    got = prompts(await sim.commands())
-    assert got[A0]["loop"]["why"] == f"wake: {wake}"
-    assert line(got[A0]["text"]) == HEAD + "@alice mentioned you in thread 12. Read them if useful."
-
-
-def test_spec_accepts_and_round_trips_the_key():
-    spec = make_spec(researcher={"loop": CTRL})
-    again = SwarmSpec.model_validate(json.loads(spec.model_dump_json()))
-    assert again.types["researcher"].loop.notices is True
-    assert make_spec(researcher={"loop": {"prompt": "p"}}).types["researcher"].loop.notices is False

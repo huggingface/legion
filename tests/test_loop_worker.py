@@ -241,19 +241,6 @@ class TransportFailureAdapter(ScriptedAdapter):
         self._turn = None
 
 
-async def test_transport_stalls_do_not_exhaust_worker_loop(tmp_path, monkeypatch):
-    monkeypatch.setattr("flock.worker.agents.LOOP_ERROR_BACKOFF", 0.01)
-    monkeypatch.setattr("flock.worker.agents.LOOP_TRANSIENT_BACKOFF", 0.01)
-    rt, ad = runtime(tmp_path, idle_grace="5s", adapter=TransportFailureAdapter(tmp_path / "h"))
-    await rt.setup(restore=False)
-    rt.start_loop(start(max_rounds=5))
-    await until(lambda: custom(rt, "loop_stopped"), timeout=5)
-    assert len(ad.sent) == 5
-    assert custom(rt, "loop_stopped")[0]["reason"] == "max_rounds"
-    assert rt._loop_errors == 0
-    await rt.stop()
-
-
 def test_transient_backoff_doubles_with_jitter_up_to_the_cap():
     from flock.worker.agents import transient_backoff
     top = [transient_backoff(n, rng=lambda: 1.0) for n in range(1, 10)]
