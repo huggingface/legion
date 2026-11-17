@@ -116,8 +116,11 @@ def harbor_spec(path: Path, env_files=()) -> SwarmSpec:
 
     env = {**os.environ, **{k: v for f in env_files for k, v in read_env_file(f).items()}}
     spec = Spec.load(path, env)
+    # a selector may match one task per agent: consecutive names, one type (sources.pin_tasks)
+    one_type = spec.naming == "consecutive-id" and not spec.agents.roles
+    names = list(spec.agents.roster()) if one_type else []
     try:
-        task = asyncio.run(sources.resolve_task(spec.task)).manifest()
+        task = asyncio.run(sources.pin_tasks(spec.task, names))
     except Exception as e:  # noqa: BLE001 - the Hub, git or the selector: the operator's to fix
         raise SpecError([(f"{path}: task: cannot pin {spec.task.repo} "
                           f"({spec.task.selector}@{spec.task.revision}): {e}")]) from None

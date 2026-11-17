@@ -73,6 +73,12 @@ set `dataset: name@version`; registry entries may point to their own task commit
 `selector` matches task names and must select exactly one task. Pin `revision` to
 a commit to make the selection reproducible.
 
+To give each agent its own task, e.g. private information per agent, use a glob that
+matches exactly `agents.count` tasks, with `naming: consecutive-id` and no roles. The
+matches are sorted by name and `agent-00k` runs the k-th, so zero-pad any numbers in
+the names. The team stays one type on one worker and board. Each agent's Trial gets
+only its own task (instruction, files and tests).
+
 For a private dataset, the process resolving and downloading the task needs Git
 credentials with read access. Configure your existing HF login for Git, for
 example with `hf auth login --add-to-git-credential`. Do not put tokens in the URL

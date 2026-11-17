@@ -311,8 +311,14 @@ class HarborAdapter:
         if h.tools.get("tools") and self.bundle is None:
             raise RuntimeError(f"the tool bundle {h.tools_sha256} is not on this worker")
         config = Spec.model_validate(h.config)
-        task = ResolvedTask(GitTaskId.model_validate(h.task["task"]), h.task["registry_commit"],
-                            h.task["dataset"], getattr(self.host, "task_path", None))
+        if (per_agent := h.task.get("tasks")) and self.agent not in per_agent:
+            raise RuntimeError(f"{self.agent} has no task: the spec gives one to each of "
+                               f"{', '.join(per_agent)}")
+        own = per_agent[self.agent] if per_agent else h.task["task"]  # only this agent's task
+        path = (getattr(self.host, "task_paths", {}).get(self.agent) if per_agent
+                else getattr(self.host, "task_path", None))
+        task = ResolvedTask(GitTaskId.model_validate(own), h.task["registry_commit"],
+                            h.task["dataset"], path)
         trial_seconds = config.limits.trial_hours * 3600
         self.attempt += 1
         inference = self.spec.resolved_model.inference  # the type spec's, not the config's
