@@ -550,6 +550,28 @@ def test_naming_consecutive_id_updates_never_rename_running_agents(tmp_path):
         keep_pins(words, consecutive_swarm(tmp_path))
 
 
+def test_one_task_per_agent_refuses_a_resize_in_a_run(tmp_path):
+    """A type whose agents each run their own task (sources.pin_tasks): an update keeps the
+    pinned map, so a count that changes the agents is refused, never an agent without a task."""
+    from flock.ops import SpecError, keep_pins
+
+    def swarm(count):
+        (tmp_path / "spec.yaml").write_text(
+            "name: crew\nmodel: m\nnaming: consecutive-id\ntask:\n"
+            "  repo: https://huggingface.co/datasets/a/b\n  selector: team-s*\n"
+            f"agents:\n  count: {count}\n")
+        tasks = {f"agent-{k:03d}": {**TASK["task"], "path": f"tasks/team-s{k:02d}"}
+                 for k in range(1, count + 1)}
+        return compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), {**TASK, "tasks": tasks})
+
+    old, same = swarm(2), swarm(2)
+    keep_pins(old, same)
+    assert same.types["agent"].harbor.task["tasks"] == old.types["agent"].harbor.task["tasks"]
+    for count in (3, 1):
+        with pytest.raises(SpecError, match="one task per agent can't be resized in a run"):
+            keep_pins(old, swarm(count))
+
+
 def test_naming_consecutive_id_a_raised_ramp_gets_consecutive_names(tmp_path, store, clock):
     """The last role's ramp raised (count 1 -> 3): its new agents get agent-NNN names, never
     `<type>-NNNN` (the ramp is compared too, not only the replicas, which a ramp keeps at 0)."""
