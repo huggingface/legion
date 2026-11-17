@@ -1,0 +1,49 @@
+# s3-maze: N agents search their own copies of one tree of rooms for its exit, sharing a board,
+# and the first one out ends the run. On the HF cluster: docs/tasks.md#s3-maze
+name: ${RUN_NAME:-s3-maze}                    # a new name per run: a bucket keeps a swarm's name
+namespace: ${NAMESPACE}
+bucket: ${BUCKET}                             # the run's checkpoint bucket, hf://buckets/<ns>/<name>
+compute:
+  kind: slurm
+  partition: ${SLURM_PARTITION:-}             # the cluster profile's: hopper-cpu (podman 4.9)
+  cpus: ${WORKER_CPUS:-6}                     # a CPU per agent, and two more
+  mem: ${WORKER_MEM:-11400M}                  # at most 2000 MB per CPU on hopper-cpu
+  time: '2:00:00'
+model: Qwen/Qwen3.8-27B
+naming: consecutive-id                        # agent-001 .. agent-00N, all on the one tree
+inference:
+  hf_router:
+    provider: deepinfra
+  api_key_env: HF_INFERENCE_TOKEN             # inference only: never the workers' HF_TOKEN
+task:
+  repo: https://huggingface.co/datasets/HuggingFaceSwarms/s3-maze
+  selector: ${TREE:-maze-t01}                 # maze-t01 .. maze-t32: one task per tree
+  revision: 0f1fe651d929d808ad8a4b96067c51bb0df96a25
+agents:
+  count: ${N:-4}
+stop_on_success: true                         # the first agent out ends the run
+success_check:
+  service: maze                               # in the agent's maze service, never its container
+  command: python3 -I -S /app/success.py
+resources:
+  message_board:                              # a local board on the team's one worker
+    channels: [general]
+    wake: [mention, thread]
+    rules:
+      max_len: 1000
+      min_post_gap: 5s
+      max_posts: 40
+environment:
+  backend: podman                             # each agent: its container and its maze service
+workers:
+  agents_per_worker: ${N:-4}                  # one worker and board for the team
+  turn_timeout: 20m
+loop:
+  prompt: Continue the task until it is complete, then stop.
+  every: turn_end
+  while:
+    until: 45m
+    max_rounds: 6
+limits:
+  run_timeout_seconds: 3600
+  agent_max_turns: 150                        # model calls per prompt
