@@ -44,6 +44,28 @@ def test_read_only_is_in_the_manifest_and_pools_are_checked():
         tool(pool="medium")
 
 
+async def test_slow_calls_do_not_starve_the_manifest_or_fast_tools():
+    served = Served(Jammed())
+    try:
+        async with httpx.AsyncClient(base_url=served.url, headers=H, timeout=60) as c:
+            slow = [asyncio.create_task(c.post("/tools/slow", json={"args": {}}))
+                    for _ in range(10)]
+            for _ in range(100):  # every slow call is in its pool
+                if (await c.get("/metrics")).json()["pools"]["slow"]["in_flight"] == 10:
+                    break
+                await asyncio.sleep(0.05)
+            r = await c.get("/manifest")
+            assert r.status_code == 200 and r.json()["name"] == "jammed"
+            r = await asyncio.wait_for(c.post("/tools/peek", json={"args": {}}), 2)
+            assert r.json() == {"ok": True, "result": {"by": "dev-0001"}}
+            assert not any(t.done() for t in slow)
+            served.world.release.set()
+            done = await asyncio.gather(*slow)
+            assert all(r.json() == {"ok": True, "result": "slow done"} for r in done)
+    finally:
+        served.world.release.set()
+        served.close()
+
 class Patient(World):
     name, version = "patient", "1"
 

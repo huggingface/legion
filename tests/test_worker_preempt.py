@@ -264,11 +264,10 @@ def test_worker_startup_without_home(tmp_path, monkeypatch):
 
 
 
-@pytest.mark.parametrize("signals", [("SIGUSR1", "SIGTERM")])
-async def test_repeated_signals_drain_once(tmp_path, signals, caplog):
+async def test_repeated_signals_drain_once(tmp_path, caplog):
     """The Spot watcher signals every process of the job, and the batch script forwards: the
-    worker may get USR1 twice, or USR1 then TERM. The first starts the drain; the rest change
-    nothing."""
+    worker may get USR1 then TERM (USR1 twice: test_runs.py::test_slurm). The first starts the
+    drain; the rest change nothing."""
     caplog.set_level("INFO", logger="flock.worker")
     store = SlowStore(delay=0.3)
     ctrl = FakeController()
@@ -277,7 +276,7 @@ async def test_repeated_signals_drain_once(tmp_path, signals, caplog):
     worker, _adapters, _ = make(tmp_path, ctrl, store, budget=5)
     run = asyncio.create_task(worker.run())
     await until(lambda: len(worker.agents) == 4, timeout=5)
-    for sig in signals:
+    for sig in ("SIGUSR1", "SIGTERM"):
         os.kill(os.getpid(), getattr(signal, sig))
         await asyncio.sleep(0.1)  # the second arrives while the first drain runs
     assert await asyncio.wait_for(run, 10) == PREEMPT_EXIT

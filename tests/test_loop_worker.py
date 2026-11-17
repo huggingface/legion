@@ -97,7 +97,7 @@ class MaxTurnsAdapter(ScriptedAdapter):
 @pytest.mark.parametrize("data", [{"reason": "max_turns"},             # reason
                                   {"subtype": "error_max_turns"}])     # subtype alone
 async def test_max_turns_is_not_a_failed_loop_turn(tmp_path, data):
-    """Defect 5: with tool_choice required, ending at max_turns is normal; 5 in a row run the
+    """With tool_choice required, ending at max_turns is normal; 5 in a row run the
     loop to max_rounds instead of ending it with `errors`."""
     rt, ad = runtime(tmp_path, idle_grace="5s", adapter=MaxTurnsAdapter(tmp_path / "h", data=data))
     await rt.setup(restore=False)

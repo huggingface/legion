@@ -207,7 +207,7 @@ async def test_turn_end_under_max_working_runs_on_the_controller(store, clock, t
 
 
 async def test_max_turns_is_not_a_failed_turn_but_is_logged(sim):
-    """Defect 5: a controller-side loop counts real errors (3 in a row end the agent's loop)
+    """A controller-side loop counts real errors (3 in a row end the agent's loop)
     but not turns that ended at max_turns (each is a `loop_max_turns` event) or stalled in
     transport."""
     await sim.apply({"prompt": "p", "every": "5s"})

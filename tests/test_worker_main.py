@@ -273,7 +273,7 @@ async def test_worker_sends_its_incarnation_on_polls_and_heartbeats(tmp_path):
 
 
 def test_run_and_exit_does_not_wait_for_a_stuck_executor_thread():
-    """1k run, check 5: a drained worker logged "drained; exiting" but its job stayed RUNNING.
+    """A drained worker logged "drained; exiting" but its job stayed RUNNING.
     asyncio.run's teardown joins the default executor (and Python joins non-daemon threads at
     exit), so one blocked thread kept the process alive. The worker must exit regardless."""
     import threading
