@@ -7,6 +7,7 @@ from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
 import yaml
+from harbor.utils.env import is_sensitive_env_key
 from huggingface_hub import get_token
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -26,6 +27,18 @@ class TaskSettings(Settings):
     dataset: str | None = None
     selector: str = Field(min_length=1)
     revision: str = Field(default="main", min_length=1)
+    # Bind the actual model connection to task services, through Compose's service variables.
+    model_env: dict[Literal["model", "api_format", "base_url", "api_key", "reasoning_effort", "headers", "profile"],
+                    Annotated[str, Field(pattern=r"^[A-Z][A-Z0-9_]*$")]] = Field(
+                        default_factory=dict, exclude_if=lambda v: not v)
+
+    @model_validator(mode="after")
+    def model_env_names(self):
+        if len(set(self.model_env.values())) != len(self.model_env):
+            raise ValueError("task.model_env must use distinct environment variable names")
+        if "api_key" in self.model_env and not is_sensitive_env_key(self.model_env["api_key"]):
+            raise ValueError("task.model_env.api_key must use a sensitive name, e.g. MODEL_API_KEY")
+        return self
 
     @field_validator("repo")
     @classmethod
@@ -217,5 +230,5 @@ class Config(Settings):
             skip_model_parsing=True,
             base_url=self.inference.endpoints[0],
             model_api_key_name=name,
-            model_api_format="openai_chat_completions",
+            model_api_format=self.inference.api_format,
         )

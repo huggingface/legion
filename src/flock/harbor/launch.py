@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib.metadata
+import json
 import math
 import shutil
 import signal
@@ -17,10 +18,12 @@ from harbor.models.trial.config import (
     TrialConfig,
 )
 from harbor.trial.trial import Trial
+from harbor.utils.env import is_sensitive_env_key
 
 from flock.models import NO_KEY_ENV, loopback_url
 
 from .config import PI_VERSION, Config
+from .envs import ENVIRONMENTS
 from .harnesses.pi import attach_pi_setup, terminal_pi_error
 from .instructions import build_agent_instructions
 from .networking import TrialNetworks
@@ -66,7 +69,7 @@ def agent_url(url, backend):
 
 
 def build_trial_config(
-    config, resolved, run_dir, name, agent_instructions, api_key, inference=None
+    config, resolved, run_dir, name, agent_instructions, api_key, inference=None, context_env=None
 ):
     """`inference`: the agent's endpoints (default: the config's); the agent `name` calls one
     of its URLs, and its container may reach all of them."""
@@ -76,7 +79,7 @@ def build_trial_config(
     agent_kwargs = {"version": PI_VERSION, "max_turns": config.limits.agent_max_turns}
     if inference.reasoning_effort is not None:
         agent_kwargs["reasoning_effort"] = inference.reasoning_effort
-    return TrialConfig(
+    trial = TrialConfig(
         task=(
             TaskConfig(path=resolved.local_path)
             if resolved.local_path is not None
@@ -95,7 +98,7 @@ def build_trial_config(
             skip_model_parsing=True,
             base_url=agent_url(inference.endpoint_for(name), backend),
             model_api_key_name=key_name,
-            model_api_format="openai_chat_completions",
+            model_api_format=inference.api_format,
             env={
                 key_name: api_key,
                 "FLOCK_TOOLS_MANIFEST": TOOLS_MANIFEST,
@@ -108,6 +111,36 @@ def build_trial_config(
         environment=environment_config(config),
         extra_instructions=[agent_instructions],
     )
+    if config.task.model_env:
+        profile = {
+            "scaffold": "pi", "runner": "flock", "version": PI_VERSION,
+            "model": trial.agent.model_name, "endpoint": trial.agent.base_url,
+            "headers": inference.headers,
+            "parameters": {"api_format": inference.api_format,
+                           "reasoning_effort": inference.reasoning_effort,
+                           "max_turns": config.limits.agent_max_turns},
+        }
+        if context_env:
+            profile["task_environment"] = {k: v for k, v in context_env.items()
+                                           if not is_sensitive_env_key(k) and not k.startswith("FLOCK_")}
+        values = {"model": trial.agent.model_name, "api_format": inference.api_format,
+                  "base_url": trial.agent.base_url, "api_key": api_key,
+                  "reasoning_effort": inference.reasoning_effort or "off",
+                  "headers": json.dumps(inference.headers, allow_nan=False),
+                  "profile": json.dumps(profile, allow_nan=False)}
+        # Compose interpolation feeds only services that explicitly reference these names;
+        # environment.env would also inject the private task profile into the agent.
+        if backend not in {"docker", "podman"}:
+            raise ValueError("task.model_env requires docker or podman task services")
+        trial.environment.import_path = ENVIRONMENTS[backend]
+        trial.environment.kwargs["compose_env"] = {
+            target: values[field] for field, target in config.task.model_env.items() if field != "api_key"}
+        if target := config.task.model_env.get("api_key"):
+            if inference.key_env:
+                trial.environment.kwargs["compose_secret_env"] = {target: inference.key_env}
+            else:
+                trial.environment.kwargs["compose_env"][target] = api_key  # keyless endpoint's placeholder
+    return trial
 
 
 async def run_experiment(config: Config):

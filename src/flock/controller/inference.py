@@ -100,20 +100,31 @@ def _router_windows(router: HFRouter, model: str, listing: Any) -> list[tuple[st
             for p in tools]
 
 
-def _get(client: httpx.Client, url: str, key: str | None) -> Any:
-    headers = {"Authorization": f"Bearer {key}"} if key else {}
+def request_headers(key: str | None, api_format="openai_chat_completions") -> dict[str, str]:
+    if api_format == "anthropic_messages":
+        return {"anthropic-version": "2023-06-01", **({"x-api-key": key} if key else {})}
+    return {"Authorization": f"Bearer {key}"} if key else {}
+
+
+def models_url(url: str, api_format="openai_chat_completions") -> str:
+    return url.removesuffix("/v1") + "/v1/models" if api_format == "anthropic_messages" else url + "/models"
+
+
+def _get(client: httpx.Client, url: str, key: str | None, inference) -> Any:
+    headers = {**request_headers(key, inference.api_format), **inference.headers}
     try:
-        r = client.get(f"{url}/models", headers=headers, timeout=TIMEOUT_S)
+        r = client.get(models_url(url, inference.api_format), headers=headers, timeout=TIMEOUT_S)
     except httpx.HTTPError as e:
         raise InferenceError(f"GET {url}/models: {type(e).__name__}: {e}") from None
     return _reply(url, r)
 
 
-async def aget(client: httpx.AsyncClient, url: str, key: str | None) -> Any:
+async def aget(client: httpx.AsyncClient, url: str, key: str | None, inference=None) -> Any:
     """`GET <url>/models` (preflight's)."""
-    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    api = inference.api_format if inference is not None else "openai_chat_completions"
+    headers = {**request_headers(key, api), **(inference.headers if inference is not None else {})}
     try:
-        r = await client.get(f"{url}/models", headers=headers, timeout=TIMEOUT_S)
+        r = await client.get(models_url(url, api), headers=headers, timeout=TIMEOUT_S)
     except httpx.HTTPError as e:
         raise InferenceError(f"GET {url}/models: {type(e).__name__}: {e}") from None
     return _reply(url, r)
@@ -135,10 +146,13 @@ def check(spec: SwarmSpec, secrets: Mapping[str, str],
     type whose block (but `max_working`, the controller's) and model are those of `previous`
     (the applied spec) keeps its window without a call: a re-apply does not need the servers
     up, and the window stays the one its workers' Trials hold."""
-    listings: dict[tuple[str, str | None], Any] = {}
+    listings: dict[tuple, Any] = {}
     with httpx.Client(transport=transport or TRANSPORT) as client:
         for name, ts in spec.types.items():
             r = ts.resolved_model
+            if r.inference.task_local:
+                r.context_window = r.inference.context_window
+                continue  # the controller cannot reach a service inside an unstarted Trial
             old = previous.types[name].resolved_model if previous and name in previous.types else None
             if (old is not None and old.context_window and (old.inference.held(), old.model_id)
                     == (r.inference.held(), r.model_id)):
@@ -149,9 +163,10 @@ def check(spec: SwarmSpec, secrets: Mapping[str, str],
             try:
                 got = {}
                 for url in r.inference.endpoints:
-                    if (url, key) not in listings:
-                        listings[url, key] = _get(client, url, key)
-                    got[url] = listings[url, key]
+                    identity = (url, key, r.inference.api_format, tuple(sorted(r.inference.headers.items())))
+                    if identity not in listings:
+                        listings[identity] = _get(client, url, key, r.inference)
+                    got[url] = listings[identity]
                 r.context_window = context_window(r.inference, r.model_id, got, r.provider_name)
             except InferenceError as e:
                 hint = (f" ({r.inference.key_env} is not set on the controller)"

@@ -74,7 +74,14 @@ run's and a role's `[input, output, cached]` in USD per 1M tokens (see [Cost](#c
 
 `flock launch` compiles a Harbor spec's block into the swarm spec as it is. Each type's
 `resolved_model` then pins the block it runs on, its price and, at apply, the context window
-(below). Harbor's Pi speaks OpenAI **Chat Completions** (`POST {url}/chat/completions`).
+(below). Pi defaults to OpenAI **Chat Completions**. Set `inference.api_format` to
+`openai_responses` or `anthropic_messages` for those native APIs. `extra_headers` supplies
+non-secret routing headers; credentials still use `api_key_env`.
+
+For a model proxy inside the Harbor task, set `task_local: true`, its `urls`, and an explicit
+`context_window`. The controller cannot contact that service before its Trial starts, so model
+listing and preflight report it as unverified; the actual agent request checks the connection.
+Task-local endpoints cannot use managed HF Jobs inference or metrics scraping.
 
 ## The HF router (`hf_router`)
 

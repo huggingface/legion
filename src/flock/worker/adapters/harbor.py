@@ -321,7 +321,7 @@ class HarborAdapter:
         with exposed():  # the inference key from os.environ; a Slurm worker has a file
             tc = launch.build_trial_config(config, task, self.root, self.agent,
                                            self._instructions(), inference_key(inference),
-                                           inference=inference)
+                                           inference=inference, context_env=self.spec.env)
         # Harbor's compose project is `<trial_name>__env` and its start runs `compose down` on
         # it: the swarm (the worker's SWARM) keeps another run's <agent>-t1 on this host
         # alive; a worker relaunched in this run reuses, and so cleans up, its own names.

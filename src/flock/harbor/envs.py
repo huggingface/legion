@@ -29,9 +29,11 @@ class _EnvOffArgv:
     task's PATH or STORAGE_DRIVER, which would steer the host's compose there) keeps
     `-e NAME=value`."""
 
-    def __init__(self, *args, secret_names=(), **kwargs):
+    def __init__(self, *args, secret_names=(), compose_env=None, compose_secret_env=None, **kwargs):
         super().__init__(*args, **kwargs)
         self._secret_names = frozenset(secret_names)
+        self._task_compose_env = dict(compose_env or {})
+        self._task_compose_secret_env = dict(compose_secret_env or {})
 
     async def _run_docker_compose_command(self, command, *args, **kwargs):
         if command[:1] != ["exec"]:
@@ -50,7 +52,13 @@ class _EnvOffArgv:
             _EXEC_ENV.reset(token)
 
     def _compose_env_vars(self, *args, **kwargs):
-        return {**super()._compose_env_vars(*args, **kwargs), **(_EXEC_ENV.get() or {})}
+        values = dict(self._task_compose_env)
+        for target, source in self._task_compose_secret_env.items():
+            key = secret_env().get(source)
+            if not key:
+                raise ValueError(f"Set {source} for the task's {target} binding")
+            values[target] = key
+        return {**super()._compose_env_vars(*args, **kwargs), **values, **(_EXEC_ENV.get() or {})}
 
 
 class Docker(_EnvOffArgv, DockerEnvironment):

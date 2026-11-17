@@ -306,7 +306,8 @@ def probe_targets(spec: SwarmSpec) -> set[tuple]:
     """What preflight probes per type: its model on its block, sent as `request_model` to its
     endpoints, with the block's key and headers. An update probes again when this changes."""
     return {(r.qualified, r.request_model, tuple(r.inference.endpoints), r.inference.key_env,
-             tuple(sorted(r.inference.headers.items())))
+             tuple(sorted(r.inference.headers.items())), r.inference.api_format,
+             r.inference.task_local)
             for ts in spec.types.values() if (r := ts.resolved_model) is not None}
 
 

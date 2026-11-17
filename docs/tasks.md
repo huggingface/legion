@@ -96,3 +96,30 @@ lifecycle, while a spec's loop controls when agents receive more prompts.
 
 See [local usage](local.md) for launching and inspecting a run, and
 [escape-room](../experiments/escape-room/) for an existing task integration.
+
+
+## Bind a model connection to task services
+
+A Compose service can use the evaluated model for a private readout or proxy. Declare the
+connection fields it needs under `task.model_env`:
+
+```yaml
+task:
+  repo: https://huggingface.co/datasets/your-org/your-tasks
+  revision: <published-commit-sha>
+  selector: my-task
+  model_env:
+    model: TASK_MODEL
+    api_key: TASK_MODEL_API_KEY
+    api_format: TASK_MODEL_API_FORMAT
+    base_url: TASK_MODEL_BASE_URL
+    reasoning_effort: TASK_MODEL_EFFORT
+    headers: TASK_MODEL_HEADERS
+    profile: TASK_MODEL_PROFILE
+```
+
+The fields come from the actual Trial configuration. `headers` and `profile` are JSON strings;
+the profile records the model, Pi version, generation settings and non-secret worker configuration.
+Compose services opt in by referencing the named variables in their `environment` mapping.
+These bindings do not automatically become agent environment variables. Credential values are
+resolved on the worker and are not stored in the spec or saved Trial configuration.

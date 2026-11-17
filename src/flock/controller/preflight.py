@@ -6,8 +6,8 @@ inference check's `GET /models`, controller/inference.py), then runs two turns, 
 harness starts: turn one asks the model to call a trivial tool; turn two sends the model's
 output back with the tool's result and must complete. A server that accepts turn one but fails
 the follow-up (some HF router providers do) fails preflight. Zero reported usage is a warning.
-Harbor's Pi speaks Chat Completions, so models are probed there, non-streamed. A tool call the
-model writes as text is no tool call: Pi takes only `tool_calls`.
+The probe uses Pi's configured Chat Completions, Responses or Messages API. Task-local
+endpoints are reported as unverified here because only their Harbor Trial can reach them.
 """
 
 from __future__ import annotations
@@ -97,15 +97,16 @@ def visible(content: Any) -> Any:
     return "" if content.lstrip().startswith("<think>") else content
 
 
-async def _probe_chat(client, r: ResolvedModel, key: str | None, result: PreflightResult,
+async def _probe_model(client, r: ResolvedModel, key: str | None, result: PreflightResult,
                       timeout: float) -> int:
-    """Two Chat Completions turns on every server; returns tokens reported. Raises ProbeError
+    """Two tool-calling turns on every server; returns tokens reported. Raises ProbeError
     (NoToolCall: a server made no tool call). With several `urls`, the error names the server
     that failed."""
     urls, total = r.inference.endpoints, 0
     for base in urls:
         try:
-            total += await _probe_chat_at(client, base, r, key, result, timeout)
+            call = _probe_chat_at if r.inference.api_format == "openai_chat_completions" else _probe_native_at
+            total += await call(client, base, r, key, result, timeout)
         except ProbeError as e:
             if len(urls) == 1:
                 raise
@@ -130,6 +131,54 @@ async def _probe_chat_at(client, base: str, r: ResolvedModel, key: str | None,
     return tok1 + tok2
 
 
+async def _probe_native_at(client, base, r, key, result, timeout):
+    """Echo a tool call and result through Responses or Messages, retaining provider content."""
+    messages_api = r.inference.api_format == "anthropic_messages"
+    headers = dict(r.inference.headers)
+    if messages_api:
+        headers.update({"anthropic-version": "2023-06-01", **({"x-api-key": key} if key else {})})
+        url = base.removesuffix("/v1") + "/v1/messages"
+        body = {"model": r.request_model, "max_tokens": MAX_OUTPUT_TOKENS,
+                "messages": [{"role": "user", "content": PROMPT}],
+                "tools": [{"name": "get_time", "description": TOOL_DESCRIPTION, "input_schema": TOOL_SCHEMA}]}
+    else:
+        headers.update({"Authorization": f"Bearer {key}"} if key else {})
+        url = base + "/responses"
+        body = {"model": r.request_model, "max_output_tokens": MAX_OUTPUT_TOKENS,
+                "input": [{"role": "user", "content": PROMPT}],
+                "tools": [{"type": "function", "name": "get_time", "description": TOOL_DESCRIPTION,
+                           "parameters": TOOL_SCHEMA}]}
+
+    async def turn(value):
+        response = await client.post(url, json=value, headers=headers, timeout=timeout)
+        if response.status_code >= 400:
+            raise ProbeError(f"HTTP {response.status_code}: {response.text[:200]}")
+        reply = response.json()
+        if not isinstance(reply, dict) or reply.get("error"):
+            raise ProbeError("provider returned an invalid response or an error")
+        usage = reply.get("usage") or {}
+        tokens = usage.get("total_tokens", usage.get("input_tokens", 0) + usage.get("output_tokens", 0))
+        return reply, tokens
+
+    first, tok1 = await turn(body)
+    content = first.get("content" if messages_api else "output") or []
+    calls = [item for item in content if isinstance(item, dict)
+             and item.get("type") == ("tool_use" if messages_api else "function_call")]
+    result.tool_call_seen = bool(calls)
+    if not calls:
+        raise NoToolCall("the reply has no tool call; agents on this model cannot use tools")
+    if messages_api:
+        followup = {**body, "messages": [*body["messages"], {"role": "assistant", "content": content},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": c["id"],
+                                                  "content": TOOL_RESULT} for c in calls]}]}
+    else:
+        followup = {**body, "input": [*body["input"], *content,
+                    *({"type": "function_call_output", "call_id": c["call_id"], "output": TOOL_RESULT}
+                      for c in calls)]}
+    _, tok2 = await turn(followup)
+    return tok1 + tok2
+
+
 def hint(r: ResolvedModel) -> str:
     """The likely cause of a failed tool call, for the error."""
     if r.inference.hf_router is not None:
@@ -144,12 +193,16 @@ async def probe(
     api: str | None = None,
 ) -> PreflightResult:
     """The model check, then turn one asks for a tool call and turn two sends the call back
-    with its result, the way a harness does on its first tool use (Chat Completions, not
-    streamed). `key` None with a key named: not probed (unverified)."""
+    with its result through the configured API, without streaming. `key` None with a key
+    named: not probed (unverified)."""
     p = r.inference
-    api = api or "chat_completions"
+    api = api or api_for(Harness.harbor, p)
     result = PreflightResult(model=r.qualified, provider=r.provider_name, types=types, api=api,
                              ok=False)
+    if p.task_local:
+        result.unverified = True
+        result.warning = "task-local endpoint: connection must be checked inside its Harbor Trial"
+        return result
     if p.key_env and not key:
         result.unverified = True
         result.warning = (f"unverified: secret {p.key_env} is not set on the controller, "
@@ -159,9 +212,9 @@ async def probe(
     t0 = time.monotonic()
     tok2 = 0
     try:
-        context_window(p, r.model_id, {u: await aget(client, u, key) for u in p.endpoints},
+        context_window(p, r.model_id, {u: await aget(client, u, key, p) for u in p.endpoints},
                        r.provider_name)
-        tok1 = await _probe_chat(client, r, key, result, timeout)
+        tok1 = await _probe_model(client, r, key, result, timeout)
     except InferenceError as e:
         result.latency_ms = int((time.monotonic() - t0) * 1000)
         result.error = str(e)[:400]
@@ -189,8 +242,11 @@ async def probe(
     return result
 
 
-def api_for(harness: Harness) -> str:
-    """The wire API a type's harness speaks to its provider (both: chat completions)."""
+def api_for(harness: Harness, inference=None) -> str:
+    """The type's configured wire API; an unspecified block keeps its harness default."""
+    if inference is not None:
+        return {"openai_chat_completions": "chat_completions", "openai_responses": "responses",
+                "anthropic_messages": "messages"}[inference.api_format]
     return HARNESSES[harness].api
 
 
@@ -200,7 +256,7 @@ def models_to_probe(spec: SwarmSpec) -> list[tuple[ResolvedModel, list[str], str
     seen: dict[tuple, tuple[ResolvedModel, list[str], str]] = {}
     for type_name, ts in spec.types.items():
         r = ts.resolved_model
-        api = api_for(ts.harness)
+        api = api_for(ts.harness, r.inference)
         key = (r.provider_name, r.model_id, r.reasoning, api)
         seen.setdefault(key, (r, [], api))[1].append(type_name)
     return list(seen.values())

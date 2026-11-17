@@ -243,6 +243,11 @@ class Inference(BaseModel):
     urls: list[str] | None = None
     hf_jobs: HFJobs | None = None
     api_key_env: str | None = None  # default: HF_TOKEN for hf_router and hf_jobs; no key for urls
+    api_format: Literal["openai_chat_completions", "openai_responses", "anthropic_messages"] = Field(
+        default="openai_chat_completions", exclude_if=lambda v: v == "openai_chat_completions")
+    # A task's compose service is reachable inside its Trial, not from the controller.
+    task_local: bool = Field(default=False, exclude_if=lambda v: not v)
+    extra_headers: dict[str, str] = Field(default_factory=dict, exclude_if=lambda v: not v)
     # Max agents of this swarm on these endpoints in a turn at once. Enforced at prompt
     # admission by the controller (FLOCK_MAX_WORKING_ENFORCE=0: report only).
     max_working: int | None = Field(default=None, ge=1)
@@ -287,6 +292,15 @@ class Inference(BaseModel):
                              "goes in the spec)")
         return v
 
+    @field_validator("extra_headers")
+    @classmethod
+    def _extra_headers(cls, value):
+        for name, header in value.items():
+            if (not re.fullmatch(r"[A-Za-z0-9-]+", name) or "\r" in header or "\n" in header
+                    or name.lower() in {"authorization", "proxy-authorization", "x-api-key", "api-key"}):
+                raise ValueError("extra_headers must be non-secret HTTP headers; credentials use api_key_env")
+        return {name: header for name, header in value.items() if header}
+
     @model_validator(mode="after")
     def _one(self) -> Inference:
         given = [k for k in ("hf_router", "urls", "hf_jobs") if getattr(self, k) is not None]
@@ -298,6 +312,9 @@ class Inference(BaseModel):
             self.hf_router = HFRouter()
         if self.metrics and self.urls is None:
             raise ValueError("metrics scrapes your servers' vLLM metrics: it needs urls")
+        if self.task_local and (self.urls is None or self.hf_jobs is not None
+                                or self.context_window is None or self.metrics):
+            raise ValueError("task_local requires urls and an explicit context_window, without hf_jobs or metrics")
         return self
 
     def held(self) -> Inference:
@@ -328,7 +345,8 @@ class Inference(BaseModel):
     def headers(self) -> dict[str, str]:
         """Request headers besides the key: the router's bill-to org."""
         r = self.hf_router
-        return {"X-HF-Bill-To": r.bill_to} if r is not None and r.bill_to else {}
+        return {**self.extra_headers,
+                **({"X-HF-Bill-To": r.bill_to} if r is not None and r.bill_to else {})}
 
     def request_model(self, model: str) -> str:
         """What the servers are sent as `model`: `<model>:<provider>` for the router with a

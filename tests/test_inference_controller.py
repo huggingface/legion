@@ -712,3 +712,58 @@ async def test_max_working_counts_admissions_between_heartbeats(store, clock, ti
         idle = [AgentHeartbeat(name="worker-0000", state="idle")]
         await c.post("/workers/p-worker-w0000/heartbeat", json=hb(clock, "p-worker-w0000", idle))
         assert await _delivered(c, "p-worker-w0001") == ["worker-0001"]
+
+
+@pytest.mark.parametrize("api_format", ["openai_chat_completions", "openai_responses", "anthropic_messages"])
+async def test_task_local_endpoints_are_checked_in_the_trial_not_from_the_controller(api_format):
+    from flock.controller.inference import check
+    from flock.controller.preflight import run_preflight
+
+    s = local_spec(task_local=True, context_window=128000, api_format=api_format)
+    requests = []
+    def unreachable(request):
+        requests.append(request)
+        raise AssertionError("task-local endpoint must not be contacted by the controller")
+    transport = httpx.MockTransport(unreachable)
+    check(s, {"VLLM_API_KEY": "fake"}, transport=transport)
+    assert s.types["local"].resolved_model.context_window == 128000
+    async with httpx.AsyncClient(transport=transport) as http:
+        report = await run_preflight(s, {"VLLM_API_KEY": "fake"}, http)
+    assert report.ok and report.unverified == 1
+    assert report.results[0].unverified
+    assert requests == []
+
+
+@pytest.mark.parametrize("api_format", ["openai_responses", "anthropic_messages"])
+async def test_native_api_preflight_echoes_the_provider_tool_call_and_checks_its_result(api_format):
+    from flock.controller.preflight import probe
+
+    r = local_spec(api_format=api_format, context_window=128000).types["local"].resolved_model
+    messages = api_format == "anthropic_messages"
+    content = ([{"type": "thinking", "thinking": "opaque", "signature": "keep-this"},
+                {"type": "tool_use", "id": "call", "name": "get_time", "input": {"timezone": "UTC"}}]
+               if messages else [{"type": "reasoning", "id": "r", "summary": []},
+                                  {"type": "function_call", "id": "f", "call_id": "call",
+                                   "name": "get_time", "arguments": '{"timezone":"UTC"}'}])
+    seen = []
+    def provider(request):
+        if request.method == "GET":
+            assert request.url.path.endswith("/v1/models")
+            return httpx.Response(200, json={"data": [{"id": r.model_id, "max_model_len": 128000}]})
+        body = json.loads(request.content)
+        assert request.url.path.endswith("/v1/messages" if messages else "/v1/responses")
+        assert request.headers["x-api-key" if messages else "authorization"] == ("fake" if messages else "Bearer fake")
+        if seen:
+            if messages:
+                assert body["messages"][-2]["content"] == content
+                assert body["messages"][-1]["content"][0]["tool_use_id"] == "call"
+            else:
+                assert body["input"][1:-1] == content
+                assert body["input"][-1]["call_id"] == "call"
+        seen.append(body)
+        return httpx.Response(200, json={"content" if messages else "output": content if len(seen) == 1 else [],
+                                        "usage": {"input_tokens": 2, "output_tokens": 1}})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as http:
+        result = await probe(http, r, "fake", ["local"])
+    assert result.ok and result.tool_call_seen and result.follow_up_ok
+    assert len(seen) == 2
