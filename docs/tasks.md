@@ -85,18 +85,9 @@ or commit them in the spec.
 - `environment.backend: hf-sandbox` needs a prebuilt public `docker_image` in the
   task configuration. Local mounts and multi-container Compose tasks are not
   supported. Use a Space or existing HTTP board rather than a local socket board.
-- `environment.backend: e2b` runs each Trial in an [E2B](https://e2b.dev/) sandbox
-  (Harbor's E2B environment). The worker needs `E2B_API_KEY` in its environment
-  (not on Slurm, whose workers keep secrets out of it). The first Trial of a task
-  builds an E2B template from the task's `docker_image` or Dockerfile while the
-  worker's other Trials wait; later ones reuse it. Workers that start a new task
-  at once cancel each other's builds and their Trials fail (404): start one worker
-  until the template exists, then scale up. As on hf-sandbox: no mounts or local networks, and private model URLs
-  are refused. A sandbox's lifetime is set when it starts: its Trial's
-  (`limits.trial_hours` plus a turn and 10 minutes of setup), at most 24 h (1 h on
-  E2B's Hobby plan: lower `trial_hours` there). A Trial that ends kills its sandbox;
-  a worker that dies leaves its sandboxes running, and billed per second, until that
-  lifetime is over.
+- `environment.backend: e2b` runs each Trial in an [E2B](https://e2b.dev/) sandbox.
+  Export `E2B_API_KEY` where the workers run. As on hf-sandbox, there are no mounts
+  or local networks: use a Space or existing HTTP board.
 - HF Jobs workers use HF Sandboxes or E2B. Slurm workers use Podman or HF Sandboxes.
   `compute` chooses where workers run; `environment.backend` chooses where their
   task environments run.

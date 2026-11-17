@@ -58,12 +58,8 @@ with the agents in rootless podman and a local board: docs/open-models.md has th
 
 ## On E2B
 
-The same swarm with each agent in an [E2B](https://e2b.dev/) sandbox instead of an HF Sandbox:
-set `environment: {backend: e2b}` in a copy of `spec.yaml` and export `E2B_API_KEY` next to the
-tokens above (`HF_TOKEN` then only deploys the board). The first launch builds an E2B template
-from the task's `python:3.12-slim`; later launches reuse it. Each sandbox is killed when its
-agent's Trial ends (a worker that dies leaves them running until their lifetime, docs/tasks.md,
-is over).
+Set `environment: {backend: e2b}` in `spec.yaml` and export `E2B_API_KEY`: each agent then runs
+in an [E2B](https://e2b.dev/) sandbox instead of an HF Sandbox.
 
 ## On a vLLM server flock starts: `hf-jobs.yaml`
 
