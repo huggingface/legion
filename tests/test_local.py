@@ -33,13 +33,12 @@ from flock.worker.main import Worker, WorkerConfig
 from .conftest import HB, TOKEN, make_spec
 
 runner = CliRunner()
-TYPE = {**HB, "model": "fake:m", "replicas": 2}
-FAKE = {"fake": {"type": "openai_compat", "base_url": "http://127.0.0.1:9/v1",
-                 "api_key_env": "FAKE_KEY", "self_hosted": True}}
+TYPE = {**HB, "model": "m", "replicas": 2}
+FAKE = {"urls": ["http://127.0.0.1:9/v1"], "api_key_env": "FAKE_KEY"}
 
 
 def local_spec(**kw) -> SwarmSpec:
-    return SwarmSpec.model_validate({"swarm": "loc", "compute": "local", "providers": FAKE,
+    return SwarmSpec.model_validate({"swarm": "loc", "compute": "local", "inference": FAKE,
                                      "types": {"w": {**TYPE, **kw}}})
 
 
@@ -51,16 +50,16 @@ def test_compute_defaults_to_hf_jobs_and_keeps_job_fields_required():
     assert spec.compute.kind == "hf-jobs"
     types = {"a": TYPE}
     with pytest.raises(ValueError, match="namespace and bucket required for compute hf-jobs"):
-        SwarmSpec.model_validate({"swarm": "s", "providers": FAKE, "types": types})
+        SwarmSpec.model_validate({"swarm": "s", "inference": FAKE, "types": types})
     with pytest.raises(ValueError, match="bucket required"):
-        SwarmSpec.model_validate({"swarm": "s", "namespace": "n", "providers": FAKE, "types": types})
+        SwarmSpec.model_validate({"swarm": "s", "namespace": "n", "inference": FAKE, "types": types})
 
 
 def test_compute_local_short_and_long_form():
     short = local_spec()
     assert short.compute.kind == "local" and short.namespace == "" and short.bucket == ""
     long = SwarmSpec.model_validate({"swarm": "s", "compute": {"kind": "local"},
-                                     "providers": FAKE, "types": {"a": TYPE}})
+                                     "inference": FAKE, "types": {"a": TYPE}})
     assert long.compute.kind == "local"
     again = SwarmSpec.model_validate(short.model_dump(mode="json"))  # stored form round-trips
     assert again.compute.kind == "local"
@@ -416,14 +415,14 @@ def test_bundle_counts_a_removed_agents_interrupted_turn(tmp_path):
     store.insert_agent("p-w-0009", "loc", "w", 9, time.time())  # a spawned child, then removed
     store.append_events("loc", "p-w-0009", [Event(
         type="turn_interrupted", ts=datetime.now(UTC), agent="p-w-0009", turn_id="t-1",
-        data={"data": {"reason": "terminated", "tokens": {"fake:m": {"input": 10, "output": 2}}}})])
+        data={"data": {"reason": "terminated", "tokens": {"m": {"input": 10, "output": 2}}}})])
     store.delete_agent_rows("p-w-0009")
     localrun.write_bundle(tmp_path / "run", store, spec, started=datetime.now(UTC),
                           ended=datetime.now(UTC), reason="interrupted", url="u",
                           tracker=localrun.Tracker(store, "loc"))
     (gone,) = json.loads((tmp_path / "run" / "run.json").read_text())["removed_agents"]
     assert gone["type"] == "w" and gone["cost_usd"] is not None
-    assert (gone["tokens"]["fake:m"]["input"], gone["tokens"]["fake:m"]["output"]) == (10, 2)
+    assert (gone["tokens"]["m"]["input"], gone["tokens"]["m"]["output"]) == (10, 2)
     store.close()
 
 
@@ -478,7 +477,7 @@ def test_stop_kills_detached_descendants_of_a_stubborn_worker(tmp_path, monkeypa
 async def test_live_budget_put_stops_the_run_and_lands_in_the_bundle(tmp_path):
     spec = SwarmSpec.model_validate({
         "swarm": "budget", "compute": "local", "limits": {"budget_usd": 10},
-        "providers": FAKE, "types": {"w": {**TYPE, "replicas": 0}}})
+        "inference": FAKE, "types": {"w": {**TYPE, "replicas": 0}}})
     out = io.StringIO()
     task = asyncio.create_task(localrun.run_local(localrun.RunOptions(
         spec=spec, data_dir=tmp_path, until=30, refresh=0.1, grace=0, out=out)))

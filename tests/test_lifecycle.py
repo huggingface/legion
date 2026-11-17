@@ -239,7 +239,7 @@ def test_resume_keeps_a_harbor_runs_roster_with_its_live_replicas():
         roster = {f"agent-{i + 1:03d}": t for i, t in enumerate(roles)}
         return SwarmSpec.model_validate({**make_spec().model_dump(mode="json"),
                                          "naming": "consecutive-id", "types": {
-            t: {"harness": "harbor", "model": "fake:m", "replicas": n, "harbor": {
+            t: {"harness": "harbor", "model": "m", "replicas": n, "harbor": {
                 "task": {}, "config": {"task": {}}, "role": t, "roster": roster}}
             for t, n in counts.items()}})
 

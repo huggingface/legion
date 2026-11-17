@@ -14,9 +14,9 @@ the task dataset's README says how to build and run the world (and its bot sandb
 seed the code dataset.
 
 The spec runs one agent per lane. The comment in `agents:` lists the lane sizes of a
-1,000-agent run. For that, also: point `inference.base_url` at your own OpenAI-compatible
-server (it takes one URL, so spreading the load over several servers needs a load balancer in
-front of them); give the world more CPUs (about 28 CPUs and 54 GB at 1,000 agents; 8 CPUs
+1,000-agent run. For that, also: list your own OpenAI-compatible servers in `inference.urls`
+(agents spread over them; they must be reachable from the sandboxes, docs/open-models.md); give
+the world more CPUs (about 28 CPUs and 54 GB at 1,000 agents; 8 CPUs
 serve 10 agents); set `limits.alive` (agents that exist at once) and raise `limits.budget_usd`.
 hf-sandbox quotas at 1,000 sandboxes are untested.
 

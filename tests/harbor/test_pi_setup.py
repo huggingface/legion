@@ -4,8 +4,8 @@ from unittest.mock import AsyncMock
 import pytest
 from harbor.trial.hooks import TrialEvent
 
-from flock.harbor.config import InferenceSettings
 from flock.harbor.harnesses.pi import HF_CHAT_EXTENSION, PI_CONFIG_DIR, attach_pi_setup
+from flock.models import Inference
 
 
 def make_trial():
@@ -20,7 +20,7 @@ def make_trial():
 
 async def test_hf_reasoning_installs_extension_once():
     trial = make_trial()
-    attach_pi_setup(trial, InferenceSettings(reasoning_effort="low"))
+    attach_pi_setup(trial, Inference(reasoning_effort="low"))
     prepare = trial.hooks[TrialEvent.AGENT_START]
     await prepare(None)
     await prepare(None)
@@ -34,7 +34,7 @@ async def test_hf_reasoning_installs_extension_once():
 
 async def test_setup_failure_propagates():
     trial = make_trial()
-    attach_pi_setup(trial, InferenceSettings(reasoning_effort="low"))
+    attach_pi_setup(trial, Inference(reasoning_effort="low"))
     trial.agent.exec_as_agent.side_effect = RuntimeError("setup failed")
     prepare = trial.hooks[TrialEvent.AGENT_START]
     with pytest.raises(RuntimeError, match="setup failed"):
@@ -47,13 +47,13 @@ async def test_setup_failure_propagates():
     [
         {"reasoning_effort": None},
         {"reasoning_effort": "off"},
-        {"base_url": "https://api.example.com/v1"},
-        {"base_url": "https://router.huggingface.co.example.com/v1"},
+        {"urls": ["https://api.example.com/v1"]},
+        {"urls": ["https://router.huggingface.co.example.com/v1"]},
     ],
 )
 def test_other_connections_need_no_extension(overrides):
     trial = make_trial()
-    inference = InferenceSettings(**{"reasoning_effort": "low", **overrides})
+    inference = Inference(**{"reasoning_effort": "low", **overrides})
     attach_pi_setup(trial, inference)
     assert not trial.hooks
 

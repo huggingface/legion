@@ -44,7 +44,7 @@ def test_loop_fields_and_the_while_alias_round_trip():
     ({"prompt": "x", "while": {"rounds": 3}}, "Extra inputs"),
     ({"prompt": "x", "final": {"reserve_usd": 1}}, "final needs prompt"),
     ({"prompt": "x", "final": {"prompt": "f", "reserve_usd": -1}}, ">= 0"),
-    ({"prompt": "x", "while": {"agent_usd": {"glm": 2.1}}}, "no entry for model 'fake:m'"),
+    ({"prompt": "x", "while": {"agent_usd": {"glm": 2.1}}}, "no entry for model 'm'"),
     ({"prompt": "x", "wake": {"min_gap": "soon"}}, "bad duration"),
     ({"prompt": "x", "wake": {"window": "0s"}}, "window must be a duration > 0"),
     ({"prompt": "x", "wake": {"max": -1}}, ">= 0"),

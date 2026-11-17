@@ -7,10 +7,12 @@ is expressed here. Change it deliberately and update the design doc.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import re
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from typing import Any, Literal, NamedTuple
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
@@ -104,12 +106,9 @@ class TypeHealth(StrEnum):
 
 AGENT_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*-\d{4,}$")
 TYPE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
-# Provider names prefix model strings ("hf:Qwen/..."), so no dots and no colons. A model string
-# whose prefix does not look like this names no provider.
-PROVIDER_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 TOOLS_VERSION_RE = re.compile(r"^[0-9a-f]{16}$")
-SELF_HOSTED_PRICING = [0.0, 0.0, 0.0]
+ZERO_PRICING = [0.0, 0.0, 0.0]  # a type without `pricing`: its usage costs $0
 
 Reasoning = Literal["off", "low", "medium", "high"]
 # `reasoning` -> OpenAI `reasoning.effort`.
@@ -122,122 +121,192 @@ def _pricing_row(v: list[float], where: str) -> list[float]:
     return [float(x) for x in v]
 
 
-class ProviderSpec(BaseModel):
-    """Where a model is served (design.md 'Providers').
+# --------------------------------------------------------------------------- inference (docs/open-models.md)
+
+HF_ROUTER_URL = "https://router.huggingface.co/v1"
+# `hf_router.provider` values that let the router pick the provider per request
+ROUTER_POLICIES = ("fastest", "cheapest", "preferred")
+# What a Trial gets for servers that take no key: Pi needs a key reference all the same
+NO_KEY_ENV, NO_KEY = "FLOCK_INFERENCE_KEY", "none"
+_ROUTER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+class HFRouter(BaseModel):
+    """`inference.hf_router`: the HF router, sent `<model>:<provider>`."""
+
+    model_config = {"extra": "forbid"}
+
+    # A provider (`deepinfra`), or a selection policy: `fastest` (the router's default),
+    # `cheapest` or `preferred` (your order in the Hub settings). None: the router's default.
+    provider: str | None = None
+    bill_to: str | None = None  # an org the router bills instead of the key's owner (X-HF-Bill-To)
+
+    @field_validator("provider", "bill_to")
+    @classmethod
+    def _name(cls, v: str | None) -> str | None:
+        if v is not None and not _ROUTER_NAME_RE.match(v):
+            raise ValueError(f"{v!r} must be a name, e.g. deepinfra or huggingface")
+        return v
+
+    @property
+    def policy(self) -> bool:
+        """The router picks the provider per request: no provider is named."""
+        return self.provider is None or self.provider in ROUTER_POLICIES
+
+
+class Inference(BaseModel):
+    """Where a model runs (design.md 'Inference'): the HF router (`hf_router`, the default) or
+    OpenAI-compatible servers you run (`urls`), plus settings for either. The same block in a
+    Harbor spec (the run's, a role's) and a swarm spec (the swarm's, a type's).
 
     `api_key_env` names a secret / env var; the value is never in the spec. The controller
-    sends that secret to the provider's jobs and uses it for preflight; the worker hands it to
-    the harness."""
+    sends that secret to the workers and uses it for its checks; the worker hands it to the
+    harness."""
 
-    type: Literal["openai_compat", "anthropic"]
-    base_url: str | None = None  # openai_compat: required, ends in /v1; anthropic: API root
-    # Several servers of one model (openai_compat): preflight probes each and health scrapes each
-    # one's metrics; agents call `base_url`, which defaults to the first.
-    base_urls: list[str] | None = None
-    api_key_env: str
-    self_hosted: bool = False  # price defaults to [0, 0, 0]; real cost is the GPU job's time
-    # Max agents of this swarm on this provider that may be in a turn at once. Enforced at
-    # prompt admission by the controller (FLOCK_MAX_WORKING_ENFORCE=0: report only).
-    max_working: int | None = None
-    pricing: dict[str, list[float]] = Field(default_factory=dict)  # model id ("*" = any) -> row
-    timeout_s: float | None = None  # passthrough to the harness / preflight
-    max_retries: int | None = None  # passthrough to the harness
-    # How the key is sent. `anthropic` providers: "x-api-key" (default) or "bearer"
-    # (`Authorization: Bearer`), for gateways and proxies that only take a bearer token. `openai_compat` is always bearer.
-    auth: Literal["x-api-key", "bearer"] | None = None
-    # Scrape `<server root>/metrics` (vLLM Prometheus text) of each base URL into the swarm's
-    # health snapshots: num_requests_waiting / running, KV cache usage (docs/health.md).
+    model_config = {"extra": "forbid"}
+
+    hf_router: HFRouter | None = None
+    # Servers (`.../v1`) that all serve the type's `model`; each agent calls one of them
+    urls: list[str] | None = None
+    api_key_env: str | None = None  # default: HF_TOKEN for hf_router; no key for urls
+    # Max agents of this swarm on these endpoints in a turn at once. Enforced at prompt
+    # admission by the controller (FLOCK_MAX_WORKING_ENFORCE=0: report only).
+    max_working: int | None = Field(default=None, ge=1)
+    context_window: int | None = Field(default=None, ge=1)  # tokens, when the server reports none
+    # urls only: scrape each server's vLLM `/metrics` into the health snapshots (docs/health.md)
     metrics: bool = False
+    # Pi's `--thinking` level; None: Pi's default
+    reasoning_effort: Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"] | None = None
 
-    @field_validator("base_urls", mode="before")
+    @field_validator("urls", mode="before")
     @classmethod
     def _url_list(cls, v: Any) -> Any:
-        """A comma-separated string is a list (`base_urls: ${OPENAI_BASE_URLS:-}`); "" is none."""
+        """A comma-separated string is a list (`urls: ${VLLM_URLS}`)."""
         if isinstance(v, str):
-            return [u.strip() for u in v.split(",") if u.strip()] or None
+            return [u.strip() for u in v.split(",") if u.strip()]
         return v
+
+    @field_validator("urls")
+    @classmethod
+    def _urls(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return v
+        out = []
+        for u in v:
+            url = urlsplit(u.strip())
+            if (url.scheme not in ("http", "https") or not url.hostname or url.username
+                    or url.password or url.query or url.fragment):
+                raise ValueError(f"{u!r} must be an HTTP(S) URL without credentials, e.g. "
+                                 "http://10.0.0.5:8000/v1")
+            out.append(u.strip().rstrip("/"))
+        if not out:
+            raise ValueError("urls must list at least one URL")
+        if len(set(out)) != len(out):
+            raise ValueError("urls must not repeat a URL")
+        return out
 
     @field_validator("api_key_env")
     @classmethod
-    def _env_name(cls, v: str) -> str:
-        if not ENV_NAME_RE.match(v):
-            raise ValueError(f"api_key_env {v!r} must be an env var name (the key itself never goes in the spec)")
-        return v
-
-    @field_validator("pricing")
-    @classmethod
-    def _rows(cls, v: dict[str, list[float]]) -> dict[str, list[float]]:
-        return {k: _pricing_row(row, f"pricing[{k!r}]") for k, row in v.items()}
-
-    @field_validator("max_working")
-    @classmethod
-    def _positive(cls, v: int | None) -> int | None:
-        if v is not None and v < 1:
-            raise ValueError("max_working must be >= 1")
+    def _env_name(cls, v: str | None) -> str | None:
+        if v is not None and not ENV_NAME_RE.match(v):
+            raise ValueError(f"api_key_env {v!r} must be an env var name (the key itself never "
+                             "goes in the spec)")
         return v
 
     @model_validator(mode="after")
-    def _url(self) -> ProviderSpec:
-        if self.base_urls is not None:
-            urls = [u.strip().rstrip("/") for u in self.base_urls if u and u.strip()]
-            if not urls:
-                raise ValueError("base_urls must list at least one URL")
-            if len(set(urls)) != len(urls):
-                raise ValueError("base_urls must not repeat a URL")
-            if self.type != "openai_compat":
-                raise ValueError("base_urls is for openai_compat providers")
-            self.base_urls = urls
-            if self.base_url is None:
-                self.base_url = urls[0]
-        if self.type == "openai_compat" and not self.base_url:
-            raise ValueError("base_url is required for type openai_compat (e.g. https://router.huggingface.co/v1)")
-        if self.type == "openai_compat" and self.auth == "x-api-key":
-            raise ValueError("auth: x-api-key is for anthropic providers; openai_compat always sends a bearer token")
-        if self.base_url is not None:
-            self.base_url = self.base_url.rstrip("/")
+    def _one(self) -> Inference:
+        if self.hf_router is not None and self.urls is not None:
+            raise ValueError("set hf_router or urls, not both")
+        if self.urls is None and self.hf_router is None:
+            self.hf_router = HFRouter()
+        if self.metrics and self.urls is None:
+            raise ValueError("metrics scrapes your servers' vLLM metrics: it needs urls")
         return self
+
+    def held(self) -> Inference:
+        """The block as workers (its key) and Trials (endpoints, Pi's config) hold it: without
+        the controller's `max_working`."""
+        return self.model_copy(update={"max_working": None})
 
     @property
     def endpoints(self) -> list[str]:
-        """The servers to spread agents over: `base_urls`, else `[base_url]`."""
-        return list(self.base_urls) if self.base_urls else ([self.base_url] if self.base_url else [])
+        """The servers' base URLs, as written: `urls`, or the router's."""
+        return list(self.urls) if self.urls else [HF_ROUTER_URL]
+
+    @property
+    def key_env(self) -> str | None:
+        """The key's env name: `api_key_env`, else HF_TOKEN for the router; None: no key."""
+        return self.api_key_env or ("HF_TOKEN" if self.hf_router is not None else None)
+
+    @property
+    def headers(self) -> dict[str, str]:
+        """Request headers besides the key: the router's bill-to org."""
+        r = self.hf_router
+        return {"X-HF-Bill-To": r.bill_to} if r is not None and r.bill_to else {}
+
+    def request_model(self, model: str) -> str:
+        """What the servers are sent as `model`: `<model>:<provider>` for the router with a
+        provider or policy set, else `model`."""
+        r = self.hf_router
+        return f"{model}:{r.provider}" if r is not None and r.provider else model
+
+    def endpoint_for(self, agent: str) -> str:
+        """The server `agent` calls: rendezvous hashing over `endpoints`. Stable for a given list,
+        spreads agents roughly evenly, and a URL added or removed moves only the agents that
+        must move."""
+        return max(self.endpoints, key=lambda u: hashlib.sha256(f"{agent}\n{u}".encode()).digest())
+
+    def describe(self) -> str:
+        """One line for status: `hf_router deepinfra` or the URLs."""
+        if self.hf_router is not None:
+            return f"hf_router {self.hf_router.provider or 'fastest'}" + (
+                f", billed to {self.hf_router.bill_to}" if self.hf_router.bill_to else "")
+        return "urls " + ", ".join(self.endpoints)
 
 
-class ModelSpec(BaseModel):
-    """An alias under `models:`: a provider-prefixed model plus per-model settings."""
+def loopback_url(url: str) -> bool:
+    """The URL names the machine it is used on: `localhost` or a loopback address."""
+    host = urlsplit(url).hostname or ""
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
-    model: str  # "<provider>:<model id>"
-    reasoning: Reasoning | None = None
-    pricing: list[float] | None = None  # overrides the provider's pricing for this alias
 
-    @model_validator(mode="before")
-    @classmethod
-    def _no_request_fields(cls, v: Any) -> Any:
-        """Harbor's Pi sends no raw request-body fields, so a model cannot carry any."""
-        if isinstance(v, dict) and "extra" in v:
-            raise ValueError("`extra` is not supported: flock sends no raw request-body fields "
-                             "(Harbor's Pi cannot). Set request defaults such as "
-                             "chat_template_kwargs on the server instead (docs/open-models.md)")
-        return v
-
-    @field_validator("pricing")
-    @classmethod
-    def _row(cls, v: list[float] | None) -> list[float] | None:
-        return None if v is None else _pricing_row(v, "pricing")
+def private_url(url: str) -> bool:
+    """The URL names this machine or a private network (an RFC 1918 or link-local address)."""
+    try:
+        return loopback_url(url) or ipaddress.ip_address(urlsplit(url).hostname or "").is_private
+    except ValueError:
+        return False
 
 
 class ResolvedModel(BaseModel):
     """A type's model after resolution, pinned into the stored spec at apply time."""
 
+    # The inference block it runs on, which admission (`max_working`) and status count by:
+    # `inference` (the swarm's) or `types.<type>.inference` (the type's own)
     provider_name: str
-    provider: ProviderSpec
-    model_id: str  # what the harness sends as `model`
+    inference: Inference
+    model_id: str  # the type's `model`: what flock prices the usage under
     reasoning: Reasoning | None = None
     pricing: list[float]  # [input, output, cached] USD per 1M tokens, pinned
+    # The window the servers serve the model with, from GET /v1/models (vLLM's max_model_len,
+    # the router provider's context_length; under a router policy the smallest among the
+    # providers with tools), else `inference.context_window`. Pinned by the controller's apply
+    # (controller/inference.py); None before that.
+    context_window: int | None = None
 
     @property
     def qualified(self) -> str:
         return f"{self.provider_name}:{self.model_id}"
+
+    @property
+    def request_model(self) -> str:
+        """What the harness sends as `model`."""
+        return self.inference.request_model(self.model_id)
 
 
 # --------------------------------------------------------------------------- comms (docs/comms.md)
@@ -701,10 +770,13 @@ class TypeSpec(BaseModel):
     """One agent type inside a swarm. See design.md 'Spec'."""
 
     harness: Harness
-    # Resolution order (design.md 'Providers'): an alias under `models:`, else "<provider>:<id>"
-    # with the prefix under `providers:`; SwarmSpec refuses a model that names no provider.
-    model: str
-    reasoning: Reasoning | None = None  # overrides the alias's reasoning
+    # A Hub id; with `urls`, the name the servers serve it under (design.md 'Inference')
+    model: str = Field(min_length=1)
+    # Its own endpoints (a whole block); None: the swarm's `inference`
+    inference: Inference | None = None
+    # [input, output, cached] USD per 1M tokens of `model`; None: $0
+    pricing: list[float] | None = None
+    reasoning: Reasoning | None = None
     image: str | None = None  # None -> default worker image
     system_prompt_file: str | None = None  # written into the workdir as AGENTS.md
     # The file's contents, inlined by `flock launch` (the controller and workers cannot
@@ -788,8 +860,13 @@ class TypeSpec(BaseModel):
 
     @property
     def harness_model(self) -> str:
-        """The model id the harness is started with."""
+        """The model id the harness reports usage under (what flock prices)."""
         return self.resolved_model.model_id if self.resolved_model else self.model
+
+    @field_validator("pricing")
+    @classmethod
+    def _price_row(cls, v: list[float] | None) -> list[float] | None:
+        return None if v is None else _pricing_row(v, "pricing")
 
     @property
     def provider_name(self) -> str | None:
@@ -971,9 +1048,9 @@ class SwarmSpec(BaseModel):
     # hf://buckets/<namespace>/<bucket>). Required for compute hf-jobs; optional for compute local.
     namespace: str = ""
     bucket: str = ""
-    providers: dict[str, ProviderSpec] = Field(default_factory=dict)
+    # Where the types' models run (design.md 'Inference'), unless a type sets its own
+    inference: Inference = Field(default_factory=Inference)
     stop_on_success: bool = False
-    models: dict[str, ModelSpec] = Field(default_factory=dict)
     types: dict[str, TypeSpec]
     # The tools folder, relative to the spec file; None: `tools/` next to it.
     # Read by `flock launch` only.
@@ -1001,54 +1078,27 @@ class SwarmSpec(BaseModel):
             raise ValueError("tools_version is written by `flock launch` (16 hex digits)")
         return v
 
-    @field_validator("providers")
-    @classmethod
-    def _valid_providers(cls, v: dict[str, ProviderSpec]) -> dict[str, ProviderSpec]:
-        for name in v:
-            if not PROVIDER_NAME_RE.match(name):
-                raise ValueError(f"providers.{name}: name must be lowercase [a-z0-9_-], starting with a letter")
-        return v
-
     @model_validator(mode="after")
     def _resolve_models(self) -> SwarmSpec:
-        """Apply-time checks and pinning: every alias and provider prefix exists, every
-        provider-backed model has a price, harness and provider speak the same API. The price
-        used is written into the spec (`resolved_model.pricing`, and the self-hosted default
-        into the provider's `pricing`), so the stored spec carries what cost is derived from."""
+        """Apply-time pinning: each type's inference block and price go into the spec
+        (`resolved_model`), so the stored spec carries what admission and cost derive from. The
+        context window the controller pinned stays while the block (but `max_working`, the
+        controller's) and the model are the same."""
         if self.stop_on_success and not any(
                 ts.harbor and ts.harbor.config.get("success_check") for ts in self.types.values()):
             raise ValueError("stop_on_success requires a Harbor success_check")
-        for alias, m in self.models.items():
-            if ":" in alias:
-                raise ValueError(f"models.{alias}: an alias cannot contain ':'")
-            prefix, sep, model_id = m.model.partition(":")
-            if not sep or not prefix or not model_id:
-                raise ValueError(f"models.{alias}.model: {m.model!r} must look like '<provider>:<model id>'")
-            if prefix not in self.providers:
-                raise ValueError(f"models.{alias}.model: unknown provider {prefix!r} in {m.model!r}; "
-                                 f"providers: {sorted(self.providers)}")
         for type_name, ts in self.types.items():
-            ts.resolved_model = resolve_model(self, ts, type_name=type_name)
-            r = ts.resolved_model
-            if r is None:
-                raise ValueError(
-                    f"types.{type_name}.model: harness {ts.harness.value!r} needs a provider-backed "
-                    f"model ('<provider>:<model id>' or an alias); {ts.model!r} names no provider")
-            want = HARNESSES[ts.harness].provider_type
-            if r.provider.type != want:
-                raise ValueError(
-                    f"types.{type_name}.model: harness {ts.harness.value!r} cannot use provider "
-                    f"{r.provider_name!r} (type {r.provider.type}); {ts.harness.value} needs a "
-                    f"provider of type {want}")
-            p = self.providers[r.provider_name]
-            if p.self_hosted and r.model_id not in p.pricing and "*" not in p.pricing:
-                p.pricing[r.model_id] = list(SELF_HOSTED_PRICING)  # pin the default
+            old, ts.resolved_model = ts.resolved_model, resolve_model(self, ts, type_name=type_name)
+            new = ts.resolved_model
+            if old is not None and (old.inference.held(), old.model_id) == (
+                    new.inference.held(), new.model_id):
+                new.context_window = old.context_window
         for type_name, ts in self.types.items():
             cap = ts.loop.while_.agent_usd if ts.loop else None
             if isinstance(cap, dict) and agent_cap(ts) is None:
                 raise ValueError(
                     f"types.{type_name}.loop.while.agent_usd: no entry for model {ts.model!r} "
-                    f"(keys: {sorted(cap)}); key it by the type's model alias or model id")
+                    f"(keys: {sorted(cap)}); key it by the type's model id")
         return self
 
     @model_validator(mode="after")
@@ -1134,7 +1184,25 @@ class SwarmSpec(BaseModel):
         unknown = set(self.compute.types) - set(self.types)
         if unknown:
             raise ValueError(f"compute.types names unknown types: {sorted(unknown)}")
+        for ts in self.types.values():  # who must reach the servers: the agents (docs/open-models.md)
+            r, backend = ts.resolved_model, ts.harbor and ts.harbor.config.get("environment", {})
+            backend = (backend or {}).get("backend")
+            for url in (r.inference.urls or []) if r else []:
+                if (kind == "hf-jobs" or backend == "hf-sandbox") and private_url(url):
+                    raise ValueError(
+                        f"{r.provider_name}.urls: {url} is this machine or a private network, "
+                        "which HF Sandboxes and HF Jobs workers cannot reach: serve the model at "
+                        "a public URL")
+                if kind == "slurm" and loopback_url(url):
+                    raise ValueError(
+                        f"{r.provider_name}.urls: {url} would be each worker's own node under "
+                        "compute slurm: list the server node's address")
         return self
+
+    def inference_blocks(self) -> dict[str, Inference]:
+        """The inference blocks the types run on, by name (`inference`, `types.<t>.inference`)."""
+        return {ts.resolved_model.provider_name: ts.resolved_model.inference
+                for ts in self.types.values() if ts.resolved_model is not None}
 
     @field_validator("spawn")
     @classmethod
@@ -1153,37 +1221,21 @@ class SwarmSpec(BaseModel):
         return v
 
 
-def resolve_model(spec: SwarmSpec, type_spec: TypeSpec, *, type_name: str = "?") -> ResolvedModel | None:
-    """Resolve a type's `model`: alias under `models:` -> "<provider>:<id>" with the prefix
-    under `providers:`; None when it names no provider. Raises ValueError naming the type
-    and field for an unknown provider prefix or a provider-backed model with no price."""
-    where = f"types.{type_name}.model"
-    alias = spec.models.get(type_spec.model)
-    target = alias.model if alias else type_spec.model
-    prefix, sep, model_id = target.partition(":")
-    if not sep or not PROVIDER_NAME_RE.match(prefix):
-        return None  # names no provider
-    if prefix not in spec.providers:
-        raise ValueError(f"{where}: unknown provider {prefix!r} in {target!r}; declare it under "
-                         f"providers: (known: {sorted(spec.providers)}) or use a model alias")
-    if not model_id:
-        raise ValueError(f"{where}: {target!r} has no model id after '{prefix}:'")
-    provider = spec.providers[prefix]
-    pricing = (alias.pricing if alias else None) or provider.pricing.get(model_id) or provider.pricing.get("*")
-    if pricing is None:
-        if not provider.self_hosted:
-            raise ValueError(
-                f"{where}: no pricing for {target!r}; add providers.{prefix}.pricing"
-                f"[{model_id!r}] = [input, output, cached] (USD per 1M tokens)"
-                + (f" or models.{type_spec.model}.pricing" if alias else "")
-                + f", or mark providers.{prefix} self_hosted")
-        pricing = list(SELF_HOSTED_PRICING)
+def resolve_model(spec: SwarmSpec, type_spec: TypeSpec, *, type_name: str = "?") -> ResolvedModel:
+    """A type's `model` on its inference block (its own, else the swarm's), with its price
+    (`pricing`, else $0). Raises ValueError for a model id the HF router cannot take."""
+    inference = type_spec.inference or spec.inference
+    model = type_spec.model
+    if inference.hf_router is not None and (model.startswith("huggingface/") or ":" in model):
+        raise ValueError(f"types.{type_name}.model: {model!r}: the HF router takes a plain Hub id "
+                         "(e.g. Qwen/Qwen3.8-27B); name the provider in "
+                         "inference.hf_router.provider")
     return ResolvedModel(
-        provider_name=prefix,
-        provider=provider,
-        model_id=model_id,
-        reasoning=type_spec.reasoning or (alias.reasoning if alias else None),
-        pricing=list(pricing),
+        provider_name=f"types.{type_name}.inference" if type_spec.inference else "inference",
+        inference=inference,
+        model_id=model,
+        reasoning=type_spec.reasoning,
+        pricing=list(type_spec.pricing or ZERO_PRICING),
     )
 
 
@@ -1842,7 +1894,7 @@ class AgentStatus(BaseModel):
     type: str
     harness: Harness
     model: str
-    provider: str | None = None  # provider name when the model is provider-backed
+    provider: str | None = None  # its inference block's name (ResolvedModel.provider_name)
     labels: dict[str, str]
     state: AgentState
     idle_since: datetime | None = None
@@ -1923,10 +1975,13 @@ class TypeStatus(BaseModel):
 
 
 class ProviderStatus(BaseModel):
-    name: str
-    type: str
-    self_hosted: bool
-    types: list[str]  # agent types using this provider
+    """An inference block the types run on (`SwarmSpec.inference_blocks`)."""
+
+    name: str  # `inference`, or `types.<t>.inference` for a type's own
+    endpoint: str  # Inference.describe(): `hf_router deepinfra` or the URLs
+    types: list[str]  # agent types on it
+    # each of their models -> the context window pinned at apply (None: not pinned yet)
+    models: dict[str, int | None] = Field(default_factory=dict)
     working: int  # agents of those types in a turn now (from heartbeats)
     max_working: int | None = None  # enforced at prompt admission unless FLOCK_MAX_WORKING_ENFORCE=0
     # Agents with turns but zero reported tokens: the server sends no usage, cost is unknown.
@@ -1967,8 +2022,8 @@ class LoopRequest(BaseModel):
 class PreflightResult(BaseModel):
     """One provider-backed model probed with a tool call and a follow-up turn."""
 
-    model: str  # "<provider>:<model id>"
-    provider: str
+    model: str  # "<inference block>:<model id>" (ResolvedModel.qualified)
+    provider: str  # the inference block's name
     types: list[str]
     # "responses" (openai_compat) | "messages" (anthropic) |
     # "chat_completions" (openai_compat; Harbor's Pi)

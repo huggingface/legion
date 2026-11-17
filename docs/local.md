@@ -28,17 +28,19 @@ has more; experiments/mini-swarm/spec.yaml adds a Space board and a loop, on hf-
 
 ```yaml
 name: hello
-model: huggingface/moonshotai/Kimi-K2.5
-inference: {base_url: https://router.huggingface.co/v1, api_key_env: HF_TOKEN,
-            api_format: openai_chat_completions}
+model: moonshotai/Kimi-K2.5             # on the HF router (the default inference)
 task:
   repo: https://huggingface.co/datasets/harborframework/terminal-bench-2.1
   dataset: terminal-bench-2.1@2.1.0
   selector: regex-log
   revision: 3e235dff6880252a587fa479c09bcb1e16edf2eb
-agents: {count: 2}
-environment: {backend: docker}
-limits: {run_timeout_seconds: 900, agent_max_turns: 30}
+agents:
+  count: 2
+environment:
+  backend: docker
+limits:
+  run_timeout_seconds: 900
+  agent_max_turns: 30
 ```
 
 `pricing: [in, out, cached]` (USD per 1M tokens) gives the run a cost; Harbor reports none for

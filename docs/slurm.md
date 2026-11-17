@@ -123,7 +123,8 @@ sbatch --parsable [-p <partition>] [-A <account>] -c <cpus> --mem=<mem> --time=<
 ```
 
 The env file holds `WORKER_ID WORKER_INCARNATION SWARM TYPE DEADLINE DRAIN_WINDOW BUCKET RUN
-FLOCK_URL WORK_ROOT PYTHONUNBUFFERED`, the type's `env`, and when configured
+FLOCK_URL WORK_ROOT PYTHONUNBUFFERED INFERENCE_REV` (the inference block the job holds, read back
+when a restored controller re-adopts it), the type's `env`, and when configured
 `FLOCK_CTL_HOST_FILE FLOCK_VENV FLOCK_SECRETS_FILE FLOCK_CONTAINER_IMAGE` (and, with
 `container_root`, `HOME HF_HOME TMPDIR`). A comment names the secrets the worker
 expects from the cluster's secrets file: `FLOCK_TOKEN HF_TOKEN` plus the launch's (provider
@@ -195,7 +196,9 @@ compute:
   max_mem: null              # FLOCK_SLURM_MAX_MEM (a profile key)
   worker_dead_after: 180s    # no env; also worker_unknown_after, crash_backoff (docs/live.md)
   types:                     # per type: partition, cpus, mem, time, container_root
-    interviewer: {cpus: 2, mem: 3800M}
+    interviewer:
+      cpus: 2
+      mem: 3800M
 ```
 
 Precedence: built-in defaults (`cpus` 4, `mem` 7G, `time` 29:00:00; no partition, no node
@@ -221,7 +224,10 @@ types:
       sync_exclude: [data/raw/] # FLOCK_SYNC_EXCLUDE: added to the default excludes
       restore_batch: 1000       # FLOCK_RESTORE_BATCH: files per download batch
       restore_threads: 4        # FLOCK_RESTORE_THREADS: one agent's batches in parallel
-      memory: {rotate: null, drain: null, preempt: null}
+      memory:
+        rotate: null
+        drain: null
+        preempt: null
                                 # FLOCK_MEM_ROTATE, _DRAIN, _PREEMPT
 ```
 
@@ -231,6 +237,16 @@ an older configuration stand out.
 
 The controller: `FLOCK_COMPUTE=slurm`. An unknown `FLOCK_COMPUTE` stops it at
 start (it never falls back to HF Jobs); the first log line names the kind and the client.
+
+## Results
+
+A Harbor worker's `WORK_ROOT` is node-local (`/tmp/flock/<worker id>/work`) and goes with its
+job, so `worker.sbatch` sets `FLOCK_RESULTS_DIR=<run dir>/results` and what a run is graded on
+lands on the shared disk: each Trial's `result.json`, `config.json` and `verifier/` as the Trial
+ends, in `results/<swarm>/<agent>/trials/<trial>/`, and the resources' exports (the board's
+`board.jsonl` and `channels.json`) as the worker exits, in `results/<swarm>/<worker id>/resources/`.
+A Trial is verified when its worker drains (`flock stop --release`, or the end of its lifetime):
+stop a run that way before reading its rewards.
 
 ## Job states
 

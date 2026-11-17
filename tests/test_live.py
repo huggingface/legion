@@ -39,17 +39,16 @@ def mul(a: int, b: int) -> int:
     """Multiply two integers."""
     return a * b
 '''
-PROVIDERS = {"gpu": {"type": "openai_compat", "base_url": "http://gpu.invalid/v1",
-                     "api_key_env": "K", "self_hosted": True}}
+GPU = {"urls": ["http://gpu.invalid/v1"], "api_key_env": "K"}
 
 
 def raw(**types) -> dict:
-    base = {"researcher": {**HB, "model": "gpu:m", "replicas": 2,
+    base = {"researcher": {**HB, "model": "m", "replicas": 2,
                            "agents_per_worker": 2},
-            "calc": {**HB, "model": "gpu:m", "replicas": 2, "agents_per_worker": 2,
+            "calc": {**HB, "model": "m", "replicas": 2, "agents_per_worker": 2,
                      "tools": ["add"]}}
     return {"swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/sh",
-            "providers": PROVIDERS, "types": {**base, **types}}
+            "inference": GPU, "types": {**base, **types}}
 
 
 # --------------------------------------------------------------------------- the diff
@@ -139,7 +138,8 @@ async def test_heartbeat_carries_a_changed_type_spec(client, store, tick, tmp_pa
     spec = await applied(client, tmp_path, tick)
     w = next(w for w in store.list_workers("demo") if w["type"] == "calc")
     store.update_worker(w["id"], job_id="job-1", incarnation="inc-1")
-    rev = type_spec_rev(spec.types["calc"])
+    stored = lambda: store.get_swarm("demo")["spec"].types["calc"]  # with its pinned context window
+    rev = type_spec_rev(stored())
 
     async def beat(rev: str | None, agents=("calc-0000", "calc-0001")) -> dict:
         hb = {"worker": w["id"], "deadline": "2026-10-15T09:00:00Z", "spec_rev": rev,
@@ -156,7 +156,7 @@ async def test_heartbeat_carries_a_changed_type_spec(client, store, tick, tmp_pa
     assert (await client.put("/swarms/demo", json=spec.model_dump(mode="json"))).status_code == 200
     out = await beat(rev)
     assert out["type_spec"]["system_prompt"] == "You are calc v2."
-    assert out["spec_rev"] == type_spec_rev(spec.types["calc"]) != rev
+    assert out["spec_rev"] == type_spec_rev(stored()) != rev
     assert "type_spec" not in await beat(out["spec_rev"])
 
 
@@ -214,13 +214,13 @@ def _experiment(root: Path, *, replicas: int = 2, prompt: str = "You are a resea
     (root / "prompts").mkdir(parents=True, exist_ok=True)
     (root / "prompts" / "system.md").write_text(prompt)
     _tools(root, tools)
-    t = {**HB, "model": "p:m", "replicas": replicas,
+    t = {**HB, "model": "m", "replicas": replicas,
          "agents_per_worker": 2, "system_prompt_file": "prompts/system.md", "tools": ["add"],
          **type_extra}
     f = root / "spec.yaml"
     f.write_text(yaml.safe_dump({"swarm": "demo", "namespace": "ns",
                                  "bucket": "hf://buckets/ns/sh", "types": {"researcher": t},
-                                 "providers": {"p": PROVIDERS["gpu"]}}))
+                                 "inference": GPU}))
     return f
 
 
@@ -257,6 +257,24 @@ def test_cli_update_prints_what_changed_and_refuses_cleanly(tmp_path, monkeypatc
     assert store.get_swarm("demo")["spec"] == applied  # nothing was applied
 
 
+def test_cli_update_probes_a_model_sent_somewhere_new(tmp_path, monkeypatch, app, tick):
+    """An update probes again when what a model is sent to changes (new urls under the same
+    block name), not only when a model or block is added."""
+    wire(monkeypatch, app)
+    exp = tmp_path / "exp"
+    f = _experiment(exp)
+    assert runner.invoke(cli.app, ["launch", str(f), "--skip-preflight"]).exit_code == 0
+    tick()
+    # --strict: a probe without the key (unverified) refuses the update, so it shows when one ran
+    r = runner.invoke(cli.app, ["update", str(exp), "--strict"])  # the same spec: no probe
+    assert r.exit_code == 0 and "preflight" not in r.output, r.output
+    d = yaml.safe_load(f.read_text())
+    d["inference"]["urls"] = ["http://gpu2.invalid/v1"]
+    f.write_text(yaml.safe_dump(d))
+    r = runner.invoke(cli.app, ["update", str(exp), "--strict"])
+    assert r.exit_code == 1 and "preflight inference:m: unverified" in r.output, r.output
+
+
 def test_cli_update_keeps_live_replicas_and_checks(tmp_path, monkeypatch, app, store, tick):
     wire(monkeypatch, app)
     exp = tmp_path / "exp"
@@ -267,7 +285,7 @@ def test_cli_update_keeps_live_replicas_and_checks(tmp_path, monkeypatch, app, s
     before = store.get_swarm("demo")["spec"]
     r = runner.invoke(cli.app, ["update", str(exp), "--check"])
     assert r.exit_code == 0, r.output
-    assert r.output.splitlines() == ["preflight p:m: unverified",
+    assert r.output.splitlines() == ["preflight inference:m: unverified",
                                      "researcher: replicas kept (spec 2, live 4)",
                                      "prompts changed: researcher (system_prompt)",
                                      "check ok: nothing was applied"]
@@ -296,7 +314,7 @@ def test_cli_update_keeps_live_replicas_and_checks(tmp_path, monkeypatch, app, s
 
 
 async def test_put_replicas_keep_and_dry_run(client, store):
-    spec = SwarmSpec.model_validate(raw(calc={**HB, "model": "gpu:m", "replicas": 2,
+    spec = SwarmSpec.model_validate(raw(calc={**HB, "model": "m", "replicas": 2,
                                               "agents_per_worker": 2}))
     assert (await client.put("/swarms/demo", json=spec.model_dump(mode="json"))).status_code == 200
     spec.types["calc"].replicas = 5

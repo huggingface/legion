@@ -22,14 +22,15 @@ stream is tailed by byte offset.
   controller asks `squeue -n <name>` and shows `slurm_state` (`RUNNING`, `PENDING`, ...,
   `absent` when no such job is queued, `unknown` when squeue is missing, fails or times out),
   so a world waiting for a node is told apart from a crash.
-- **vLLM.** With `providers.<p>.metrics: true`, each base URL's server root `/metrics`
-  (Prometheus text): `providers` sums `waiting` and `running` over servers with the highest
+- **vLLM.** With `inference.metrics: true` (a type's own block too), each URL's server root
+  `/metrics` (Prometheus text): `providers` (by block name: `inference`, `types.<t>.inference`)
+  sums `waiting` and `running` over servers with the highest
   `kv` (`gpu_cache_usage_perc` or `kv_cache_usage_perc`); `provider_servers` has
   each server (`host:port`): `up`, its queues, or `up: false`, the `error` and `fails` (failed
   scrapes in a row; `dead` from 2 on). Each agent's heartbeat names the server it is pinned to
-  (`endpoint`, `pick_endpoint`), so a server counts its `agents`; a dead one lists them
+  (`endpoint`, `Inference.endpoint_for`), so a server counts its `agents`; a dead one lists them
   (`dead_agents`, first 20) and raises `dead_server` (`provider_down` when every server of the
-  provider is dead). Moving agents off a dead server is manual: drop it from `base_urls` and `flock update`.
+  block is dead). Moving agents off a dead server is manual: drop it from `urls` and `flock update`.
 
 ## Snapshot body
 

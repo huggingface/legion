@@ -24,7 +24,7 @@ loop:                          # a Harbor spec's run loop; a role's own `agents.
     until: 2h                # wall time since the loop started (type-wide); or a clock time: 2026-10-28T20:00Z
     max_rounds: 400          # loop prompts per agent
     budget_usd: 12           # the type's total cost (type-wide)
-    agent_usd: 0.05          # per agent; or a map by model alias / id: {deepseek: 3.60, glm: 2.10}
+    agent_usd: 0.05          # per agent; alternatively use a mapping by model id (see below)
   final:                     # optional: one last prompt per live agent once the loop stops
     prompt: "Final round: submit your best result with submit_final."
     # or prompt_file: prompts/final.md
@@ -294,7 +294,10 @@ budget stop is in effect.
 loop:
   every: turn_end
   prompt: "Claim a task and work on it. Repeat until the result says you are done."
-  while: {until: 2h, max_rounds: 400, budget_usd: 12}
+  while:
+    until: 2h
+    max_rounds: 400
+    budget_usd: 12
 ```
 
 Each agent gets the next round as soon as its turn completes, never a stacked prompt
@@ -305,15 +308,28 @@ Each agent gets the next round as soon as its turn completes, never a stacked pr
 ```yaml
 agents:
   roles:                                    # a Harbor spec; models are the run's model ids
-    ds: {count: 3, model: deepseek}
-    glm: {count: 2, model: glm}
+    ds:
+      count: 3
+      model: deepseek
+    glm:
+      count: 2
+      model: glm
 loop:
   prompt_file: prompts/round.md             # {round} {elapsed} {wall} {spend} {cap} {why} {last_summary} {workspace}
   every: 120s                               # an idle agent's next round
   on: [message_board.mention]               # a board mention wakes it early (2 s debounce)
-  while: {until: 2h, max_rounds: 200, agent_usd: {deepseek: 3.60, glm: 2.10}}
-  final: {prompt_file: prompts/final.md, reserve_usd: 0.60}
-limits: {agent_max_turns: 14, budget_usd: 15}   # model calls per prompt; the swarm's budget
+  while:
+    until: 2h
+    max_rounds: 200
+    agent_usd:
+      deepseek: 3.60
+      glm: 2.10
+  final:
+    prompt_file: prompts/final.md
+    reserve_usd: 0.60
+limits:
+  agent_max_turns: 14                     # model calls per prompt
+  budget_usd: 15                          # the swarm's budget
 ```
 
 Final-round spend is exempt from `agent_usd` and bounded only by the reserve and the hard stop.
@@ -330,7 +346,7 @@ threshold).
 ## Stop on task success
 
 Set `stop_on_success: true` in a Harbor experiment and provide an operator-owned
-`success_check: {service: puzzle, command: ...}`. The command runs in a trusted
+a `success_check` specifying the sidecar service and command. The command runs in a trusted
 Docker/Podman sidecar (not `main`) and returns JSON with a boolean `success` and
 optional `evidence`. Commands must be read-only, bounded, and independent of agent-owned files.
 A task with no check cannot use this policy.
@@ -339,7 +355,8 @@ For a task whose `puzzle` sidecar has Python installed and serves its authoritat
 at `http://127.0.0.1:8000/state`, add these fields to the experiment YAML:
 
 ```yaml
-environment: {backend: podman}
+environment:
+  backend: podman
 stop_on_success: true
 success_check:
   service: puzzle

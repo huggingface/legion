@@ -11,13 +11,35 @@ it with the `spawn.*` tools ("Harbor agents" below). Design: [design.md](design.
 ```yaml
 agents:
   roles:                                 # a Harbor spec's roles become flock types
-    leader:  {count: 1, workers: {initial: 1, max_extra: 0}}
-    analyst: {count: 0, workers: {initial: 1, max_extra: 3}}
-    helper:  {count: 0, workers: {initial: 0, max_extra: 2}}
+    leader:
+      count: 1
+      workers:
+        initial: 1
+        max_extra: 0
+    analyst:
+      count: 0
+      workers:
+        initial: 1
+        max_extra: 3
+    helper:
+      count: 0
+      workers:
+        initial: 0
+        max_extra: 2
 spawn:                                   # run policy, separate from what a role is
-  leader:  {types: {analyst: 3, helper: 2}, depth: 2}   # per-type caps, total 5
-  analyst: {types: [helper], max: 3, depth: 1}         # list + one total cap
-limits:  {alive: 500, spawned_total: 2000, budget_usd: 300}   # optional
+  leader:                                # per-type caps, total 5
+    types:
+      analyst: 3
+      helper: 2
+    depth: 2
+  analyst:                               # list + one total cap
+    types: [helper]
+    max: 3
+    depth: 1
+limits:                                  # optional
+  alive: 500
+  spawned_total: 2000
+  budget_usd: 300
 ```
 
 | Field | Default | Meaning |
@@ -75,9 +97,17 @@ interviewer, a one-shot helper.
 
 ```yaml
 types:
-  interviewer: {replicas: 0, ephemeral: true, workers: {initial: 0, max_extra: 2}, ...}
+  interviewer:
+    replicas: 0
+    ephemeral: true
+    workers:
+      initial: 0
+      max_extra: 2
+    # ...
 spawn:
-  dev: {types: [interviewer], max: 2}
+  dev:
+    types: [interviewer]
+    max: 2
 ```
 
 A Harbor spec (flock.harbor.spec) does not expose `ephemeral` yet: it is a key of the compiled
@@ -123,7 +153,9 @@ missing from the instructions of agents already running (they still meet on the 
 ```yaml
 naming: words
 types:
-  interviewer: {name_prefix: "iv-", ...}   # iv-teal-heron: the role stays recognizable
+  interviewer:                             # iv-teal-heron: the role stays recognizable
+    name_prefix: "iv-"
+    # ...
 ```
 
 A Harbor spec sets it per role (`agents.roles.<role>.name_prefix`, words only), e.g.
@@ -209,14 +241,24 @@ resource and the `spawn.*` tools
 (`flock.harbor.builtin`, copied into the run's `resources/` and `tools/` like `message_board`):
 
 ```yaml
-resources: {spawn: {}}
+resources:
+  spawn: {}
 tools: [spawn.*]
 agents:
   roles:
-    leader: {count: 1}
-    helper: {count: 0, workers: {initial: 1, max_extra: 2}}
-spawn: {leader: {types: [helper], max: 3}}
-limits: {spawned_total: 50}
+    leader:
+      count: 1
+    helper:
+      count: 0
+      workers:
+        initial: 1
+        max_extra: 2
+spawn:
+  leader:
+    types: [helper]
+    max: 3
+limits:
+  spawned_total: 50
 ```
 
 | Tool | Call |

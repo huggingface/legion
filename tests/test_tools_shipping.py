@@ -13,7 +13,7 @@ from flock import cli
 from flock.models import AssignCommand, SwarmSpec
 from flock.tools.bundle import pack
 
-from .conftest import FAKE_PROVIDERS, HB, wire
+from .conftest import FAKE_INFERENCE, HB, wire
 
 runner = CliRunner()
 
@@ -38,10 +38,10 @@ def folder(root: Path, src: str = ADD_V1, name: str = "tools") -> Path:
 
 
 def raw_spec(tools=None, **extra) -> dict:
-    t = {**HB, "model": "fake:m", "replicas": 1, "agents_per_worker": 2}
+    t = {**HB, "model": "m", "replicas": 1, "agents_per_worker": 2}
     if tools is not None:
         t["tools"] = tools
-    return {"swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/sh", "providers": FAKE_PROVIDERS,
+    return {"swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/sh", "inference": FAKE_INFERENCE,
             "types": {"dev": t}, **extra}
 
 

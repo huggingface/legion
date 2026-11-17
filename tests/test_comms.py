@@ -20,7 +20,7 @@ from flock.models import (
 )
 
 from . import fake_msgboard
-from .conftest import FAKE_PROVIDERS, HB
+from .conftest import FAKE_INFERENCE, HB
 
 INVITE_ENV = "T_INVITE"
 CH = 12
@@ -38,7 +38,7 @@ def swarm_raw(**comms) -> dict:
     return {"swarm": "sw", "namespace": "ns", "bucket": "hf://buckets/ns/b",
             "comms": {"url": "http://board", "invite_env": INVITE_ENV, "channel": "#flock-test",
                       **comms},
-            "providers": FAKE_PROVIDERS, "types": {"dev": {**HB, "model": "fake:m", "comms": True}}}
+            "inference": FAKE_INFERENCE, "types": {"dev": {**HB, "model": "m", "comms": True}}}
 
 
 # --------------------------------------------------------------------------- spec
@@ -63,14 +63,14 @@ def test_comms_block_validates():
     with pytest.raises(ValidationError, match="swarm-level `comms:` block"):
         SwarmSpec.model_validate(raw)
     raw = swarm_raw()
-    raw["types"]["dev"] = {**HB, "model": "fake:m", "comms": False, "tools": ["comms:post"]}
+    raw["types"]["dev"] = {**HB, "model": "m", "comms": False, "tools": ["comms:post"]}
     with pytest.raises(ValidationError, match="comms: false"):
         SwarmSpec.model_validate(raw)
 
 
 def test_listed_comms_tools_and_folder_tools():
     raw = swarm_raw(search=None)
-    raw["types"]["dev"] = {**HB, "model": "fake:m", "tools": ["ws_write", "comms:post"]}
+    raw["types"]["dev"] = {**HB, "model": "m", "tools": ["ws_write", "comms:post"]}
     s = SwarmSpec.model_validate(raw)
     ts = s.types["dev"]
     assert ts.folder_tools == ["ws_write"] and comms_tools(ts, s.comms) == ["comms:post"]

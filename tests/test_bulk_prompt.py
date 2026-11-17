@@ -14,7 +14,7 @@ from flock.models import AgentHeartbeat
 
 from .conftest import HB, make_spec, wire
 from .test_api import W0, apply, hb_body
-from .test_providers_controller import CAP_PROVIDERS, _cap_client, _delivered, hb, pspec, put
+from .test_inference_controller import CAP, _cap_client, _delivered, hb, pspec, put
 
 
 async def _prompts(client, wid) -> list[dict]:
@@ -54,7 +54,7 @@ async def test_bulk_prompt_by_type_and_state(client, store, clock, tick):
 
 
 async def test_bulk_prompts_respect_max_working(store, clock, tick):
-    spec = pspec(CAP_PROVIDERS, worker={**HB, "model": "p:test", "replicas": 3})
+    spec = pspec(CAP, worker={**HB, "model": "m", "replicas": 3})
     wid = "p-worker-w0000"
     async with await _cap_client(store, clock, True) as c:
         assert (await put(c, spec)).status_code == 200
@@ -109,7 +109,7 @@ def test_cli_prompt_by_type(tmp_path, monkeypatch, app, store, tick):
 
 async def test_repeated_idle_bulk_calls_do_not_stack_prompts(store, clock, tick):
     """With admission blocked, repeated `--state idle` calls must not queue a prompt each."""
-    spec = pspec(CAP_PROVIDERS, worker={**HB, "model": "p:test", "replicas": 3})
+    spec = pspec(CAP, worker={**HB, "model": "m", "replicas": 3})
     wid = "p-worker-w0000"
     body = {"type": "worker", "state": "idle", "text": "paint"}
     async with await _cap_client(store, clock, True) as c:

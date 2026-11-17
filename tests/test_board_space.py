@@ -16,15 +16,15 @@ from flock.ops import SpecError, read_spec
 from flock.specrender import read_env_file
 from tests.fake_msgboard import Board, serve
 
-from .conftest import FAKE_PROVIDERS, HB
+from .conftest import FAKE_INFERENCE, HB
 
 SPEC = {
     "swarm": "demo", "namespace": "acme",
     "bucket": "hf://buckets/acme/runs",
     "comms": {"board": "space", "template": "acme/msgboard-template", "invite_env": "BOARD_INVITE",
               "channel": "general", "space_secrets": {"HF_TOKEN": "BOARD_BUCKET_TOKEN"}},
-    "providers": FAKE_PROVIDERS,
-    "types": {"a": {**HB, "model": "fake:m", "comms": True}},
+    "inference": FAKE_INFERENCE,
+    "types": {"a": {**HB, "model": "m", "comms": True}},
 }
 
 

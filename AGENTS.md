@@ -16,11 +16,16 @@ casually: controller, worker and CLI all import it.
 
 ## Conventions
 - Python 3.12+, pydantic v2, httpx, typer, FastAPI. Keep it small; no new frameworks.
+- Keep imports at module scope by default. Use function-local imports only for a concrete reason,
+  such as avoiding a circular dependency, keeping optional dependencies optional, or deferring
+  expensive initialization. Add a short comment explaining the reason.
 - Install with `uv sync --all-extras` (Harbor and controller dependencies are included by default; the dev extra adds tests and linting).
 - `ruff check` and `pytest` must pass before pushing.
 - Always pass `namespace=` to every `huggingface_hub` jobs call (saves a `whoami` per call).
 - Never launch an HF Job from tests. Experiments launch jobs only on `cpu-basic` unless the operator approved otherwise.
 - Commit small; push your branch at the end of every turn that produced work.
+- YAML (spec files, and YAML snippets in docs and READMEs): write mappings in block style, never
+  inline `{a: 1}`; inline lists like `[a, b]` and an empty mapping `{}` are fine.
 
 ## Tests
 Be conservative about adding tests.

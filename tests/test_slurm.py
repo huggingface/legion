@@ -20,7 +20,7 @@ from flock.controller.slurm import (
 )
 from flock.models import AgentHeartbeat, SwarmSpec, WorkerHeartbeat
 
-from .conftest import FAKE_PROVIDERS, HB, TOKEN
+from .conftest import FAKE_INFERENCE, HB, TOKEN
 
 W0 = "demo-researcher-w0000"
 SECRET_VALUES = {"FLOCK_TOKEN": TOKEN, "ANTHROPIC_API_KEY": "sk-secret-anthropic",
@@ -42,8 +42,8 @@ def slurm_spec(tmp_path: Path, **compute) -> SwarmSpec:
     }
     return SwarmSpec.model_validate({
         "swarm": "demo", "bucket": "hf://buckets/ns/sh", "compute": block,
-        "providers": FAKE_PROVIDERS,
-        "types": {"researcher": {**HB, "model": "fake:m", "replicas": 2,
+        "inference": FAKE_INFERENCE,
+        "types": {"researcher": {**HB, "model": "m", "replicas": 2,
                                  "agents_per_worker": 2, "secrets": ["ANTHROPIC_API_KEY"],
                                  "resume_prompt": "Your turn was cut; continue.",
                                  "env": {"MSGBOARD_URL": "https://example.invalid"}}},

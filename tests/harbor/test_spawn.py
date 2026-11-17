@@ -136,7 +136,7 @@ def test_only_a_role_with_spawn_rules_sees_spawn(tmp_path):
 
 LOCAL = """
 name: crew
-model: huggingface/moonshotai/Kimi-K2.5
+model: moonshotai/Kimi-K2.5
 task:
   repo: https://huggingface.co/datasets/harborframework/terminal-bench-2.1
   selector: regex-log

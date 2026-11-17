@@ -49,8 +49,9 @@ A refused update exits 1, prints the reason and applies nothing. The reasons are
 `flock launch` gives: a spec error, a tools folder error, an unknown tool name, or a 400/409
 from the controller.
 
-Preflight runs only when the update adds a provider-backed model the running spec does not
-have (`--preflight` / `--skip-preflight` to choose). Locally, `flock update` finds the run
+Preflight runs only when the update adds a model, or sends one somewhere new (other URLs, router
+provider, key or headers), compared with the running spec (`--preflight` / `--skip-preflight`
+to choose). Locally, `flock update` finds the run
 through `.flock/current`, like the other commands do.
 
 ## Env files and `--ref`
@@ -72,8 +73,8 @@ $ flock update my-experiment --env runs/demo/run.env --ref origin/main --check
   integer 20); otherwise it is plain text. Keys and prompt files are not substituted. An unset
   variable without a default refuses the spec, naming every such variable. `$${` is a literal
   `${` (any other `$$` stays as written); `${WORLD_HOST}` is always left for the controller
-  (docs/slurm.md), even when the environment sets it. `providers.*.base_urls` also takes a
-  comma-separated string, so `base_urls: ${OPENAI_BASE_URLS:-}` works (empty: none).
+  (docs/slurm.md), even when the environment sets it. `inference.urls` also takes a
+  comma-separated string, so `urls: ${VLLM_URLS}` works.
 - `--ref GIT_REF[:PATH]` (apply and update) exports the repo holding the given folder at
   `GIT_REF` (`git archive`) into a temp dir and reads the spec from there: the folder's own
   path in the repo, or `PATH` (repo-relative, a folder or a spec file). `--env` files are read
@@ -166,11 +167,17 @@ types:
     replicas_ramp:
       start: 20                       # step 0, on the first pass that sees the ramp
       phases:                         # or one phase as `add: 20, every: 10m`
-        - {every: 5m, add: 20, until: 100}
-        - {every: 10m, add: 20}       # until: max
+        - every: 5m
+          add: 20
+          until: 100
+        - every: 10m                  # until: max
+          add: 20
       max: 300
       stagger: 10s                    # the start raise adds one agent every 10 s (default)
-      hold_if: {waiting: 1, request_s: 15, above: 100}
+      hold_if:
+        waiting: 1
+        request_s: 15
+        above: 100
 ```
 
 The reconciler raises the type's replicas along the schedule: `start`, then each phase adds
@@ -230,7 +237,8 @@ is a crash at once, without waiting for `worker_dead_after`. Raise the keys with
 | other type fields (`max_turns`, `max_budget_usd`, `turn_timeout`, ...) | the next turn boundary |
 | `compute.worker_unknown_after`, `worker_dead_after`, `crash_backoff` | at once (the controller) |
 | `compute.kind`, `swarm` | refused |
-| a Harbor spec's `task`, `tools`, `resources`, `environment`, `inference`, `model`, `team_file`, `role_file`, `limits.agent_*` or `limits.trial_hours` (its roles have agents) | refused: the workers prepared them at launch. Counts, loops, `workers:` and the run's limits change as above. A task branch that moved since the launch is not a change: the run keeps its pinned revision |
+| a Harbor spec's `inference` | `max_working` at once (the controller); any other change restarts the type's workers (a `restart` event on the swarm stream per worker, at the next reconcile pass): they drain, and their agents resume on new workers with the new key, endpoints and allowlist |
+| a Harbor spec's `task`, `tools`, `resources`, `environment`, `model`, `team_file`, `role_file`, `limits.agent_*` or `limits.trial_hours` (its roles have agents) | refused: the workers prepared them at launch. Counts, loops, `workers:` and the run's limits change as above. A task branch that moved since the launch is not a change: the run keeps its pinned revision |
 
 A turn boundary is a prompt that starts a new turn. A prompt that joins a turn in flight
 changes nothing until that turn ends. Changed type specs reach the workers in the

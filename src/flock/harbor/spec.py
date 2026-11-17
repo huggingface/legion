@@ -23,6 +23,7 @@ from pydantic import AfterValidator, BeforeValidator, Field, field_validator, mo
 from flock.models import (
     ComputeSpec,
     DashboardSpec,
+    Inference,
     LoopSpec,
     SpawnRule,
     SwarmSpec,
@@ -38,7 +39,6 @@ from .config import (
     AgentSettings,
     Config,
     EnvironmentSettings,
-    InferenceSettings,
     Limits,
     RoleName,
     RoleSettings,
@@ -48,7 +48,6 @@ from .config import (
 _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 # the tools a role without `spawn:` rules is not shown (it may still prompt its parent)
 SPAWNING = ("spawn.spawn", "spawn.remove")
-PROVIDER = "inference"  # the compiled spec's provider: prices and admits the run's models
 
 
 def seconds(value):
@@ -121,6 +120,7 @@ class Workers(Settings):
 class Role(RoleSettings):
     count: int = Field(default=1, ge=0, strict=True)  # 0: spawned agents only (`spawn:`)
     model: str | None = Field(default=None, min_length=1)  # the run's model otherwise
+    inference: Inference | None = None  # its own endpoints (a whole block); the run's otherwise
     ramp: Ramp | None = None
     loop: Loop | None = None  # replaces the run's loop for this role
     workers: Workers | None = None  # overrides keys of the run's workers
@@ -139,10 +139,6 @@ class Agents(AgentSettings):
     roles: dict[RoleName, Role] | None = Field(default=None, min_length=1)
 
 
-class Inference(InferenceSettings):
-    max_working: int | None = Field(default=None, ge=1, strict=True)  # agents in a turn at once
-
-
 class SpecLimits(Limits):
     trial_hours: float = Field(default=23, gt=0)  # a new Trial after this; hf-sandbox caps at 24 h
     budget_usd: float | None = Field(default=None, ge=0)  # the whole run
@@ -153,7 +149,6 @@ class SpecLimits(Limits):
 class Spec(Config):
     stop_on_success: bool = False
     agents: Agents = Field(default_factory=Agents)
-    inference: Inference = Field(default_factory=Inference)
     environment: EnvironmentSettings = Field(default_factory=EnvironmentSettings)
     limits: SpecLimits = Field(default_factory=SpecLimits)
     loop: Loop | None = None
@@ -297,8 +292,10 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
     roles, loops = spec.roles(), spec.type_loops()
     label = {name: name if spec.agents.roles else None for name in roles}
     # the folders: a worker builds the tool bundle and loads the resource modules from them
+    # inference is the types' (`resolved_model`), outside the harbor block: `flock update` may
+    # change it while the run's Trials keep the rest
     config = spec.model_dump(mode="json", include={
-        "inference", "task", "environment", "tools_dir", "tools", "resources_dir", "namespace", "success_check"})
+        "task", "environment", "tools_dir", "tools", "resources_dir", "namespace", "success_check"})
     if spec.success_check is None:
         config.pop("success_check", None)
     if spec.stop_on_success:
@@ -309,10 +306,15 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
     # the inference key goes into every agent's container: never the token a remote worker
     # syncs the bucket and starts sandboxes with
     remote = spec.environment.backend == "hf-sandbox" or spec.compute.kind in ("slurm", "hf-jobs")
-    if remote and spec.inference.api_key_env == "HF_TOKEN":
-        raise ValueError("inference.api_key_env: HF_TOKEN is the workers' Hub token (bucket, "
-                         "sandboxes) and would reach every agent's container: name an "
-                         "inference-only token, e.g. HF_INFERENCE_TOKEN")
+    # the blocks the roles run on: a role's own, else the run's (unused when every role has one)
+    blocks = dict((f"agents.roles.{n}.inference", r.inference) if r.inference
+                  else ("inference", spec.inference) for n, r in roles.items())
+    for where, inference in blocks.items():
+        if remote and inference.key_env == "HF_TOKEN":
+            raise ValueError(f"{where}.api_key_env: HF_TOKEN is the workers' Hub token (bucket, "
+                             "sandboxes; the router's default key) and would reach every "
+                             "agent's container: name an inference-only token, e.g. "
+                             "HF_INFERENCE_TOKEN")
     board = spec.resources.get("message_board") or {}
     if remote and board.get("space_id") and board.get("private") is not False:
         raise ValueError("resources.message_board.private: set it to false: a private Space's "
@@ -339,6 +341,10 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
     secrets = resource_secrets(spec) + (["HF_TOKEN"] if spec.environment.backend == "hf-sandbox"
                                         else [])  # sandboxes start with the worker's HF token
     secrets = list(dict.fromkeys(secrets))  # a Space board's HF_TOKEN may be the sandboxes' too
+    # [input, output, cached] by model: a role's own model at its own pricing, any other at the
+    # run's (none: $0)
+    prices = {"*": spec.pricing} | {
+        role.model: role.pricing for role in roles.values() if role.model and role.pricing}
     types = {}
     for name, role in roles.items():
         model = role.model or spec.model
@@ -357,7 +363,9 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
         types[name] = {
             **packing,
             "harness": "harbor",
-            "model": f"{PROVIDER}:{model}",
+            "model": model,
+            "inference": role.inference,
+            "pricing": prices.get(model) or prices["*"],
             "name_prefix": role.name_prefix,
             "replicas": 0 if ramp else role.count,  # the ramp raises them
             "replicas_ramp": ramp and {
@@ -387,16 +395,7 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
         "swarm": spec.name,
         "namespace": spec.namespace,
         "bucket": spec.bucket,
-        "providers": {PROVIDER: {
-            "type": "openai_compat",
-            "base_url": spec.inference.base_url,
-            "api_key_env": spec.inference.api_key_env,
-            "max_working": spec.inference.max_working,
-            # no pricing: the run's cost shows as 0 (Harbor reports none for router models)
-            "pricing": {"*": spec.pricing or [0.0, 0.0, 0.0]} | {
-                role.model: role.pricing for role in roles.values() if role.model and role.pricing
-            },
-        }},
+        "inference": spec.inference,
         "types": types,
         "dashboard": spec.dashboard,
         "stop_on_success": spec.stop_on_success,

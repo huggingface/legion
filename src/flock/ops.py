@@ -226,6 +226,14 @@ def preflight_lines(results: list[dict]) -> list[str]:
             + (f" ({r['error']})" if r.get("error") else "") for r in results]
 
 
+def probe_targets(spec: SwarmSpec) -> set[tuple]:
+    """What preflight probes per type: its model on its block, sent as `request_model` to its
+    endpoints, with the block's key and headers. An update probes again when this changes."""
+    return {(r.qualified, r.request_model, tuple(r.inference.endpoints), r.inference.key_env,
+             tuple(sorted(r.inference.headers.items())))
+            for ts in spec.types.values() if (r := ts.resolved_model) is not None}
+
+
 def unprobed(spec: SwarmSpec) -> list[str]:
     return sorted({ts.resolved_model.qualified for ts in spec.types.values()
                    if ts.resolved_model is not None})
@@ -398,8 +406,8 @@ def update(api: Client, spec: SwarmSpec, spec_file: str, *, sources: dict[str, s
         raise SpecError([(f"no swarm {spec.swarm!r} is running on this controller: start it "
                           "with `flock launch`") if e.status == 404
                          else f"error {e.status}: {e.detail}"]) from None
-    if preflight is None:  # --check probes every model; an update only the ones it adds
-        preflight = bool(set(unprobed(spec)) - set(unprobed(old))) or (check and bool(unprobed(spec)))
+    if preflight is None:  # --check probes every model; an update the ones it adds or moves
+        preflight = bool(probe_targets(spec) - probe_targets(old)) or (check and bool(unprobed(spec)))
     probed: list[str] = []
     if preflight:
         try:
@@ -578,7 +586,7 @@ def _values(api: Client, env_files=()) -> dict[str, str]:
 
 def _secret_names(spec: SwarmSpec) -> list[str]:
     """The secrets the spec names: provider keys, the board invite, the world token, types'."""
-    names = [*(p.api_key_env for p in spec.providers.values()),
+    names = [*(p.key_env for p in spec.inference_blocks().values()),
              spec.comms.invite_env if spec.comms else None,
              spec.world.token_env if spec.world else None,
              *(s for ts in spec.types.values() for s in ts.secrets)]

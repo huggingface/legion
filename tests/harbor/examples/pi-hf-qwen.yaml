@@ -1,6 +1,9 @@
 # A two-agent Harbor run.
 name: pi-hf-qwen-team
-model: huggingface/Qwen/Qwen3.8-27B:cerebras
+model: Qwen/Qwen3.8-27B
+inference:
+  hf_router:
+    provider: deepinfra
 task:
   repo: https://huggingface.co/datasets/harborframework/terminal-bench-2.1
   dataset: terminal-bench-2.1@2.1.0

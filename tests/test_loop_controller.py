@@ -171,7 +171,7 @@ async def test_worker_loop_is_resent_when_it_stalls(sim):
 
 
 async def test_turn_end_under_max_working_runs_on_the_controller(store, clock, tick):
-    from .test_providers_controller import CAP_PROVIDERS
+    from .test_inference_controller import CAP
 
     app = create_app(store, TOKEN, clock=clock, loop_interval=0, enforce_max_working=True)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t",
@@ -180,8 +180,8 @@ async def test_turn_end_under_max_working_runs_on_the_controller(store, clock, t
         sim.loops = app.state.loops
         spec = SwarmSpec.model_validate({
             "swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/sh",
-            "providers": CAP_PROVIDERS, "types": {"researcher": {
-                "replicas": 2, "agents_per_worker": 2, **HB, "model": "p:test",
+            "inference": CAP, "types": {"researcher": {
+                "replicas": 2, "agents_per_worker": 2, **HB, "model": "m",
                 "loop": {"prompt": "go", "while": {"max_rounds": 2}}}}})
         assert (await c.put("/swarms/demo", json=spec.model_dump(mode="json"))).status_code == 200
         sim.reconcile()
@@ -482,14 +482,14 @@ async def test_type_budget_usd_stops_the_loop(sim):
     assert {p["loop"]["why"] for p in fin.values()} == {"final: budget_usd"}
 
 
-# --------------------------------------------------------------------------- capped providers
+# --------------------------------------------------------------------------- capped endpoints
 
 
 def provider_spec(loop: dict, max_working: int | None = None) -> dict:
-    prov = {"type": "openai_compat", "base_url": "http://unused/v1", "api_key_env": "K",
-            "self_hosted": True, **({"max_working": max_working} if max_working else {})}
-    return {"swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/sh", "providers": {"p": prov},
-            "types": {"researcher": {**HB, "model": "p:m", "replicas": 2,
+    inference = {"urls": ["http://unused/v1"], "api_key_env": "K",
+                 **({"max_working": max_working} if max_working else {})}
+    return {"swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/sh", "inference": inference,
+            "types": {"researcher": {**HB, "model": "m", "replicas": 2,
                                      "agents_per_worker": 2, "loop": loop}}}
 
 

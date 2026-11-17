@@ -115,11 +115,11 @@ def _print_status(st: dict) -> None:
             typer.echo(f"warning: type {t['name']}: {what}: {t['launch_error']}")
     for pv in (st.get("providers") or {}).values():
         cap = f"/{pv['max_working']}" if pv.get("max_working") else ""
-        kind = pv["type"] + (" self-hosted" if pv["self_hosted"] else "")
-        typer.echo(f"provider {pv['name']} ({kind}): working {pv['working']}{cap}, "
+        models = "".join(f"{m} context {w or '?'}, " for m, w in (pv.get("models") or {}).items())
+        typer.echo(f"{pv['name']} ({pv['endpoint']}): {models}working {pv['working']}{cap}, "
                    f"types {','.join(pv['types']) or '-'}")
         if pv.get("zero_usage_agents"):
-            typer.echo(f"warning: provider {pv['name']}: {pv['zero_usage_agents']} agents finished "
+            typer.echo(f"warning: {pv['name']}: {pv['zero_usage_agents']} agents finished "
                        "turns with zero reported tokens; their cost is unknown (shown as $0)")
 
 

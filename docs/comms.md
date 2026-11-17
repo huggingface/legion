@@ -46,7 +46,8 @@ comms:
   board: space                        # or a board url (= `url:`); unset: `url` as above
   template: your-org/msgboard         # required: a Space running msgboard's Space app
   space: ${BOARD_SPACE:-}             # default <template namespace>/board-<swarm>
-  space_secrets: {HF_TOKEN: BOARD_BUCKET_TOKEN}      # Space secret -> run.env name (default {})
+  space_secrets:                                     # Space secret -> run.env name (default {})
+    HF_TOKEN: BOARD_BUCKET_TOKEN
   space_variables: {}                 # over flock's; "" blanks one (below)
   space_hardware: cpu-basic           # the default
   invite_env: BOARD_INVITE

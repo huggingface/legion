@@ -29,7 +29,9 @@
 #   a child of this shell, with the standard rootless podman setup: the job's own
 #   podman storage under /tmp, podman's health checks run by flock.harbor.podman_healthchecks,
 #   the upstream git credential helper for huggingface.co (the token from a 0600 file there), and
-#   at exit the job's containers stopped. Unverified on compute nodes.
+#   at exit the job's containers stopped. Unverified on compute nodes. FLOCK_RESULTS_DIR is
+#   <run>/results: each Trial's result.json, config.json and verifier/, and the board export,
+#   are copied there (shared disk), since WORK_ROOT goes with the node's /tmp.
 # - Spot reclaim (container): the watcher sends SIGUSR1 to this shell, to srun AND to every process
 #   of the step. flock-worker starts with USR1 ignored (SIG_IGN survives exec) until its own
 #   handler (drain + sync) replaces it. The handler below forwards USR1 to the srun step, then
@@ -116,12 +118,18 @@ log "worker=$WORKER_ID incarnation=${WORKER_INCARNATION:0:8}... swarm=$SWARM typ
 if [ "${FLOCK_HARNESS:-}" = harbor ]; then
   # ---------------------------------------------------------------- harbor: rootless podman here
   export PODMAN_COMPOSE_PROVIDER=$VENV/bin/podman-compose
+  export FLOCK_RESULTS_DIR=$RUN_DIR/results  # Trial results and exports outlive WORK_ROOT
   [ -x "$PODMAN_COMPOSE_PROVIDER" ] || die "$PODMAN_COMPOSE_PROVIDER is missing: install flock in $VENV"
   PODMAN=$(command -v podman) || die "podman is not on PATH"
   PODMAN_LOCAL=$(mktemp -d /tmp/flock-podman.XXXXXX) || die "cannot create the podman storage dir"
   trap podman_cleanup EXIT
   export XDG_RUNTIME_DIR=$PODMAN_LOCAL/runtime HF_XET_CACHE=$PODMAN_LOCAL/xet GIT_TERMINAL_PROMPT=0
   mkdir -p "$XDG_RUNTIME_DIR" "$PODMAN_LOCAL/bin" || die "cannot create $PODMAN_LOCAL"
+  # `podman compose` prints a banner about its external provider on the stderr of every call,
+  # `compose exec` included, where Harbor reads a command's output
+  printf '[engine]\ncompose_warning_logs = false\n' > "$PODMAN_LOCAL/containers.conf" \
+    || die "cannot write $PODMAN_LOCAL/containers.conf"
+  export CONTAINERS_CONF_OVERRIDE=$PODMAN_LOCAL/containers.conf
   # Harbor clones task repos with git: HF_TOKEN for huggingface.co only (the upstream helper), read
   # from a 0600 file, as the worker's environment never holds it
   if [ -n "${HF_TOKEN:-}" ]; then

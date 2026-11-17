@@ -524,15 +524,14 @@ def test_launch_refused_classification():
 
 
 def test_resume_prompt_goes_through_max_working_admission(store, jobs, clock, tick):
-    """A capped provider's resume prompt is queued after the assign (pending_prompts), so the
-    controller's max_working admission sees it like any API prompt."""
+    """A capped inference block's resume prompt is queued after the assign (pending_prompts),
+    so the controller's max_working admission sees it like any API prompt."""
     from flock.models import SwarmSpec
 
     spec = SwarmSpec.model_validate({
         "swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/b",
-        "providers": {"p": {"type": "openai_compat", "base_url": "http://fake/v1",
-                            "api_key_env": "K", "self_hosted": True, "max_working": 1}},
-        "types": {"researcher": {**HB, "model": "p:m", "replicas": 1,
+        "inference": {"urls": ["http://fake/v1"], "api_key_env": "K", "max_working": 1},
+        "types": {"researcher": {**HB, "model": "m", "replicas": 1,
                                  "resume_prompt": "go on"}}})
     store.put_swarm(spec, 0)
     tick()

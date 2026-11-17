@@ -120,11 +120,16 @@ def spec_keys(data: Any, cluster: Mapping[str, str] | None = None) -> dict[str, 
 
     walk(data, "")
     named = [("HF_TOKEN", "bucket sync and the Hub")]
-    named += [(p.get("api_key_env"), f"providers.{n}.api_key_env")
-              for n, p in (data.get("providers") or {}).items() if isinstance(p, dict)]
     named.append(((data.get("comms") or {}).get("invite_env"), "comms.invite_env"))
-    # a Harbor spec's (flock.harbor.spec): its inference key and its resources' tokens
-    named.append(((data.get("inference") or {}).get("api_key_env"), "inference.api_key_env"))
+    # the inference keys (a swarm's or a Harbor run's block, a type's or a role's own), and a
+    # Harbor spec's resources' tokens
+    blocks = [("inference", data.get("inference"))] + [
+        (f"{where}.{n}.inference", x.get("inference"))
+        for where, xs in (("types", data.get("types")),
+                          ("agents.roles", (data.get("agents") or {}).get("roles")))
+        for n, x in (xs or {}).items() if isinstance(x, dict)]
+    named += [(b.get("api_key_env"), f"{where}.api_key_env") for where, b in blocks
+              if isinstance(b, dict)]
     named += [(o.get("token_env"), f"resources.{n}.token_env")
               for n, o in (data.get("resources") or {}).items() if isinstance(o, dict)]
     named += [(s, f"types.{n}.secrets") for n, t in (data.get("types") or {}).items()

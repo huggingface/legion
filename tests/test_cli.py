@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
 import yaml
 from typer.testing import CliRunner
 
@@ -54,7 +53,7 @@ def test_apply_inlines_system_prompt_file(tmp_path, monkeypatch, app, store):
     assert r.exit_code == 1 and "not found" in r.output
 
 
-# --------------------------------------------------------------------------- providers
+# --------------------------------------------------------------------------- inference
 
 
 def _provider_app(store, clock, tool_call: bool):
@@ -62,7 +61,7 @@ def _provider_app(store, clock, tool_call: bool):
 
     from flock.controller.api import create_app
 
-    from .test_providers_controller import fake_provider
+    from .test_inference_controller import fake_provider
 
     fake, seen = fake_provider(tool_call=tool_call)
     app = create_app(store, TOKEN, clock=clock, secret_source={"VLLM_API_KEY": "k"},
@@ -72,10 +71,8 @@ def _provider_app(store, clock, tool_call: bool):
 
 PROVIDER_SPEC = {
     "swarm": "op", "namespace": "ns", "bucket": "hf://buckets/ns/b",
-    "providers": {"gpu1": {"type": "openai_compat", "base_url": "http://fake/v1",
-                           "api_key_env": "VLLM_API_KEY", "self_hosted": True}},
-    "models": {"q": {"model": "gpu1:Qwen/Q"}},
-    "types": {"worker": {**HB, "model": "q", "replicas": 1}},
+    "inference": {"urls": ["http://fake/v1"], "api_key_env": "VLLM_API_KEY"},
+    "types": {"worker": {**HB, "model": "Qwen/Small", "replicas": 1}},
 }
 
 
@@ -90,9 +87,10 @@ def test_apply_runs_preflight_and_refuses_on_failure(tmp_path, monkeypatch, stor
     r = runner.invoke(cli.app, ["launch", "--skip-preflight", str(spec_file)])
     assert r.exit_code == 0, r.output
     assert store.get_swarm("op") is not None and len(seen) == 1
-    assert "provider gpu1 (openai_compat self-hosted): working 0, types worker" in r.output
+    assert ("inference (urls http://fake/v1): Qwen/Small context 32768, working 0, types worker"
+            in r.output)
     r = runner.invoke(cli.app, ["update", "--check", str(spec_file)])
-    assert r.exit_code == 1 and "preflight gpu1:Qwen/Q: FAIL" in r.output
+    assert r.exit_code == 1 and "preflight inference:Qwen/Small: FAIL" in r.output
 
 
 def _fake_status(monkeypatch, st):
@@ -103,12 +101,14 @@ def _fake_status(monkeypatch, st):
 
 def test_status_prints_zero_usage_warning(monkeypatch):
     st = {"swarm": "op", "agents_total": 1, "workers_total": 1, "pending_prompts": 0, "cost_usd": 0,
-          "types": {}, "providers": {"hf": {"name": "hf", "type": "openai_compat", "self_hosted": False,
-                                            "types": ["w"], "working": 0, "max_working": None,
-                                            "zero_usage_agents": 2}}}
+          "types": {}, "providers": {"inference": {
+              "name": "inference", "endpoint": "hf_router fastest", "types": ["w"],
+              "models": {"Qwen/Q": 65536}, "working": 0, "max_working": None,
+              "zero_usage_agents": 2}}}
     _fake_status(monkeypatch, st)
     r = runner.invoke(cli.app, ["status", "op"])
     assert r.exit_code == 0 and "2 agents finished turns with zero reported tokens" in r.output
+    assert "inference (hf_router fastest): Qwen/Q context 65536, working 0, types w" in r.output
 
 
 def test_status_prints_launch_errors(monkeypatch):
@@ -131,10 +131,10 @@ def test_apply_with_passing_preflight(tmp_path, monkeypatch, store, clock):
     spec_file.write_text(yaml.safe_dump(PROVIDER_SPEC))
     r = runner.invoke(cli.app, ["launch", str(spec_file)])
     assert r.exit_code == 0 and "ok" in r.output and "chat_completions" in r.output, r.output
-    assert store.get_swarm("op")["spec"].types["worker"].provider_name == "gpu1"
+    assert store.get_swarm("op")["spec"].types["worker"].provider_name == "inference"
     assert len(seen) == 2  # one probe: a tool call plus a follow-up turn
     r = runner.invoke(cli.app, ["update", "--check", str(spec_file)])  # was `flock preflight`
-    assert r.exit_code == 0 and "preflight gpu1:Qwen/Q: ok" in r.output and len(seen) == 4
+    assert r.exit_code == 0 and "preflight inference:Qwen/Small: ok" in r.output and len(seen) == 4
     # a spec with no types has no model to probe
     empty = tmp_path / "empty.yaml"
     write_spec(empty, make_spec("demo2").model_copy(update={"types": {}}))
@@ -147,7 +147,7 @@ def test_unverified_models_warn_and_apply_unless_strict(tmp_path, monkeypatch, s
 
     from flock.controller.api import create_app
 
-    from .test_providers_controller import fake_provider
+    from .test_inference_controller import fake_provider
 
     fake, seen = fake_provider()
     app = create_app(store, TOKEN, clock=clock, secret_source={},  # no provider key on the controller
@@ -165,7 +165,7 @@ def test_unverified_models_warn_and_apply_unless_strict(tmp_path, monkeypatch, s
     # skipping preflight is never silent either
     store.delete_swarm("op")
     r = runner.invoke(cli.app, ["launch", "--skip-preflight", str(spec_file)])
-    assert r.exit_code == 0 and "gpu1:Qwen/Q: unverified (preflight skipped)" in r.output
+    assert r.exit_code == 0 and "inference:Qwen/Small: unverified (preflight skipped)" in r.output
     store.delete_swarm("op")
     r = runner.invoke(cli.app, ["launch", "--skip-preflight", "--strict", str(spec_file)])
     assert r.exit_code == 1 and "--strict: not launching unverified models" in r.output
@@ -173,23 +173,12 @@ def test_unverified_models_warn_and_apply_unless_strict(tmp_path, monkeypatch, s
 
 def test_apply_reports_spec_errors_by_field(tmp_path, monkeypatch, app):
     wire(monkeypatch, app)
-    bad = {**PROVIDER_SPEC, "types": {"writer": {**HB, "model": "native"}}}
+    bad = {**PROVIDER_SPEC, "inference": {}, "types": {"writer": {**HB, "model": "Qwen/Q:groq"}}}
     spec_file = tmp_path / "spec.yaml"
     spec_file.write_text(yaml.safe_dump(bad))
     r = runner.invoke(cli.app, ["launch", str(spec_file)])
     assert r.exit_code == 1
-    assert "types.writer.model: harness 'harbor' needs a provider-backed model" in r.output
-
-
-@pytest.mark.parametrize("extra", [{"chat_template_kwargs": {"enable_thinking": False}}, None])
-def test_launch_refuses_model_extra(tmp_path, monkeypatch, app, extra):
-    wire(monkeypatch, app)
-    spec_file = tmp_path / "spec.yaml"
-    model = {"model": "gpu1:Qwen/Q", "extra": extra}
-    spec_file.write_text(yaml.safe_dump({**PROVIDER_SPEC, "models": {"q": model}}))
-    r = runner.invoke(cli.app, ["launch", str(spec_file)])
-    assert r.exit_code == 1 and "models.q: " in r.output and "`extra` is not supported" in r.output
-    assert "on the server" in r.output
+    assert "types.writer.model: 'Qwen/Q:groq': the HF router takes a plain Hub id" in r.output
 
 
 def test_apply_sends_its_git_source(tmp_path, monkeypatch, app, store):

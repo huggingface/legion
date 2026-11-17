@@ -70,6 +70,12 @@ class Channel:
     restore: bool = False  # upload home/sessions before the first turn and --continue
     ready: asyncio.Event = field(default_factory=asyncio.Event)
     restore_error: str | None = None
+    # Pi's endpoint, written into its models.json at every turn (the adapter keeps them to the
+    # live spec, so new `urls` reach a running Trial): the server's base URL as the container
+    # reaches it, the context window it serves, and request headers (the router's bill-to)
+    base_url: str | None = None
+    context_window: int | None = None
+    headers: dict[str, str] = field(default_factory=dict)
 
 
 def read_turn(path):
@@ -105,6 +111,27 @@ class FlockPi(Pi):
     busy = False  # a turn is in flight
     _killed = False
     _env = None
+
+    def _build_custom_models_json(self, access, model_id):
+        """Harbor's models.json with the channel's endpoint: its base URL, the model's
+        `contextWindow` (Pi's default is 128000, more than many servers take) and the
+        provider's `headers`. A copy (no secret: the key is a `$NAME` reference) goes to the
+        Trial's agent dir, for the operator."""
+        models = super()._build_custom_models_json(access, model_id)
+        ch = getattr(self, "channel", None)
+        if models is None or ch is None:
+            return models
+        for provider in models["providers"].values():
+            if ch.base_url:
+                provider["baseUrl"] = ch.base_url
+            if ch.headers:
+                provider["headers"] = dict(ch.headers)
+            if ch.context_window:
+                for model in provider["models"]:
+                    model["contextWindow"] = ch.context_window
+        with suppress(OSError):
+            (self.logs_dir / "models.json").write_text(json.dumps(models, indent=2) + "\n")
+        return models
 
     async def run(self, instruction, environment, context):
         # resume() sets this private flag around run(); that call is one --continue turn.

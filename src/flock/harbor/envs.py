@@ -5,10 +5,13 @@ import asyncio
 import contextvars
 import hashlib
 import re
+import shlex
+import uuid
 
 from harbor.environments import hf_sandbox
 from harbor.environments.docker.docker import DockerEnvironment
 from harbor.environments.podman import PodmanEnvironment
+from harbor.environments.tar_transfer import pack_dir_to_bytes
 from harbor.utils.env import is_sensitive_env_key
 
 from flock.secrets_file import secret_env
@@ -70,7 +73,8 @@ class HFSandbox(hf_sandbox.HFSandboxEnvironment):
       under; unset, the token's owner, as in Harbor;
     - the HF token through `secret_env()`: a Slurm worker has it in its secrets file, not in
       os.environ; unset, huggingface_hub's own lookup, as in Harbor.
-    The sandbox keeps both for its later calls (kill cancels the job in its owner's namespace)."""
+    The sandbox keeps both for its later calls (kill cancels the job in its owner's namespace).
+    `upload_dir` does not keep the files' owner (below)."""
 
     def __init__(self, *args, namespace: str | None = None, **kwargs):
         super().__init__(*args, **kwargs)
@@ -106,6 +110,23 @@ class HFSandbox(hf_sandbox.HFSandboxEnvironment):
                 self.logger.error(f"Failed to kill HF Sandbox during cleanup: {kill_exc}")
             self._sandbox = None
             raise
+
+
+    async def upload_dir(self, source_dir, target_dir: str) -> None:
+        """Harbor 0.25.0's, extracting with `--no-same-owner`. The archive carries the files'
+        owner on this host, and root in the sandbox cannot take a uid over 65535 (a cluster
+        user's, e.g. 150017), so the verifier's tests (and restored sessions) failed to
+        upload."""
+        sandbox = self._require_sandbox()
+        remote_tar = f"/tmp/.hb-upload-{uuid.uuid4().hex[:8]}.tar.gz"
+        buffer = await asyncio.to_thread(pack_dir_to_bytes, source_dir, compress=True)
+        await asyncio.to_thread(sandbox.files.write, remote_tar, buffer.getvalue())
+        tar, target = shlex.quote(remote_tar), shlex.quote(target_dir)
+        result = await self.exec(f"mkdir -p {target} && tar --no-same-owner -xzf {tar} -C {target}"
+                                 f" && rm -f {tar}", timeout_sec=120)
+        if result.return_code != 0:
+            raise RuntimeError(f"Failed to extract upload archive into {target_dir!r}: "
+                               f"{result.stderr or result.stdout}")
 
 
 ENVIRONMENTS = {"docker": "flock.harbor.envs:Docker", "podman": "flock.harbor.envs:Podman",

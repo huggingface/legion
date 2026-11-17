@@ -298,23 +298,21 @@ class AgentRuntime:
         self.buffer.clear()
 
     async def harness_env(self) -> dict[str, str]:
-        """What the adapter is started with: the type's declared secrets, `spec.env`, and a
-        provider-backed model's key under its `api_key_env` name (read from the worker's
-        environment, where the job puts it). Nothing else from the worker: FLOCK_TOKEN and the
-        rest stay here."""
+        """What the adapter is started with: the type's declared secrets, `spec.env`, and its
+        inference key under its `api_key_env` name (read from the worker's environment, where
+        the job puts it). Nothing else from the worker: FLOCK_TOKEN and the rest stay here."""
         source = self._secret_source if self._secret_source is not None else secret_env()
         env = {k: source[k] for k in self.spec.secrets if k in source}
         env.update(self.spec.env)
         r = self.spec.resolved_model
-        if r is not None:
-            key = source.get(r.provider.api_key_env)
-            if key:
-                env[r.provider.api_key_env] = key
+        if r is not None and (name := r.inference.key_env):
+            if key := source.get(name):
+                env[name] = key
             else:
-                log.warning("%s: %s (key for provider %s) is not set on this worker",
-                            self.name, r.provider.api_key_env, r.provider_name)
-                self.emit("error", {"error": f"{r.provider.api_key_env} is not set on the worker; "
-                                             f"provider {r.provider_name} will reject requests"})
+                log.warning("%s: %s (the key of %s) is not set on this worker",
+                            self.name, name, r.provider_name)
+                self.emit("error", {"error": f"{name} is not set on the worker; "
+                                             f"{r.provider_name} will reject requests"})
         return env
 
     async def _run_burst(self) -> None:
@@ -745,6 +743,7 @@ class AgentRuntime:
         )
 
     def endpoint(self) -> str | None:
-        """`host:port` of the model server the agent's Trial calls (the provider's `base_url`)."""
-        url = self.spec.resolved_model.provider.base_url if self.spec.resolved_model else None
+        """`host:port` of the model server the agent calls, as its inference block writes it."""
+        r = self.spec.resolved_model
+        url = r.inference.endpoint_for(self.name) if r else None
         return (urlsplit(url).netloc or url) if url else None

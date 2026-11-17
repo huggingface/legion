@@ -20,6 +20,7 @@ from flock.harbor import agent as flock_agent
 from flock.harbor import launch, networking
 from flock.harbor.agent import FlockPi
 from flock.harbor.spec import Spec, compile_spec
+from flock.models import Inference
 from flock.worker.adapters.base import ResumeError
 from flock.worker.adapters.harbor import HarborAdapter, make_adapter
 
@@ -52,6 +53,7 @@ class Fakes:
         self.mounted = True  # False: /logs/agent lives in the env (hf-sandbox), not on the host
         self.start_gate = self.verify_gate = None  # set: Trial.run waits for them
         self.route_gate = None  # set: `ip route` (a Trial network's first command) waits for it
+        self.steps = False  # True: the verifier's files land as a multi-step Trial's
 
     def gate(self, n):
         return self.gates.setdefault(n, asyncio.Event())
@@ -198,6 +200,11 @@ class Trial(FakeTrial):
             await self.fakes.verify_gate.wait()
         self.verified = True
         self.result.verifier_result = VerifierResult(rewards={"reward": self.fakes.reward})
+        trial_dir = self.config.trials_dir / self.config.trial_name  # as Harbor leaves it
+        verifier = trial_dir / ("steps/check/verifier" if self.fakes.steps else "verifier")
+        verifier.mkdir(parents=True, exist_ok=True)
+        (verifier / "reward.txt").write_text("1")
+        (trial_dir / "result.json").write_text(self.result.model_dump_json())
         return self.result
 
 
@@ -293,7 +300,7 @@ async def test_one_trial_across_bursts(fakes, tmp_path):
     assert [e.kind for e in evs] == ["turn_started", "message", "usage", "turn_ended"]
     assert evs[0].data == {"trial": "agent-0000-t1"} and evs[-1].status == "completed"
     usage = evs[2]
-    assert usage.model == "huggingface/moonshotai/Kimi-K2.5"  # priced under the inference provider
+    assert usage.model == "moonshotai/Kimi-K2.5"  # priced under the model's Hub id
     assert (usage.usage.input, usage.usage.cache_read, usage.usage.output) == (1000, 500, 100)
     assert evs[1].message["content"][0]["text"] == "reply-1"
     await a.stop()
@@ -312,6 +319,62 @@ async def test_one_trial_across_bursts(fakes, tmp_path):
     (session,) = a.session_files(sid)
     assert session == a.home / "sessions" / "s.jsonl" and a.session_dir == a.root  # purge()
     assert len(session.read_text().splitlines()) == 2
+
+
+def pi_models(fakes, n=0):
+    """The models.json the n-th Trial's Pi was last given (FlockPi's copy)."""
+    (provider,) = json.loads((fakes.trials[n].agent.logs_dir / "models.json").read_text())[
+        "providers"].values()
+    return provider
+
+
+def endpoint_spec(inference, backend="docker", window=None):
+    spec = Spec.load(EXAMPLES / "pi-hf.yaml", env={})
+    spec.environment.backend, spec.inference = backend, Inference.model_validate(inference)
+    ts = compile_spec(spec, TASK).types["agent"]
+    ts.resolved_model.context_window = window  # as the controller's apply pins it
+    return ts
+
+
+async def test_pi_gets_the_router_provider_bill_to_and_context_window(fakes, tmp_path):
+    ts = endpoint_spec({"hf_router": {"provider": "deepinfra", "bill_to": "huggingface"}},
+                       window=262144)
+    a = make_adapter(tmp_path / "work" / "agent-0000", "agent-0000", ts)
+    _, events = await start(a)
+    await a.send("go")
+    await read(events, "turn_ended")
+    provider = pi_models(fakes)
+    assert provider["baseUrl"] == "https://router.huggingface.co/v1"
+    assert provider["headers"] == {"X-HF-Bill-To": "huggingface"}
+    assert provider["models"] == [{"id": "moonshotai/Kimi-K2.5:deepinfra", "contextWindow": 262144}]
+    assert "--model moonshotai/Kimi-K2.5:deepinfra" in fakes.pi[0]
+    await a.close()
+
+
+async def test_pi_reaches_this_machine_through_podman(fakes, tmp_path):
+    """`localhost` is the host as podman containers reach it, allowlisted; a server you run takes
+    no key (Pi gets a placeholder). A running Trial keeps its endpoint and allowlist: a changed
+    block restarts the type's workers instead (the controller)."""
+    ts = endpoint_spec({"urls": ["http://localhost:8000/v1"]}, "podman", 32768)
+    a = make_adapter(tmp_path / "work" / "agent-0000", "agent-0000", ts)
+    sid, events = await start(a)
+    await a.send("go")
+    await read(events, "turn_ended")
+    agent = fakes.trials[0].config.agent
+    assert agent.base_url == pi_models(fakes)["baseUrl"] == "http://host.containers.internal:8000/v1"
+    assert agent.extra_allowed_hosts == ["host.containers.internal"]
+    assert agent.env["FLOCK_INFERENCE_KEY"] == "none" and agent.model_api_key_name == "FLOCK_INFERENCE_KEY"
+    assert pi_models(fakes)["models"] == [{"id": "moonshotai/Kimi-K2.5", "contextWindow": 32768}]
+    await a.stop()
+    await read(events, "exited")
+
+    moved = endpoint_spec({"urls": ["http://10.53.0.9:8000/v1"]}, "podman", 32768)
+    assert await a.start(a.workdir, sid, moved) == sid
+    await a.send("again")
+    await read(a.events(), "turn_ended")
+    assert len(fakes.trials) == 1
+    assert pi_models(fakes)["baseUrl"] == "http://host.containers.internal:8000/v1"
+    await a.close()
 
 
 async def test_prompts_during_a_turn_join_the_next_turn(fakes, tmp_path):
@@ -477,7 +540,7 @@ async def test_the_worker_runtime_drives_one_trial_across_bursts(fakes, tmp_path
     assert (types.count("session_started"), types.count("session_resumed")) == (1, 1)
     assert types.count("turn_ended") == 2 and "error" not in types
     assert len(fakes.trials) == 1 and a.alive() and "--continue" in fakes.pi[1]
-    assert rt.state.tokens["huggingface/moonshotai/Kimi-K2.5"].input == 2000
+    assert rt.state.tokens["moonshotai/Kimi-K2.5"].input == 2000
     assert rt.state.last_summary == "reply-2"
 
 

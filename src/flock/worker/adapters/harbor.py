@@ -43,6 +43,7 @@ from typing import Any
 from flock.models import TypeSpec, parse_duration
 from flock.secrets_file import exposed
 from flock.worker.adapters.base import AdapterEvent, EventQueue, ResumeError
+from flock.worker.harbor import TRIAL_RESULTS, keep_results, results_dir
 
 log = logging.getLogger(__name__)
 
@@ -272,6 +273,17 @@ class HarborAdapter:
             self.agent, roster, {"tools": h.tools.get("tools", {})}, h.team, h.role_text,
             run_id=os.environ.get("SWARM"))  # as the upstream launcher: the run (swarm) a board spans
 
+    def _endpoint(self, channel: Any) -> None:
+        """The type spec's endpoint into a new Trial's channel, for Pi's models.json. A changed
+        block restarts the type's workers (controller), so a Trial keeps its endpoint."""
+        from flock.harbor.launch import agent_url
+
+        r = self.spec.resolved_model
+        backend = (self.spec.harbor.config.get("environment") or {}).get("backend", "docker")
+        channel.base_url = agent_url(r.inference.endpoint_for(self.agent), backend)
+        channel.context_window = r.context_window
+        channel.headers = r.inference.headers
+
     async def _new_trial(self, restore: bool) -> None:
         """Create the agent's next Trial, run it in the background and wait until FlockPi
         is ready. ResumeError: the sessions could not be put back."""
@@ -279,6 +291,7 @@ class HarborAdapter:
 
         from flock.harbor import launch
         from flock.harbor.agent import Channel
+        from flock.harbor.config import inference_key
         from flock.harbor.envs import ENVIRONMENTS
         from flock.harbor.sources import ResolvedTask
         from flock.harbor.spec import Spec
@@ -304,9 +317,11 @@ class HarborAdapter:
                             h.task["dataset"], getattr(self.host, "task_path", None))
         trial_seconds = config.limits.trial_hours * 3600
         self.attempt += 1
+        inference = self.spec.resolved_model.inference  # the type spec's, not the config's
         with exposed():  # the inference key from os.environ; a Slurm worker has a file
             tc = launch.build_trial_config(config, task, self.root, self.agent,
-                                           self._instructions(), config.api_key())
+                                           self._instructions(), inference_key(inference),
+                                           inference=inference)
         # Harbor's compose project is `<trial_name>__env` and its start runs `compose down` on
         # it: the swarm (the worker's SWARM) keeps another run's <agent>-t1 on this host
         # alive; a worker relaunched in this run reuses, and so cleans up, its own names.
@@ -357,12 +372,13 @@ class HarborAdapter:
             if self._closes:  # closed while this Trial was being created
                 await self._drop_network(networks)  # a close may have taken self._network
                 raise RuntimeError("agent closed")
-            launch.attach_pi_setup(trial, config.inference)
+            launch.attach_pi_setup(trial, inference)
             if self.bundle is not None:
                 launch.attach_tool_setup(trial, self.bundle)
             channel = Channel(emit=self._emit, prompts=self._prompts, home=self.home,
                               model=self.spec.harness_model, trial_seconds=trial_seconds,
                               max_turns=config.limits.agent_max_turns, restore=restore)
+            self._endpoint(channel)
             trial.agent.channel = channel
             self.trial = trial
             self._run = run = asyncio.create_task(trial.run(), name=tc.trial_name)
@@ -449,8 +465,13 @@ class HarborAdapter:
 
     def _ended(self, trial: Any, task: asyncio.Task) -> None:
         """Done callback of a Trial's run(): roll over after trial_hours, report a failure
-        (now, or at the next burst)."""
+        (now, or at the next burst). Its results go to the results dir too, when there is
+        one (flock.worker.harbor)."""
         self.result = _result(task)
+        if (results := results_dir()) is not None:
+            name = trial.config.trial_name
+            keep_results(trial.config.trials_dir / name, results / self.agent / "trials" / name,
+                         TRIAL_RESULTS)
         if trial is self.trial:
             self._verify_success(self.result)
         if trial is not self.trial or not trial.agent.channel.ready.is_set():

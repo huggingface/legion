@@ -52,3 +52,6 @@ uv run flock status mini-swarm-1
 
 The run ends on its own once the loop is over and every agent is idle, and writes the bundle
 under `.flock/` (`uv run flock stop mini-swarm-1 --delete --yes` ends it early).
+
+`urls.yaml` is the same swarm on a model server you run (vLLM at `localhost:8000` by default),
+with the agents in rootless podman and a local board: docs/open-models.md has the recipes.
