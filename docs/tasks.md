@@ -102,3 +102,20 @@ lifecycle, while a spec's loop controls when agents receive more prompts.
 
 See [local usage](local.md) for launching and inspecting a run, and
 [escape-room](../experiments/escape-room/) for an existing task integration.
+
+## s3-aggregation
+
+The private [s3-aggregation dataset](https://huggingface.co/datasets/HuggingFaceSwarms/s3-aggregation)
+adapts the information-aggregation task of [s³](https://arxiv.org/abs/2611.08615): each of N
+agents holds a private number, and the team must list them all in ascending order. A team has
+one task per slot, `agg-pPP-nNN-sKK`, whose instruction states that slot's number, and the
+[example](../experiments/s3-aggregation/spec.yaml) gives each agent its own: its selector
+`<team>-s*` matches the team's N tasks (see above). It runs one team on HF Sandboxes, with the
+board on a public Space that you delete after the run. It needs `HF_TOKEN` with read access to
+the dataset and `HF_INFERENCE_TOKEN` for the agents. `TEAM` and `N` pick another team (e.g.
+`TEAM=agg-p07-n08 N=8`). The dataset README covers the cluster, the board rules, the scaling
+sweep and the metrics.
+
+```sh
+uv run flock launch experiments/s3-aggregation/spec.yaml
+```

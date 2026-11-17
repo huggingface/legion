@@ -1,0 +1,40 @@
+# s3-aggregation: N agents each hold a private number and list the team's numbers in order, each
+# in an HF Sandbox. One task per agent, the board on a public Space: docs/tasks.md#s3-aggregation
+name: ${TEAM:-agg-p01-n04}
+namespace: ${SANDBOX_NAMESPACE:-}             # bills the sandboxes; unset: HF_TOKEN's account
+model: Qwen/Qwen3.8-27B
+naming: consecutive-id                        # agent-00K runs slot K's task: its own number
+inference:
+  hf_router:
+    provider: deepinfra
+  api_key_env: HF_INFERENCE_TOKEN             # inference only: never the workers' HF_TOKEN
+task:
+  repo: https://huggingface.co/datasets/HuggingFaceSwarms/s3-aggregation
+  selector: ${TEAM:-agg-p01-n04}-s*           # the team's N slots, sorted: one per agent
+  revision: 9445a96048014fe9c5b50203843643eb9aa694b1
+agents:
+  count: ${N:-4}                              # TEAM's size
+resources:
+  message_board:
+    space_id: ${BOARD_SPACE:-s3-aggregation}  # bare name = HF_TOKEN's account; a new one per run
+    private: false                            # a private Space's gate needs HF_TOKEN in every sandbox
+    channels: [general]
+    wake: [mention, thread]
+    rules:
+      max_len: 1000
+      min_post_gap: 5s
+      max_posts: 40
+environment:
+  backend: hf-sandbox                         # flavor: cpu-basic (the default)
+workers:
+  agents_per_worker: ${N:-4}                  # one worker and board for the team
+  turn_timeout: 10m
+loop:
+  prompt: Continue the task until it is complete, then stop.
+  every: turn_end
+  while:
+    until: 15m
+    max_rounds: 4
+limits:
+  run_timeout_seconds: 1200
+  agent_max_turns: 60
