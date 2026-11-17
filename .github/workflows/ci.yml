@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:  # a new push to a PR cancels its older run; main runs every push
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -30,4 +34,4 @@ jobs:
             '!f() { echo username=x-access-token; echo "password=$MSGBOARD_TOKEN"; }; f'
           uv sync --all-extras --locked
       - run: uv run --no-sync ruff check
-      - run: uv run --no-sync pytest -q
+      - run: uv run --no-sync pytest -q --durations=20
