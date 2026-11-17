@@ -234,7 +234,8 @@ class Spec(Config):
             if limits.trial_hours * 3600 + parse_duration(turn).total_seconds() + setup >= 86400:
                 raise ValueError(
                     f"{backend} caps a sandbox at 24 h: limits.trial_hours plus {name}'s "
-                    f"turn_timeout ({turn}, a Trial's last turn) must stay below it"
+                    f"turn_timeout ({turn}, a Trial's last turn)"
+                    f"{' and 10 min of setup' if setup else ''} must stay below it"
                 )
         if self.naming == "consecutive-id" and (
                 named := [n for n, r in self.roles().items() if r.name_prefix]):
