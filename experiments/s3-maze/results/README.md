@@ -40,10 +40,20 @@ door leads to the exit (the private task's answer). The private dataset's copies
 
 Moves and minutes to the first exit are medians over the teams that got out; tokens are medians
 over every team; overlap and posts are means. Best-of-N is 1 - (1 - p1)^N from the same model's
-N = 1 rate. **Missing:** 5 of the 2B grid's N = 16 teams (trees 07, 12, 15, 18 and 23) had no
-attempt that counted after 5 tries, each set aside for the infrastructure (below), so they're
-left out of the rates rather than counted as failures. The runs the rest of the grid kept may
-lean towards teams whose agents started no runaway process.
+N = 1 rate.
+
+**Missing:** 5 of the 2B grid's N = 16 teams (trees 07, 12, 15, 18 and 23) had no attempt that
+counted after 5 tries, so they're left out of the rates rather than counted as failures. Their 25
+attempts were all set aside for the infrastructure:
+
+- 13 worker relaunches: 11 after the worker stopped answering, 1 for memory and 1 after a node
+  failure;
+- 2 workers out of memory;
+- 8 late worker starts;
+- 2 reclaimed controller nodes;
+- tree 23's fifth try, cancelled at launch by the stop (below).
+
+The kept 2B N = 16 runs may lean towards teams whose agents started no runaway process.
 
 - **Qwen3.5-27B** stays at 25-28% from N = 1 to 4, then reaches 44% at N = 8 and 88% at
   N = 16. That's below best-of-N from its own N = 1 rate at every N >= 2. Teammates mostly walk
