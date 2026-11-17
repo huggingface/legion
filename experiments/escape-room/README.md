@@ -11,7 +11,7 @@ to work with the board.
 - Docker with Compose on the machine that runs flock (`compute: local`, `backend: docker`;
   the rooms are multi-container, so HF Sandboxes cannot run them).
 - `HF_TOKEN` with read access to the private dataset
-  `HuggingFaceSwarms/AgentEscapeBench-harbor` and Inference Providers access. It is also the
+  `HuggingFaceSwarms/AgentEscapeBench` and Inference Providers access. It is also the
   inference key, so it reaches every agent's container. Git must be able to clone the dataset
   with it, e.g. `hf auth login --add-to-git-credential`.
 

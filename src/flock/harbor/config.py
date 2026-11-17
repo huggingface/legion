@@ -118,9 +118,24 @@ class Limits(Settings):
     agent_timeout_seconds: float | None = Field(default=None, gt=0)
 
 
+class SuccessCheck(Settings):
+    """Operator-owned check in a task sidecar, never in the agent container."""
+
+    service: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_-]+$")
+    command: str = Field(min_length=1)
+
+    @field_validator("service")
+    @classmethod
+    def sidecar_only(cls, value):
+        if value == "main":
+            raise ValueError("success_check must run in a trusted sidecar, not main")
+        return value
+
+
 class Config(Settings):
     name: str = Field(default="pi-team", pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
     harness: Literal["pi"] = "pi"
+    success_check: SuccessCheck | None = None
     model: str = Field(min_length=1)
     inference: Inference = Field(default_factory=Inference)
     task: TaskSettings

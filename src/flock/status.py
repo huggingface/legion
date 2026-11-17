@@ -96,6 +96,13 @@ def verdict(status: dict, health: dict | None, now: float | None = None) -> dict
             degraded.append(f"type {t['name']}: launch error, retrying: {t['launch_error']}")
     if unsynced := (status.get("released") or {}).get("unsynced"):
         degraded.append(f"{len(unsynced)} agents' final sync failed")
+    if success := status.get("success"):
+        if success.get("artifact_error"):
+            failing.append("winning trial grading artifacts were not preserved")
+        if success.get("verification") == "failed":
+            failing.append("winning trial failed verification")
+        elif success.get("verification") != "passed":
+            degraded.append("environment success reported; verification not confirmed")
     if status.get("budget_stop"):
         degraded.append(f"budget stop ({status['budget_stop']})")
     if health is None:

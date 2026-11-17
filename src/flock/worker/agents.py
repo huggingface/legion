@@ -194,7 +194,8 @@ class AgentRuntime:
         os.replace(tmp, self.state_path)
 
     def harness_files(self) -> list[Path]:
-        return self.adapter.session_files(self.state.session_id)
+        artifacts = getattr(self.adapter, "artifact_files", None)
+        return self.adapter.session_files(self.state.session_id) + (artifacts() if artifacts else [])
 
     def _now(self) -> float:
         return asyncio.get_running_loop().time()
@@ -664,7 +665,7 @@ class AgentRuntime:
         self.allow_starts = False
         cut = False
         if (burst := self._burst) is not None:
-            self._stop_req = "drain"
+            self._stop_req = self._stop_req or "drain"  # preserve an interrupt already requested
             try:
                 if deadline is None:
                     await burst

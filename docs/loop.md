@@ -325,3 +325,46 @@ Final-round spend is exempt from `agent_usd` and bounded only by the reserve and
 booking to tighten the budget overshoot, a `loop.start: manual` switch, and a swarm-level
 `limits.final_reserve_usd` (the reserve is `final.reserve_usd` per type, summed for the swarm
 threshold).
+
+
+## Stop on task success
+
+Set `stop_on_success: true` in a Harbor experiment and provide an operator-owned
+`success_check: {service: puzzle, command: ...}`. The command runs in a trusted
+Docker/Podman sidecar (not `main`) and returns JSON with a boolean `success` and
+optional `evidence`. Commands must be read-only, bounded, and independent of agent-owned files.
+A task with no check cannot use this policy.
+
+For a task whose `puzzle` sidecar has Python installed and serves its authoritative state
+at `http://127.0.0.1:8000/state`, add these fields to the experiment YAML:
+
+```yaml
+environment: {backend: podman}
+stop_on_success: true
+success_check:
+  service: puzzle
+  command: >-
+    python -c 'import json, urllib.request;
+    state=json.load(urllib.request.urlopen("http://127.0.0.1:8000/state", timeout=3));
+    won=state.get("won") is True;
+    print(json.dumps({"success": won, "evidence": {"won": won}}))'
+```
+
+The command runs inside `puzzle`, where the endpoint is local. It emits
+`{"success": false, "evidence": {"won": false}}` until the task is solved, then
+`{"success": true, "evidence": {"won": true}}`. Adapt the endpoint and success condition
+to the task; the sidecar must already be defined in its Compose configuration.
+
+Workers check immediately, then wait 30 seconds between checks, with a five-second timeout
+per check, even between model turns.
+Errors never count as success. The next authenticated heartbeat reports the first positive
+result; the controller records `task_success`, interrupts active turns, blocks new work,
+and releases workers. There are no final model turns. The decision survives restarts and
+cannot be resumed; launch a new run to repeat the experiment. Default: disabled.
+
+Status includes `success` (winner, trial, observation and acceptance times, evidence,
+and verification). Environment success is distinct from native verification: trials close,
+collect artifacts and run Harbor's verifier within the existing five-minute cleanup budget.
+The winner passes verification only with native `reward == 1` and no trial exception.
+Failures or missing verification are shown explicitly; release reports failed artifact syncs.
+Actual usage includes detection delay and cleanup; interrupted requests can lack returned usage.
