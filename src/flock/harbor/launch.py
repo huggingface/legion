@@ -311,8 +311,7 @@ async def _run_experiment(config: Config):
                     bundle.manifest,
                     instructions,
                     role_instructions.get(record["role"], ""),
-                    # The run ID only matters to agents sharing resources (a board can hold
-                    # earlier runs' messages); without any, it would only add a run label to the prompt.
+                    # The run ID only matters to agents sharing resources like the message board
                     run_id=run_id if config.resources else None,
                 )
                 instructions_file = inputs / f"{name}-instructions.md"
