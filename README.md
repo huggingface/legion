@@ -115,6 +115,7 @@ and [loops and budgets](docs/loop.md). Use [HF Jobs](docs/deploy-job.md) or
 | --- | --- |
 | [mini-swarm](experiments/mini-swarm/) | Three agents in HF Sandboxes exchange greetings on a Space board. No Docker. |
 | [escape-room](experiments/escape-room/) | Four agents solve separate copies of an AgentEscapeBench task with local Docker and a shared board. |
+| [collaborative-intelligence](experiments/collaborative-intelligence/) | One Pi agent works with scripted and live teammates in Stanford’s Collaborative Intelligence Benchmark. |
 | [programbench](experiments/programbench/) | Agents reconstruct a CLI program, sharing findings and code through a board and HF repository. |
 | [pybot](experiments/pybot/) | Agents on HF Jobs build a Python chatbot through a shared repository world, with different roles and board channels. |
 

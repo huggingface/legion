@@ -1,0 +1,40 @@
+name: ${RUN_NAME:-ci-fullpi-gemini}
+model: gemini-3.8-flash
+inference:
+  urls:
+  - http://model-compat:8003/v1
+  api_key_env: GEMINI_API_KEY
+  api_format: openai_chat_completions
+  reasoning_effort: low
+  task_local: true
+  context_window: 128000
+task:
+  repo: https://huggingface.co/datasets/HuggingFaceSwarms/collaborative-intelligence
+  revision: 61bfd4fe1749264c291751e6dc02540398eb3e4d
+  selector: ci-sharing-h2-r-choosing-the-safe-field-station-solo-s0
+  model_env:
+    model: CI_EVALUATED_MODEL
+    api_key: CI_PRIVATE_READOUT_API_KEY
+    base_url: CI_PRIVATE_READOUT_BASE_URL
+    reasoning_effort: CI_PRIVATE_READOUT_EFFORT
+    profile: CI_AGENT_CONFIGURATION
+    headers: CI_MODEL_HEADERS
+agents:
+  count: 1
+environment:
+  backend: docker
+workers:
+  agents_per_worker: 1
+  turn_timeout: 3600s
+  env:
+    CI_MODEL_UPSTREAM: ${CI_MODEL_UPSTREAM:-https://generativelanguage.googleapis.com/v1beta/openai}
+    CI_PRIVATE_READOUT_API: google-openai-chat
+    FLOCK_RESULTS_DIR: ${PWD}/results/cib
+loop:
+  prompt: ''
+  while:
+    max_rounds: 1
+limits:
+  run_timeout_seconds: 3600
+  agent_max_turns: 256
+  agent_timeout_seconds: null
