@@ -413,3 +413,33 @@ def test_hf_jobs(tiny, hub, tmp_path, monkeypatch):
     assert [(e["name"], e["data"]["detail"]) for e in tiny.events("tiny", "worker.")] == [
         ("worker.launched", job), ("worker.released", job),
         ("worker.ended", "COMPLETED: drained: worker reported it")]
+
+
+def test_stop_on_success_releases_workers_and_verifies(tiny):
+    # Real controller + two real worker processes; only Harbor/container/model are fake.
+    spec = tiny.spec(replicas=4, extra="""
+stop_on_success: true
+success_check:
+  service: puzzle
+  command: after-first-turn
+""")
+    tiny.flock("launch", spec, "--skip-preflight")
+    names = tiny.names("writer", 4)
+    tiny.flock("prompt", "--swarm", "tiny", "--type", "writer", "solve [hold]")
+    def finished():
+        status = json.loads(tiny.flock("status", "tiny", "--json"))["status"]
+        return (status.get("success", {}).get("verification") == "passed"
+                and all(t["workers_by_state"].get("dead", 0) == 2
+                        for t in status["types"].values()) and status)
+    status = tiny.wait(finished, timeout=60)
+    assert status["released"] and not status["released"]["unsynced"]
+    assert status["pending_prompts"] == 0
+    assert "STOPPED ON SUCCESS" in tiny.flock("status", "tiny")
+    assert "already succeeded" in tiny.flock("prompt", status["success"]["agent"], "again", code=1)
+    turns = [e for name in names for e in tiny.events(name, "agent.turn")]
+    assert any(e["name"] == "agent.turn_started" for e in turns)
+    assert any(e["name"] == "agent.turn_interrupted" for e in turns)
+    assert "launch a new run" in tiny.flock("launch", "tiny", code=1)
+    released = tiny.flock("stop", "tiny", "--release")
+    assert "this swarm succeeded; launch a new run" in released
+    assert "resumes" not in released

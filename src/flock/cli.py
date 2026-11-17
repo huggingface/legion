@@ -87,14 +87,18 @@ def _print_status(st: dict) -> None:
         for t in st["types"].values()
     ]
     _table(rows, ["type", "health", "replicas", "agents", "workers", "cost"])
+    if success := st.get("success"):
+        typer.echo(f"STOPPED ON SUCCESS: {success['agent']} at {success['accepted_at']}; "
+                   f"verification: {success.get('verification', 'pending')}")
     held = st.get("held") or {}
     for kind in ("types", "agents"):
         for name, h in (held.get(kind) or {}).items():
             typer.echo(f"HELD {kind[:-1]} {name}: {h['reason'] or '-'} (by {h['by']}"
                        f"{', auto' if h.get('auto') else ''}, since {h['since'][:19]}Z)")
     if rel := st.get("released"):
-        typer.echo(f"RELEASED since {rel['since'][:19]}Z: workers drained, nothing launches "
-                   "until `flock launch`")
+        next_run = "; launch a new run to repeat" if st.get("success") else " until `flock launch`"
+        typer.echo(f"RELEASED since {rel['since'][:19]}Z: workers drained, nothing launches"
+                   f"{next_run}")
         for name, err in (rel.get("unsynced") or {}).items():
             typer.echo(f"NOT synced: {name}: {err}")
     for t in st["types"].values():
@@ -401,9 +405,12 @@ def stop(
                "are older than their last turns")])
     if down.get("ended"):
         typer.echo("released: every agent synced, controller checkpointed, nothing runs; "
-                   "`flock launch FOLDER` starts it again and resumes")
+                   + ("this swarm succeeded; launch a new run" if done.get("success") else
+                      "`flock launch FOLDER` starts it again and resumes"))
     elif "unsynced" in done:
-        typer.echo(f"released: every agent synced, compute freed; `flock launch {swarm}` resumes")
+        typer.echo("released: every agent synced, compute freed; "
+                   + ("this swarm succeeded; launch a new run" if done.get("success") else
+                      f"`flock launch {swarm}` resumes"))
 
 
 @app.command()

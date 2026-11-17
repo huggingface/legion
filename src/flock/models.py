@@ -1142,6 +1142,7 @@ class SwarmSpec(BaseModel):
     bucket: str = ""
     # Where the types' models run (design.md 'Inference'), unless a type sets its own
     inference: Inference = Field(default_factory=Inference)
+    stop_on_success: bool = False
     types: dict[str, TypeSpec]
     # The tools folder, relative to the spec file; None: `tools/` next to it.
     # Read by `flock launch` only.
@@ -1175,6 +1176,9 @@ class SwarmSpec(BaseModel):
         (`resolved_model`), so the stored spec carries what admission and cost derive from. The
         context window the controller pinned stays while the block (but `max_working`, the
         controller's) and the model are the same, and so do the hf_jobs servers' `urls`."""
+        if self.stop_on_success and not any(
+                ts.harbor and ts.harbor.config.get("success_check") for ts in self.types.values()):
+            raise ValueError("stop_on_success requires a Harbor success_check")
         for type_name, ts in self.types.items():
             old, ts.resolved_model = ts.resolved_model, resolve_model(self, ts, type_name=type_name)
             new = ts.resolved_model
@@ -1795,8 +1799,8 @@ class WorkerHeartbeat(BaseModel):
 class Event(BaseModel):
     """One line of an agent's event stream.
 
-    The on-disk / over-the-wire shape is pi session format v3 (see swarmlab's
-    export.py for the reference encoding). `type`, `ts`, `agent` are required by us;
+    The on-disk / over-the-wire shape is pi session format v3 (flock.worker.events
+    documents the encoding). `type`, `ts`, `agent` are required by us;
     the rest of the pi record lives in `data`. Harness-neutral types the worker adds:
     session_started, session_resumed, session_restarted, turn_started, turn_ended,
     turn_interrupted, sync.
@@ -2125,6 +2129,7 @@ class SwarmStatus(BaseModel):
     # `flock stop --release`: {since, reason, unsynced: {agent: error}}; None when not released
     released: dict[str, Any] | None = None
     # bumped by every apply that changes the spec (docs/live.md)
+    success: dict[str, Any] | None = None
     generation: int | None = None
 
 

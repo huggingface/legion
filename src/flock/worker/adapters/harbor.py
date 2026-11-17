@@ -28,19 +28,27 @@ container do not survive a new Trial.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import os
+import shlex
+import shutil
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from flock.models import TypeSpec, parse_duration
 from flock.secrets_file import exposed
 from flock.worker.adapters.base import AdapterEvent, EventQueue, ResumeError
+from flock.worker.harbor import TRIAL_RESULTS, keep_results, results_dir
 
 log = logging.getLogger(__name__)
+
+CHECK_START = "\nFLOCK_CHECK_START\n"
+CHECK_END = "\nFLOCK_CHECK_END\n"
 
 CANCEL_WAIT = 60.0  # s close() waits for a cancelled Trial's environment to stop
 
@@ -60,6 +68,9 @@ class HarborAdapter:
         self.session_id: str | None = None
         self.attempt = 0  # Trials started for this agent here
         self.trial: Any = None
+        self._success: dict[str, Any] | None = None
+        self._success_error: str | None = None
+        self._success_watcher: asyncio.Task | None = None
         self.result: Any = None  # the last ended Trial's TrialResult
         self._run: asyncio.Task | None = None
         self._starting: asyncio.Task | None = None  # a Trial started by send() or a rollover
@@ -78,6 +89,31 @@ class HarborAdapter:
         takes up the newest."""
         return sorted((self.home / "sessions").glob("*.jsonl"))
 
+    def artifact_files(self) -> list[Path]:
+        return [p for p in (self.home / "results").rglob("*") if p.is_file() and not p.is_symlink()]
+
+    def _keep_result(self) -> None:
+        """Keep grading evidence in the synced harness home, without credential-bearing config."""
+        from flock.harbor.results import write_json
+
+        trial = self.trial
+        destination = self.home / "results" / trial.config.trial_name
+        destination.mkdir(parents=True, exist_ok=True)
+        if self.result is not None:
+            summary = self.result.model_dump(mode="json", include={
+                "trial_name", "task_name", "task_id", "task_checksum", "verifier_result",
+                "verifier_environment_mode", "started_at", "finished_at"})
+            summary["exception_type"] = (self.result.exception_info.exception_type
+                                         if self.result.exception_info else None)
+            write_json(destination / "result.json", summary)
+        write_json(destination / "success.json", self._success)
+        source = trial.config.trials_dir / trial.config.trial_name / "artifacts"
+        for path in source.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                target = destination / "artifacts" / path.relative_to(source)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, target)
+
     def alive(self) -> bool:
         return self._run is not None and not self._run.done()
 
@@ -85,7 +121,10 @@ class HarborAdapter:
         """The heartbeat's `trial`: the agent's latest Trial here, if any."""
         if self.trial is None:
             return None
-        return {"id": self.trial.config.trial_name, "attempt": self.attempt, "alive": self.alive()}
+        status = {"id": self.trial.config.trial_name, "attempt": self.attempt, "alive": self.alive()}
+        if self.spec.harbor.config.get("success_check"):
+            status.update(success=self._success, success_check_error=self._success_error)
+        return status
 
     # ------------------------------------------------------------------ adapter
     async def start(self, workdir: Path, session_id: str | None, spec: TypeSpec, *,
@@ -143,6 +182,9 @@ class HarborAdapter:
         wait). A Trial still starting is cancelled at once, and no Trial starts after a close
         (the worker never reuses a closed adapter)."""
         self._closes += 1
+        if self._success_watcher is not None:
+            self._success_watcher.cancel()
+            await asyncio.gather(self._success_watcher, return_exceptions=True)
         starting = self._starting
         if starting is not None and not starting.done():
             starting.cancel()
@@ -163,6 +205,15 @@ class HarborAdapter:
                 finally:
                     self._closing = False
                     self._prompts = asyncio.Queue()
+        if run is not None and run.done() and self.spec.harbor.config.get("success_check"):
+            try:
+                await asyncio.to_thread(self._keep_result)
+            except Exception as exc:  # noqa: BLE001 - cleanup must still stop the environment
+                error = f"grading artifact preservation failed ({type(exc).__name__})"
+                if self._success is not None:
+                    self._success["artifact_error"] = error
+                self._emit(AdapterEvent("error", error=error))
+                log.warning("%s: %s", self.agent, error)
         if run is None or run.done():
             await self._drop_network(self._network)
         if self.resources is not None:  # it leaves this worker (drain, unassign)
@@ -186,7 +237,8 @@ class HarborAdapter:
         """A Trial for the queued prompts, unless one is up or starting (or the session must
         restart: the runtime's next start gets the ResumeError)."""
         if (self.alive() or self._creating or self._closing or self._resume_failed
-                or self._prompts.empty()):
+                or self._prompts.empty()
+                or (self._success and self.spec.harbor.config.get("stop_on_success"))):
             return
         self._creating = True  # until the task has the new Trial's `_run`
         self._starting = asyncio.create_task(self._restart(), name=f"trial-{self.agent}")
@@ -249,6 +301,12 @@ class HarborAdapter:
             raise RuntimeError("harness harbor needs the type's `harbor:` block")
         if self._closes:  # the exit path closed this agent while its burst got here
             raise RuntimeError("agent closed")
+        # A final in-flight check can report success as the old Trial expires.
+        # Keep that Trial (and its verifier result) until the controller releases us.
+        if self._success_watcher is not None:
+            await self._success_watcher
+        if self._success and h.config.get("stop_on_success"):
+            return
         if self.host is not None:
             await self.host.prepare(self.spec)
             self.resources, self.bundle = self.host.resources, self.host.bundle
@@ -335,10 +393,56 @@ class HarborAdapter:
             raise
         finally:
             ready.cancel()
+        if channel.ready.is_set() and config.success_check is not None:
+            self._success = None
+            self._success_error = None
+            self._success_watcher = asyncio.create_task(
+                self._watch_success(trial, config.success_check))
         if not channel.ready.is_set():
             why = channel.restore_error or _why(trial, run)
             raise (ResumeError if channel.restore_error else RuntimeError)(
                 f"Trial {tc.trial_name} did not start: {why}")
+
+    async def _watch_success(self, trial, check) -> None:
+        # Harbor merges compose stderr into stdout; Podman prints a provider banner there.
+        # Frame only the trusted command's output instead of parsing that transport noise.
+        command = (f"printf %s {shlex.quote(CHECK_START)}; sh -c {shlex.quote(check.command)} ; "
+                   f'flock_check_rc=$?; printf %s {shlex.quote(CHECK_END)}; exit "$flock_check_rc"')
+        while trial is self.trial and self.alive() and not self._closing:
+            try:
+                async with asyncio.timeout(5):
+                    result = await trial.agent_environment.service_exec(
+                        command, service=check.service, timeout_sec=5)
+                if result.return_code != 0:
+                    raise ValueError(f"check exited {result.return_code}")
+                if len(result.stdout or "") > 16384:
+                    raise ValueError("check response exceeds 16 KiB")
+                output = (result.stdout or "").replace("\r\n", "\n")
+                if output.count(CHECK_START) != 1 or output.count(CHECK_END) != 1:
+                    raise ValueError("missing or ambiguous success check frame")
+                body = json.loads(output.split(CHECK_START, 1)[1].split(CHECK_END, 1)[0])
+                if not isinstance(body, dict) or type(body.get("success")) is not bool:
+                    raise ValueError("check must return a JSON boolean success")
+                self._success_error = None
+                if body["success"]:
+                    self._success = {"trial_id": trial.config.trial_name,
+                                     "observed_at": datetime.now(UTC).isoformat(),
+                                     "evidence": body.get("evidence"),
+                                     "verification": "pending"}
+                    if self._run.done():
+                        self._verify_success(_result(self._run))
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - retry failed probes, never infer success
+                # Do not include command stdout or exception text: it may contain task secrets.
+                error = f"success check failed ({type(exc).__name__})"
+                if error != self._success_error:
+                    log.warning("%s: %s", self.agent, error)
+                    self._emit(AdapterEvent("error", error=error,
+                                            data={"reason": "success_check"}))
+                self._success_error = error
+            await asyncio.sleep(30)
 
     async def _drop_network(self, networks: Any) -> None:
         """Remove a Trial's network once its environment has stopped."""
@@ -351,10 +455,25 @@ class HarborAdapter:
         except Exception as e:  # noqa: BLE001 - a leftover network holds a subnet, not the run
             log.warning("%s: Trial network not removed: %s", self.agent, e)
 
+    def _verify_success(self, result: Any) -> None:
+        if self._success is not None:
+            verifier = getattr(result, "verifier_result", None)
+            rewards = getattr(verifier, "rewards", None)
+            self._success.update(verification=("passed" if rewards and
+                rewards.get("reward") == 1 and not result.exception_info else "failed"),
+                rewards=rewards)
+
     def _ended(self, trial: Any, task: asyncio.Task) -> None:
         """Done callback of a Trial's run(): roll over after trial_hours, report a failure
-        (now, or at the next burst)."""
+        (now, or at the next burst). Its results go to the results dir too, when there is
+        one (flock.worker.harbor)."""
         self.result = _result(task)
+        if (results := results_dir()) is not None:
+            name = trial.config.trial_name
+            keep_results(trial.config.trials_dir / name, results / self.agent / "trials" / name,
+                         TRIAL_RESULTS)
+        if trial is self.trial:
+            self._verify_success(self.result)
         if trial is not self.trial or not trial.agent.channel.ready.is_set():
             return  # superseded, or never ready: whoever started it reports that
         try:  # unmounted (hf-sandbox): Harbor's download at the end beats FlockPi's last one

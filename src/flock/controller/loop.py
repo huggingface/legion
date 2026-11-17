@@ -388,6 +388,7 @@ class LoopEngine:
                             self.store.put_loop_agent(a["name"], swarm, a["type"], st)
                         self.store.enqueue_command(a["worker"],
                                                    StopCommand(agent=a["name"]).model_dump_json())
+                        self._stops[a["name"]] = now
             return h
 
     def resume(self, swarm: str, types: list[str] | None = None, agents: list[str] | None = None,
@@ -399,6 +400,8 @@ class LoopEngine:
         go out on the next poll / tick. `release` also clears `released` (`flock launch`):
         the workers relaunch. Returns the swarm's holds."""
         with self._lock:
+            if self.store.get_control(swarm, "success"):
+                raise ValueError("this swarm succeeded; launch a new run")
             flags = self.store.swarm_flags(swarm)
             if release and flags.pop("released", None) is not None:
                 self.store.put_swarm_flags(swarm, flags)
@@ -425,8 +428,55 @@ class LoopEngine:
                 self.store.listener("commands", w["id"])
             return flags.get("holds") or {"types": {}, "agents": {}}
 
+    def task_success(self, spec: SwarmSpec, worker_id: str, incarnation: str | None, agents) -> None:
+        """Accept only worker heartbeat evidence, never model/transcript events."""
+        with self._lock:
+            winner = self.store.get_control(spec.swarm, "success")
+            if not spec.stop_on_success and winner is None:
+                return
+            for report in agents:
+                agent = self.store.get_agent(report.name)
+                trial = report.trial or {}
+                evidence = trial.get("success")
+                if (not agent or agent["swarm"] != spec.swarm or agent["worker"] != worker_id
+                        or not isinstance(evidence, dict) or not trial.get("id")
+                        or evidence.get("trial_id") != trial["id"]):
+                    continue
+                ts = spec.types.get(agent["type"])
+                if not ts or not ts.harbor or not ts.harbor.config.get("success_check"):
+                    continue
+                if winner is None and spec.stop_on_success:
+                    winner = {**evidence, "agent": report.name, "worker": worker_id,
+                              "incarnation": incarnation,
+                              "accepted_at": self.clock().isoformat()}
+                    self.store.put_control(spec.swarm, "success", winner)
+                    self._event(spec.swarm, "task_success", winner)
+                elif (winner and winner["agent"] == report.name
+                      and winner["worker"] == worker_id and winner.get("incarnation") == incarnation
+                      and winner["trial_id"] == trial["id"]
+                      and evidence.get("verification") in ("passed", "failed")
+                      and (winner.get("verification") != evidence["verification"]
+                           or winner.get("artifact_error") != evidence.get("artifact_error"))):
+                    winner.update(verification=evidence["verification"], rewards=evidence.get("rewards"),
+                                  artifact_error=evidence.get("artifact_error"))
+                    self.store.put_control(spec.swarm, "success", winner)
+                    self._event(spec.swarm, "success_verified", winner)
+            if winner:
+                self._stop_success(spec)
+
+    def _stop_success(self, spec: SwarmSpec) -> None:
+        self.pause(spec.swarm, interrupt=True, release=True, reason="task_success", by="controller")
+        self.store.drop_prompts(spec.swarm)
+        now = self.clock().timestamp()
+        for name, loop in self.store.get_loops(spec.swarm).items():
+            if name in spec.types and loop["state"] in ("running", "final"):
+                self._stop(spec.swarm, name, spec.types[name], loop, "task_success",
+                           final=False, now=now)
+        self._keep_stopped(spec, now)
+
     def hard_stopped(self, swarm: str) -> bool:
-        return self.store.swarm_flags(swarm).get("budget_stop") == "hard"
+        return (self.store.swarm_flags(swarm).get("budget_stop") == "hard"
+                or bool(self.store.get_control(swarm, "success")))
 
     # ------------------------------------------------------------------ status
     def status(self, swarm: str, type_name: str, *, detail: bool = False) -> LoopStatus | None:
@@ -552,6 +602,9 @@ class LoopEngine:
                     log.exception("loop tick for %s failed", sw["spec"].swarm)
 
     def _tick_swarm(self, spec: SwarmSpec) -> None:
+        if self.store.get_control(spec.swarm, "success"):
+            self._stop_success(spec)
+            return
         now = self.clock().timestamp()
         loops = self.store.get_loops(spec.swarm)
         phase = self._budget(spec, loops, now)
@@ -688,8 +741,9 @@ class LoopEngine:
                 continue
             self.store.enqueue_command(a["worker"], StopCommand(agent=a["name"]).model_dump_json())
             self._stops[a["name"]] = now
-            self._event(spec.swarm, "budget_stop", {"phase": "hard", "restop": a["name"],
-                                                    "budget_usd": spec.limits.budget_usd})
+            if self.store.swarm_flags(spec.swarm).get("budget_stop") == "hard":
+                self._event(spec.swarm, "budget_stop", {"phase": "hard", "restop": a["name"],
+                                                       "budget_usd": spec.limits.budget_usd})
 
     # ------------------------------------------------------------------ lifecycle
     def _mode(self, spec: SwarmSpec, type_name: str, lp: LoopSpec) -> str:

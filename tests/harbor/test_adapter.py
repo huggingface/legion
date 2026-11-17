@@ -41,6 +41,10 @@ class Fakes:
 
     def __init__(self):
         self.trials, self.pi, self.root, self.uploads, self.net = [], [], [], [], []
+        self.reward = 1.0
+        self.success_response = None
+        self.success_gate = None
+        self.success_calls = []
         self.pi_env = []  # each `pi --print` exec's env
         self.probe_ok, self.upload_fails, self.kill_fails = True, False, False
         self.fail = None  # pi call number -> "exit" | "provider"
@@ -49,6 +53,7 @@ class Fakes:
         self.mounted = True  # False: /logs/agent lives in the env (hf-sandbox), not on the host
         self.start_gate = self.verify_gate = None  # set: Trial.run waits for them
         self.route_gate = None  # set: `ip route` (a Trial network's first command) waits for it
+        self.steps = False  # True: the verifier's files land as a multi-step Trial's
 
     def gate(self, n):
         return self.gates.setdefault(n, asyncio.Event())
@@ -61,6 +66,23 @@ class FakeEnv:
     def __init__(self, logs_dir, fakes):
         self.logs_dir, self.fakes, self.default_user = logs_dir, fakes, None
         self.killed = False
+
+    async def service_exec(self, command, *, service, timeout_sec):
+        # Compose mixes a banner from stderr into stdout; the command frames its JSON body.
+        from flock.worker.adapters.harbor import CHECK_END, CHECK_START
+
+        parts = shlex.split(command)
+        original = parts[parts.index("-c") + 1]
+        self.fakes.success_calls.append((original, service, timeout_sec))
+        if self.fakes.success_gate is not None:
+            await self.fakes.success_gate.wait()
+        if original == "after-first-turn":
+            from ..worker_fakes import until
+
+            await until(lambda: bool(self.fakes.pi))
+            original = '{"success": true}'
+        return ExecResult(return_code=0, stdout="compose provider banner" + CHECK_START
+                          + (self.fakes.success_response or original) + CHECK_END)
 
     async def upload_file(self, source, target):
         pass
@@ -177,7 +199,12 @@ class Trial(FakeTrial):
         if self.fakes.verify_gate:
             await self.fakes.verify_gate.wait()
         self.verified = True
-        self.result.verifier_result = VerifierResult(rewards={"reward": 1.0})
+        self.result.verifier_result = VerifierResult(rewards={"reward": self.fakes.reward})
+        trial_dir = self.config.trials_dir / self.config.trial_name  # as Harbor leaves it
+        verifier = trial_dir / ("steps/check/verifier" if self.fakes.steps else "verifier")
+        verifier.mkdir(parents=True, exist_ok=True)
+        (verifier / "reward.txt").write_text("1")
+        (trial_dir / "result.json").write_text(self.result.model_dump_json())
         return self.result
 
 
@@ -931,3 +958,73 @@ async def test_a_pi_turn_leaves_no_value_in_an_argv(fakes, monkeypatch, tmp_path
     ((argv, compose_env),) = runs
     assert pi_env and all(compose_env[k] == v for k, v in pi_env.items())
     assert not [x for x in argv for v in pi_env.values() if v in x], argv
+
+
+@pytest.mark.parametrize("body,success,reward", [
+    ('{"success": true, "evidence": {"won": true}}', True, 1),
+    ('{"success": true}', True, 0),
+    ('{"success": false}', False, 1),
+    ('{"success": "true"}', False, 1),
+    ('not-json', False, 1),
+])
+async def test_sidecar_success_survives_until_verification(fakes, tmp_path, body, success, reward):
+    fakes.success_response, fakes.reward = body, reward
+    ts = type_spec()
+    ts.harbor.config["success_check"] = {"service": "puzzle", "command": "check"}
+    a = make_adapter(tmp_path / "work" / "agent-0000", "agent-0000", ts)
+    try:
+        await a.start(a.workdir, None, ts)
+        # Checks also run while no model turn is active.
+        from ..worker_fakes import until
+
+        await until(lambda: bool(fakes.success_calls))
+        status = a.trial_status()
+        assert bool(status["success"]) is success
+        assert fakes.success_calls == [("check", "puzzle", 5)]
+        await a.close(timeout=2)
+        if success:
+            assert a.trial_status()["success"]["verification"] == ("passed" if reward else "failed")
+            assert fakes.trials[0].verified
+            saved = a.home / "results" / a.trial.config.trial_name / "result.json"
+            assert saved in a.artifact_files()
+            assert "config" not in json.loads(saved.read_text())
+    finally:
+        await a.close(0)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("late_check", [False, True])
+async def test_success_at_trial_expiry_is_retained_until_release(
+        fakes, tmp_path, clock, enabled, late_check):
+    from ..worker_fakes import until
+
+    ts = type_spec(trial_hours=1)
+    ts.harbor.config.update(stop_on_success=enabled,
+                           success_check={"service": "puzzle", "command": '{"success": true}'})
+    a = make_adapter(tmp_path / "work" / "agent-0000", "agent-0000", ts)
+    if late_check:
+        fakes.success_gate = asyncio.Event()
+    try:
+        _, events = await start(a)
+        await until(lambda: bool(fakes.success_calls))
+        winning_trial = a.trial_status()["id"]
+        clock[0] += 3600
+        await until(lambda: not a.alive())
+        if late_check:
+            fakes.success_gate.set()
+        await until(lambda: a.trial_status()["success"] is not None
+                    and a.trial_status()["success"]["verification"] == "passed")
+        # A prompt between detection and the controller's heartbeat must not replace the win.
+        await a.start(a.workdir, None, ts)
+        await a.send("next turn")
+        if enabled:
+            assert a.trial_status()["id"] == winning_trial
+            assert a.trial_status()["success"]["verification"] == "passed"
+            assert len(fakes.trials) == 1
+        else:
+            await read(events, "turn_ended")
+            assert len(fakes.trials) == 2
+        await a.close(timeout=2)
+        assert any(p.name == "result.json" for p in a.artifact_files())
+    finally:
+        await a.close(0)

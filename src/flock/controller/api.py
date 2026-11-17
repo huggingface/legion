@@ -362,6 +362,7 @@ def swarm_status(store: Store, spec: SwarmSpec, now: float,
                   "unsynced": store.get_control(spec.swarm, "unsynced") or {}}
         if flags.get("released") else None,
         generation=store.generation(spec.swarm),
+        success=store.get_control(spec.swarm, "success"),
     )
 
 
@@ -1195,6 +1196,9 @@ def create_app(
 
     @api.post("/agents/{name}/spawn", status_code=201)
     def spawn(name: str, req: SpawnRequest) -> SpawnAck:
+        parent = agent_or_404(name)
+        if store.get_control(parent["swarm"], "success"):
+            raise HTTPException(409, "swarm already succeeded")
         try:
             ack, created = spawn_child(store, name, req, clock().timestamp())
         except KeyError:
@@ -1234,6 +1238,8 @@ def create_app(
         }
 
     def not_budget_stopped(swarm: str) -> None:
+        if store.get_control(swarm, "success"):
+            raise HTTPException(409, "swarm already succeeded; launch a new run")
         if loops.hard_stopped(swarm):
             raise HTTPException(409, f"swarm {swarm!r} reached limits.budget_usd: every agent was "
                                      "stopped; raise the budget (flock update) to prompt again")
@@ -1632,6 +1638,8 @@ def create_app(
         w = store.get_worker(worker_id)
         sw = store.get_swarm(w["swarm"]) if w else None
         pools = caps(sw["spec"], w["type"]) if sw else []
+        if sw is not None:
+            loops.task_success(sw["spec"], worker_id, w["incarnation"], hb.agents)
         if heartbeat_seen(hb, clock().timestamp()) and pools:
             wake_window(w["swarm"], pools)
         if sw is not None and (ets := sw["spec"].types.get(w["type"])) and ets.ephemeral:
@@ -1716,6 +1724,8 @@ def add_pause_routes(api: APIRouter, loops: LoopEngine) -> None:
             return {"swarm": swarm, "held": _held_view(fn(swarm, **kw)) or {"types": {}, "agents": {}}}
         except KeyError as e:
             raise HTTPException(404, str(e.args[0])) from None
+        except ValueError as e:
+            raise HTTPException(409, str(e)) from None
 
     @api.post("/swarms/{swarm}/pause")
     def pause(swarm: str, req: HoldRequest) -> dict:

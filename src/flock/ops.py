@@ -582,6 +582,7 @@ def stop(api: Client, swarm: str, *, types: list[str] | None = None,
                              reason=reason, release=release)}
     if release:
         done["unsynced"] = release_wait(api, swarm, progress=progress)
+        done["success"] = api.swarm(swarm)["status"].get("success")
         try:
             done["down"] = down(api, swarm)
         except SpecError as e:
