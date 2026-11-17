@@ -123,8 +123,7 @@ def _pricing_row(v: list[float], where: str) -> list[float]:
 
 
 class ProviderSpec(BaseModel):
-    """Where a model is served (design.md 'Providers'). Field names follow swarmlab's
-    provider params so a `providers:` block moves between the two projects.
+    """Where a model is served (design.md 'Providers').
 
     `api_key_env` names a secret / env var; the value is never in the spec. The controller
     sends that secret to the provider's jobs and uses it for preflight; the worker hands it to
@@ -209,10 +208,17 @@ class ModelSpec(BaseModel):
 
     model: str  # "<provider>:<model id>"
     reasoning: Reasoning | None = None
-    # Raw request-body fields (swarmlab's `extra`). Not sent (Harbor's Pi cannot); kept for
-    # spec portability, with a warning at launch.
-    extra: dict[str, Any] | None = None
     pricing: list[float] | None = None  # overrides the provider's pricing for this alias
+
+    @model_validator(mode="before")
+    @classmethod
+    def _no_request_fields(cls, v: Any) -> Any:
+        """Harbor's Pi sends no raw request-body fields, so a model cannot carry any."""
+        if isinstance(v, dict) and "extra" in v:
+            raise ValueError("`extra` is not supported: flock sends no raw request-body fields "
+                             "(Harbor's Pi cannot). Set request defaults such as "
+                             "chat_template_kwargs on the server instead (docs/open-models.md)")
+        return v
 
     @field_validator("pricing")
     @classmethod
@@ -227,7 +233,6 @@ class ResolvedModel(BaseModel):
     provider: ProviderSpec
     model_id: str  # what the harness sends as `model`
     reasoning: Reasoning | None = None
-    extra: dict[str, Any] | None = None
     pricing: list[float]  # [input, output, cached] USD per 1M tokens, pinned
 
     @property
@@ -1178,7 +1183,6 @@ def resolve_model(spec: SwarmSpec, type_spec: TypeSpec, *, type_name: str = "?")
         provider=provider,
         model_id=model_id,
         reasoning=type_spec.reasoning or (alias.reasoning if alias else None),
-        extra=alias.extra if alias else None,
         pricing=list(pricing),
     )
 
@@ -1645,8 +1649,8 @@ class WorkerHeartbeat(BaseModel):
 class Event(BaseModel):
     """One line of an agent's event stream.
 
-    The on-disk / over-the-wire shape is pi session format v3 (see swarmlab's
-    export.py for the reference encoding). `type`, `ts`, `agent` are required by us;
+    The on-disk / over-the-wire shape is pi session format v3 (flock.worker.events
+    documents the encoding). `type`, `ts`, `agent` are required by us;
     the rest of the pi record lives in `data`. Harness-neutral types the worker adds:
     session_started, session_resumed, session_restarted, turn_started, turn_ended,
     turn_interrupted, sync.

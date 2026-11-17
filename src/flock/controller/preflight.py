@@ -45,7 +45,7 @@ TOOL_SCHEMA: dict[str, Any] = {
 
 
 def chat_request(r: ResolvedModel) -> dict[str, Any]:
-    """Turn one: non-streamed, temperature 0. A model's `extra` is not sent: Pi does not."""
+    """Turn one: non-streamed, temperature 0."""
     return {
         "model": r.model_id,
         "messages": [{"role": "user", "content": PROMPT}],

@@ -22,7 +22,7 @@ inference:
 `flock launch` compiles it into the swarm spec's `providers:` block (one `openai_compat`
 provider, `inference`, with `pricing` keyed by model id) and each type's `model` as
 `inference:<model id>`. The contract of `providers:` and `models:` is in docs/design.md
-"Providers"; field names match swarmlab's.
+"Providers".
 
 Harbor's Pi speaks OpenAI **Chat Completions** (`POST {base_url}/chat/completions`); the
 provider must be `openai_compat` and `base_url` end in `/v1`.
@@ -82,9 +82,9 @@ A Trial's environment is the task's plus the inference key, the tools and the re
 
 A type's `reasoning` (`off`, `low`, `medium`, `high`) overrides its alias's. Whether a server
 honours the effort is up to the server; Qwen3 on vLLM turns thinking off through the chat
-template, not the effort. `extra` (raw request-body fields such as `chat_template_kwargs`) is
-accepted for swarmlab compatibility but not sent (Harbor's Pi cannot; `flock launch` warns), so
-set such defaults on the server (vLLM can set default chat-template arguments at startup).
+template, not the effort. Request-body defaults such as `chat_template_kwargs` go on the
+server, since Harbor's Pi cannot send them: vLLM can set default chat-template arguments at
+startup.
 
 ## Cost
 
@@ -104,8 +104,8 @@ providers, so such a model shows $0.
 
 `flock update --check` on a running swarm (or `POST /swarms/{swarm}/preflight` with the spec as the body)
 makes the controller probe each distinct provider-backed model the way a harness starts: two
-non-streamed Chat Completions turns, as Pi calls it (no `extra`; a tool call written as text is
-no tool call, since Pi takes only `tool_calls`).
+non-streamed Chat Completions turns, as Pi calls it (a tool call written as text is no tool
+call, since Pi takes only `tool_calls`).
 Turn one asks for a call to a trivial `get_time` tool; turn two sends the model's output back
 with the tool's result and must complete. Per model it reports `ok`, `tool_call_seen`,
 `follow_up_ok`, `usage_reported`, `latency_ms`, `error` and `warning`. `ok` needs both turns: a
