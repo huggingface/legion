@@ -49,6 +49,7 @@ class Fakes:
         self.mounted = True  # False: /logs/agent lives in the env (hf-sandbox), not on the host
         self.start_gate = self.verify_gate = None  # set: Trial.run waits for them
         self.route_gate = None  # set: `ip route` (a Trial network's first command) waits for it
+        self.steps = False  # True: the verifier's files land as a multi-step Trial's
 
     def gate(self, n):
         return self.gates.setdefault(n, asyncio.Event())
@@ -178,6 +179,11 @@ class Trial(FakeTrial):
             await self.fakes.verify_gate.wait()
         self.verified = True
         self.result.verifier_result = VerifierResult(rewards={"reward": 1.0})
+        trial_dir = self.config.trials_dir / self.config.trial_name  # as Harbor leaves it
+        verifier = trial_dir / ("steps/check/verifier" if self.fakes.steps else "verifier")
+        verifier.mkdir(parents=True, exist_ok=True)
+        (verifier / "reward.txt").write_text("1")
+        (trial_dir / "result.json").write_text(self.result.model_dump_json())
         return self.result
 
 
