@@ -406,7 +406,7 @@ def test_hf_jobs(tiny, hub, tmp_path, monkeypatch):
     assert not {"tiny-token", "fake-key", "fake-hub-token"} & set(env.values())
     assert {k: sent["labels"][k] for k in ("swarm", "type", "worker")} == {
         "swarm": "tiny", "type": "writer", "worker": w}
-    assert sent["timeoutSeconds"] > 24 * 3600
+    assert sent["timeoutSeconds"] >= 24 * 3600  # lifetime + jitter, in whole seconds
 
     out = tiny.flock("stop", "tiny", "--release")
     assert "released: every agent synced, compute freed" in out, out
