@@ -144,7 +144,10 @@ def tokens(value: float, _=None) -> str:
     return f"{value:g}"
 
 
-def figure(path: Path, series: list[tuple[str, list[dict], list[dict]]], title: str) -> None:
+def figure(path: Path, series: list[tuple[str, list[dict], list[dict]]], title: str,
+           faint: frozenset[str] = frozenset(), note: str = "") -> None:
+    """One line per series, a colour per model (a label's first word); a `faint` series (an
+    earlier run, for comparison) is drawn lighter and dashed or dotted."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -153,16 +156,22 @@ def figure(path: Path, series: list[tuple[str, list[dict], list[dict]]], title: 
 
     plt.rcParams.update({"font.size": 10, "axes.edgecolor": GRID, "axes.labelcolor": INK_2,
                          "xtick.color": INK_2, "ytick.color": INK_2, "text.color": INK})
-    fig, axes = plt.subplots(1, 5, figsize=(17, 3.9), facecolor=SURFACE)
+    fig, axes = plt.subplots(1, 5, figsize=(17, 4.4), facecolor=SURFACE)
+    models = list(dict.fromkeys(label.split()[0] for label, _, _ in series))
+    dashes = iter(["--", ":", "-."] * len(series))
     for k, (model, teams, summary) in enumerate(series):
         ns = [s["agents"] for s in summary]
-        offset = (k - (len(series) - 1) / 2) * 0.18  # side by side, so the bars don't hide
+        offset = (k - (len(series) - 1) / 2) * 0.14  # side by side, so the bars don't hide
+        light = model in faint
+        style = {"color": SERIES[models.index(model.split()[0])], "label": model,
+                 "linewidth": 1.4 if light else 2.2, "markersize": 5 if light else 7,
+                 "alpha": 0.45 if light else 1.0, "linestyle": next(dashes) if light else "-",
+                 "zorder": 2 if light else 3}
         for ax, (label, points, scale) in zip(axes, panels(teams, summary), strict=True):
             ax.errorbar([n + offset for n in ns], [p[0] for p in points],
                         yerr=[[max(0.0, p[0] - p[1]) for p in points],  # Wilson at 0/n: 1e-15
                               [max(0.0, p[2] - p[0]) for p in points]],
-                        color=SERIES[k], linewidth=2, marker="o", markersize=7, capsize=3,
-                        elinewidth=1.5, label=model)
+                        marker="o", capsize=3, elinewidth=1.2 if light else 1.5, **style)
             ax.set_ylabel(label)
             ax.set_xticks(ns)
     for ax, (_, _, scale) in zip(axes, panels(*series[0][1:]), strict=True):  # every series in
@@ -180,12 +189,14 @@ def figure(path: Path, series: list[tuple[str, list[dict], list[dict]]], title: 
         ax.spines[["top", "right"]].set_visible(False)
         ax.set_xlabel("Swarm size N")
     if len(series) > 1:
-        axes[0].legend(frameon=False, loc="center right", fontsize=9)
+        fig.legend(*axes[0].get_legend_handles_labels(), loc="upper left", ncol=len(series),
+                   bbox_to_anchor=(0.01, 0.935), frameon=False, fontsize=9)
     fig.suptitle(title, fontsize=11, color=INK, x=0.01, ha="left")
     fig.text(0.01, 0.01, "One attempt per problem. Success: share of teams with any agent right, "
              "95% Wilson intervals. Tokens (log scale) and posts: means, 95% intervals. Wall time (init "
-             "to release): median and interquartile range.", fontsize=8, color=INK_2)
-    fig.tight_layout(rect=(0, 0.05, 1, 0.94))
+             "to release): median and interquartile range." + (f" {note}" if note else ""),
+             fontsize=8, color=INK_2)
+    fig.tight_layout(rect=(0, 0.05, 1, 0.87))
     fig.savefig(path, dpi=200, facecolor=SURFACE)
 
 
@@ -200,6 +211,10 @@ def main(argv=None) -> int:
     parser.add_argument("root", nargs="?", type=Path, help="one grid; outputs go there too")
     parser.add_argument("--series", action="append", default=[], help="MODEL=ROOT, repeatable")
     parser.add_argument("--out", type=Path, help="where --series outputs go")
+    parser.add_argument("--faint", action="append", default=[],
+                        help="a --series' MODEL drawn lighter, for comparison; repeatable")
+    parser.add_argument("--title", help="the figure's title")
+    parser.add_argument("--note", default="", help="added to the figure's footnote")
     args = parser.parse_args(argv)
     if args.root:  # the grid's model, from one of its team specs
         spec = next(args.root.glob("src/*/spec.yaml"), None)
@@ -214,8 +229,9 @@ def main(argv=None) -> int:
     write_csv(out / "teams.csv", [{"model": m} | t for m, teams, _ in series for t in teams])
     write_csv(out / "by_n.csv", [{"model": m} | s for m, _, summary in series for s in summary])
     (out / "by_n.md").write_text(table(series))
-    figure(out / "scaling.png", series, "s3-aggregation with flock: success and cost against "
-           f"swarm size ({', '.join(m for m, _, _ in series)})")
+    figure(out / "scaling.png", series, args.title or "s3-aggregation with flock: success and "
+           f"cost against swarm size ({', '.join(m for m, _, _ in series)})",
+           frozenset(args.faint), args.note)
     print(table(series))
     return 0
 
