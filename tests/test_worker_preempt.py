@@ -119,9 +119,10 @@ async def test_sigusr1_preempts_within_budget_and_restart_restores(tmp_path):
         assert store.files[f"sw/researcher/{n}/workdir/notes.md"] == f"{n} was here\n".encode()
     marker = json.loads(store.files[f"sw/_workers/{WID}/preempted.json"])
     assert marker["worker"] == WID and marker["reason"] == "SIGUSR1"
-    # `preempted` only on heartbeats sent after the sync: never before it, then on every one
+    # `preempted` only after the sync: the last heartbeat, plus at most one the loop sent before
+    # it stopped
     flags = [hb.preempted for hb in ctrl.heartbeats[hb_before:]]
-    assert flags[-1] is True and flags == sorted(flags)
+    assert flags[-1] is True and flags.count(True) <= 2, flags
     assert ctrl.heartbeats[-1].interrupted == ["researcher-0000"]
     assert ctrl.heartbeats[-1].draining is True
 
@@ -282,10 +283,10 @@ async def test_repeated_signals_drain_once(tmp_path, caplog):
     assert await asyncio.wait_for(run, 10) == PREEMPT_EXIT
     assert caplog.text.count("preempted (") == 1
     assert len([u for u in store.uploads if any("preempted.json" in r for r in u)]) == 1
-    # drained once (the log line, the marker); `preempted` never before the sync, then on every
-    # heartbeat
+    # drained once (the log line, the marker); `preempted` only after the sync: the last
+    # heartbeat, plus at most one the loop sent before it stopped
     flags = [hb.preempted for hb in ctrl.heartbeats]
-    assert flags[-1] is True and flags == sorted(flags)
+    assert flags[-1] is True and flags.count(True) <= 2, flags
 
 
 # ---------------------------------------------------------------------- memory relief ladder
