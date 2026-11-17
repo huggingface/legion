@@ -203,15 +203,19 @@ class Resource:
 '''
 
 
-async def test_a_trials_grading_and_the_exports_outlive_the_worker(world, tmp_path, monkeypatch):
+@pytest.mark.parametrize("steps", [False, True])
+async def test_a_trials_grading_and_the_exports_outlive_the_worker(world, tmp_path, monkeypatch,
+                                                                   steps):
     """FLOCK_RESULTS_DIR (a Slurm worker's <run dir>/results, on the shared disk): each ended
-    Trial's result and verifier files and, at exit, the resources' exports are copied there, so
-    a run is scored after the node's WORK_ROOT is gone."""
+    Trial's result and verifier files (a multi-step Trial's under steps/<name>/) and, at exit,
+    the resources' exports are copied there, so a run is scored after the node's WORK_ROOT is
+    gone."""
+    world.steps = steps
     for key, value in (("FLOCK_RESULTS_DIR", str(tmp_path / "results")), ("SWARM", "host"),
                        ("WORKER_ID", "host-agent-w0000")):
         monkeypatch.setenv(key, value)
     (tmp_path / "resources" / "exporting.py").write_text(EXPORTING)
-    host, (a, *_) = agents(tmp_path, resources="{fake: {mount: false}, exporting: {}}")
+    host, (a, *_) = agents(tmp_path, resources="\n  fake:\n    mount: false\n  exporting: {}")
     await a.start(a.workdir, None, a.spec)
     events = a.events()
     await a.send("go")
@@ -222,7 +226,8 @@ async def test_a_trials_grading_and_the_exports_outlive_the_worker(world, tmp_pa
     trial = tmp_path / "results" / "host" / "agent-0000" / "trials" / "host-agent-0000-t1"
     assert json.loads((trial / "result.json").read_text())["verifier_result"] == {
         "rewards": {"reward": 1.0}}
-    assert (trial / "verifier" / "reward.txt").read_text() == "1"
+    verifier = trial / ("steps/check/verifier" if steps else "verifier")
+    assert (verifier / "reward.txt").read_text() == "1"
     export = tmp_path / "results" / "host" / "host-agent-w0000" / "resources" / "exporting"
     assert (export / "board.jsonl").read_text() == "{}\n"
 

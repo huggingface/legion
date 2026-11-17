@@ -6,8 +6,9 @@ the next one. The worker stops the resources when it exits.
 
 With FLOCK_RESULTS_DIR set (a Slurm worker: `<run dir>/results`, on the shared disk), what a run
 is graded on outlives the worker's WORK_ROOT (node-local): each ended Trial's `result.json`,
-`config.json` and `verifier/` go to `<dir>/<swarm>/<agent>/trials/<trial>/` (adapters/harbor.py)
-and the resources' exports, at exit, to `<dir>/<swarm>/<worker id>/resources/`.
+`config.json` and `verifier/` (a multi-step Trial's `steps/<name>/verifier/`) go to
+`<dir>/<swarm>/<agent>/trials/<trial>/` (adapters/harbor.py) and the resources' exports, at exit,
+to `<dir>/<swarm>/<worker id>/resources/`.
 
 Each agent is added to the resources as its Trial starts and removed when it leaves (another
 worker of the type, a spawned agent and a re-assigned one alike), and the resources' events for
@@ -33,7 +34,8 @@ from flock.secrets_file import exposed, secret_env
 log = logging.getLogger(__name__)
 
 RESULTS_ENV = "FLOCK_RESULTS_DIR"
-TRIAL_RESULTS = ("result.json", "config.json", "verifier")  # what a Trial is graded on
+# what a Trial is graded on; Harbor 0.25.0 moves a multi-step Trial's verifier files under steps/
+TRIAL_RESULTS = ("result.json", "config.json", "verifier", "steps/*/verifier")
 
 
 def results_dir() -> Path | None:
@@ -43,16 +45,18 @@ def results_dir() -> Path | None:
 
 
 def keep_results(src: Path, dest: Path, names: Iterable[str]) -> None:
-    """Copy `names` (files or folders) from `src` to `dest`, links as links, missing ones
-    skipped. A failure is logged: a run without its copy is still a run."""
+    """Copy `names` (files or folders, relative to `src`; `*` matches one level) from `src` to the
+    same places under `dest`, links as links, missing ones skipped. A failure is logged: a run
+    without its copy is still a run."""
     try:
         for name in names:
-            path = src / name
-            if path.is_dir() and not path.is_symlink():
-                shutil.copytree(path, dest / name, symlinks=True, dirs_exist_ok=True)
-            elif path.exists() or path.is_symlink():
-                dest.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(path, dest / name, follow_symlinks=False)
+            for path in sorted(src.glob(name)) if "*" in name else [src / name]:
+                target = dest / path.relative_to(src)
+                if path.is_dir() and not path.is_symlink():
+                    shutil.copytree(path, target, symlinks=True, dirs_exist_ok=True)
+                elif path.exists() or path.is_symlink():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(path, target, follow_symlinks=False)
     except OSError as e:
         log.warning("results of %s not kept in %s: %s", src, dest, e)
 
