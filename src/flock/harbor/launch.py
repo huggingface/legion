@@ -20,7 +20,7 @@ from harbor.trial.trial import Trial
 
 from flock.models import NO_KEY_ENV, loopback_url
 
-from .config import PI_VERSION, Config
+from .config import PI_VERSION, SANDBOXES, Config
 from .harnesses.pi import attach_pi_setup, terminal_pi_error
 from .instructions import build_agent_instructions
 from .networking import TrialNetworks
@@ -43,6 +43,13 @@ def environment_config(config):
                 "flavor": config.environment.flavor,
                 "job_timeout": math.ceil(config.limits.run_timeout_seconds) + 60,
             },
+            delete=True,
+        )
+    if backend == "e2b":
+        # E2B's timeout is the sandbox's whole lifetime; stop kills it when the trial ends.
+        return EnvironmentConfig(
+            type=backend,
+            kwargs={"sandbox_timeout_secs": math.ceil(config.limits.run_timeout_seconds) + 60},
             delete=True,
         )
     # Podman Compose force-removes shared images with `down --rmi local`.
@@ -298,8 +305,8 @@ async def _run_experiment(config: Config):
             source_path = await download_task(resolved, state / "sources")
             shutil.copy2(source_path / "instruction.md", inputs / "task.md")
             manifest["artifacts"]["task_instruction"] = "inputs/task.md"
-            # HF Sandboxes are separate VMs, with no local networks to create.
-            if config.environment.backend != "hf-sandbox":
+            # Sandboxes are separate VMs, with no local networks to create.
+            if config.environment.backend not in SANDBOXES:
                 networks = TrialNetworks(run_id, engine=config.environment.backend)
                 await networks.start()
                 manifest["networks"] = networks.allocations
@@ -323,12 +330,12 @@ async def _run_experiment(config: Config):
                 )
                 record["resources"] = resources.bind(name, trial_config)
                 if (
-                    config.environment.backend == "hf-sandbox"
+                    config.environment.backend in SANDBOXES
                     and trial_config.environment.mounts
                 ):
-                    # Harbor's hf-sandbox backend would silently ignore them.
+                    # Harbor's sandbox backends would silently ignore them.
                     raise ValueError(
-                        "environment.backend hf-sandbox can't mount the files or "
+                        f"environment.backend {config.environment.backend} can't mount the files or "
                         "sockets a resource asked for"
                     )
                 if networks:

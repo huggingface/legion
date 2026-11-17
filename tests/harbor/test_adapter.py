@@ -4,6 +4,7 @@ Container networks are faked at their command boundary (flock.harbor.networking.
 
 import asyncio
 import json
+import math
 import shlex
 import shutil
 from pathlib import Path
@@ -252,7 +253,7 @@ def clock(monkeypatch):
 def type_spec(backend="docker", **limits):
     spec = Spec.load(EXAMPLES / "pi-hf.yaml", env={})
     spec.environment.backend = backend
-    if backend == "hf-sandbox":  # never the worker's Hub token
+    if backend in ("hf-sandbox", "e2b"):  # never the worker's Hub token
         spec.inference.api_key_env = "HF_INFERENCE_TOKEN"
     for key, value in limits.items():
         setattr(spec.limits, key, value)
@@ -716,11 +717,17 @@ async def test_each_trial_gets_its_own_network_removed_after_it(fakes, tmp_path,
         "FLOCK_TOOLS_MANIFEST", "HF_TOKEN"]
 
 
-async def test_a_sandbox_trial_gets_no_network(fakes, tmp_path):
-    a = adapter(tmp_path, backend="hf-sandbox")
+@pytest.mark.parametrize("backend", ["hf-sandbox", "e2b"])
+async def test_a_sandbox_trial_gets_no_network(fakes, tmp_path, backend):
+    a = adapter(tmp_path, backend=backend)
     await start(a)
     await a.close()
-    assert fakes.net == [] and fakes.trials[0].config.environment.extra_docker_compose == []
+    env = fakes.trials[0].config.environment
+    assert fakes.net == [] and env.extra_docker_compose == []
+    if backend == "e2b":  # Harbor's own E2B environment, living as long as the Trial
+        assert env.import_path == "harbor.environments.e2b:E2BEnvironment"
+        assert env.kwargs["sandbox_timeout_secs"] == math.ceil(
+            fakes.trials[0].config.agent.override_timeout_sec) + 600
 
 
 async def test_close_now_cancels_unverified_and_keeps_the_sessions(fakes, tmp_path):

@@ -58,7 +58,7 @@ agent's workdir and Pi sessions to the bucket, and drains `drain_window` before 
 ### Agent
 
 A name, a workdir and a Pi session, on whichever worker holds it. Its Trial (an environment on
-docker, podman or hf-sandbox: `flock.worker.adapters.harbor`) starts on the first prompt and
+docker, podman, hf-sandbox or e2b: `flock.worker.adapters.harbor`) starts on the first prompt and
 stays up; each prompt is one Pi turn in it, and prompts that arrive during a turn join the next
 one. A Trial that fails is reported and the next prompt starts a new one on the same session.
 

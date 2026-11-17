@@ -291,7 +291,7 @@ class HarborAdapter:
 
         from flock.harbor import launch
         from flock.harbor.agent import Channel
-        from flock.harbor.config import inference_key
+        from flock.harbor.config import E2B_SETUP_S, SANDBOXES, inference_key
         from flock.harbor.envs import ENVIRONMENTS
         from flock.harbor.sources import ResolvedTask
         from flock.harbor.spec import Spec
@@ -339,6 +339,9 @@ class HarborAdapter:
             tc.environment.kwargs.update(
                 job_timeout=math.ceil(parse_duration(self.spec.turn_timeout).total_seconds()) + 60,
                 namespace=config.namespace or None)
+        elif config.environment.backend == "e2b":  # the sandbox's lifetime: the Trial's and setup
+            tc.environment.kwargs["sandbox_timeout_secs"] = (
+                math.ceil(tc.agent.override_timeout_sec) + E2B_SETUP_S)
         # flock's subclasses: no secret in an argv (docker, podman); hf-sandbox's namespace
         tc.environment.import_path = ENVIRONMENTS[config.environment.backend]
         if self.resources is not None:
@@ -347,15 +350,16 @@ class HarborAdapter:
                 await self.resources.remove([self.agent])
                 raise RuntimeError("agent closed")
             bound = self.resources.bind(self.agent, tc)
-            if tc.environment.mounts and config.environment.backend == "hf-sandbox":
-                raise RuntimeError("hf-sandbox has no mounts: use the resources' http transport")
+            if tc.environment.mounts and config.environment.backend in SANDBOXES:
+                raise RuntimeError(f"{config.environment.backend} has no mounts: use the "
+                                   "resources' http transport")
             for name, meta in bound.items():  # e.g. board rules not enforced without mounts
                 if meta.get("warning") and getattr(self.host, "emit", None):
                     self.host.emit(self.agent, {"resource": name, "kind": "warning",
                                                 "data": {"warning": meta["warning"]}})
         await self._drop_network(self._network)  # the last Trial's: it has ended
         networks = None
-        if config.environment.backend != "hf-sandbox":  # a sandbox is an HF Job: no local network
+        if config.environment.backend not in SANDBOXES:  # a remote VM: no local network
             # the agent's env (inference key, resource tokens): kept out of every exec's argv
             tc.environment.kwargs["secret_names"] = sorted(tc.agent.env)
             # one network per Trial, outside host and VPN routes: docker's default pools run

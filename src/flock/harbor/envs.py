@@ -130,4 +130,5 @@ class HFSandbox(hf_sandbox.HFSandboxEnvironment):
 
 
 ENVIRONMENTS = {"docker": "flock.harbor.envs:Docker", "podman": "flock.harbor.envs:Podman",
-                "hf-sandbox": "flock.harbor.envs:HFSandbox"}  # backend -> import_path
+                "hf-sandbox": "flock.harbor.envs:HFSandbox",
+                "e2b": "harbor.environments.e2b:E2BEnvironment"}  # backend -> import_path

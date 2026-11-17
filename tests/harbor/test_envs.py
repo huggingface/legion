@@ -61,6 +61,20 @@ def test_sandbox_name_is_short_for_a_digest_image():
     assert name == sandbox_name("trial/x" * 30, image) != sandbox_name("trial/x" * 30, "other")
 
 
+def test_e2b_is_harbors_own_environment(tmp_path):
+    """`backend: e2b` builds Harbor's E2BEnvironment (the e2b extra installed), no subclass."""
+    from harbor.environments.e2b import E2BEnvironment
+
+    (tmp_path / "environment").mkdir()
+    env = EnvironmentFactory.create_environment_from_config(
+        TrialEnvironmentConfig(type="e2b", import_path=ENVIRONMENTS["e2b"],
+                               kwargs={"sandbox_timeout_secs": 120}),
+        environment_dir=tmp_path / "environment", environment_name="t", session_id="s",
+        trial_paths=TrialPaths(tmp_path / "trial"),
+        task_env_config=EnvironmentConfig(docker_image="python:3.12"))
+    assert type(env) is E2BEnvironment and env._sandbox_timeout == 120
+
+
 async def _done():
     return None
 
