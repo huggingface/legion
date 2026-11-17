@@ -154,21 +154,95 @@ class HFRouter(BaseModel):
         return self.provider is None or self.provider in ROUTER_POLICIES
 
 
+# `inference.hf_jobs` (docs/open-models.md "Servers flock starts"): the vLLM image flock starts
+# (it serves Qwen3_5ForConditionalGeneration), the port the jobs proxy exposes, and the job
+# lifetime when neither the spec nor its compile step set one
+DEFAULT_VLLM_IMAGE = "vllm/vllm-openai:v0.33.0"
+VLLM_PORT = 8000
+DEFAULT_SERVER_TIMEOUT = "2h"
+# `vllm_args` keys flock sets itself: the server's address and name, the model, and the
+# tool-calling flags, which are named fields. `api_key`: the jobs proxy drops `Authorization`,
+# so vLLM would refuse every request (the proxy's HF-token check is the authentication).
+VLLM_OWNED = ("host", "port", "served_model_name", "model", "api_key", "enable_auto_tool_choice",
+              "tool_call_parser", "reasoning_parser")
+_VLLM_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+
+def vllm_arg_key(entry: str) -> str:
+    """`max-model-len=131072` -> `max_model_len`: one spelling per flag."""
+    return entry.split("=", 1)[0].strip().replace("-", "_")
+
+
+class HFJobs(BaseModel):
+    """`inference.hf_jobs`: vLLM servers flock starts on HF Jobs, one group per model, and stops
+    when the run ends (docs/open-models.md). The servers' URLs are pinned into the spec as
+    `urls` (`resolved_model.inference.urls`)."""
+
+    model_config = {"extra": "forbid"}
+
+    flavor: str = Field(min_length=1)  # a GPU flavor (`hf jobs hardware`), e.g. a100-large
+    tool_call_parser: str = Field(min_length=1)  # Pi needs tool calls: --enable-auto-tool-choice
+    reasoning_parser: str | None = None
+    # Every other `vllm serve` flag as KEY=VALUE (`max_model_len=131072` -> --max-model-len
+    # 131072; `true`/`false` -> --flag/--no-flag). Fills in max_num_seqs (the block's
+    # max_working) and tensor_parallel_size (the flavor's GPUs) unless set here.
+    vllm_args: list[str] = Field(default_factory=list)
+    # The job's lifetime, the backstop if the run never stops it; None: the run's
+    # run_timeout_seconds + startup_timeout + a margin (the compile step writes it)
+    timeout: str | None = None
+    startup_timeout: str = "20m"  # how long flock waits for every replica to answer
+    replicas: int = Field(default=1, ge=1)  # each agent calls one (rendezvous hashing)
+    image: str = DEFAULT_VLLM_IMAGE
+    namespace: str | None = None  # who pays; None: the spec's namespace, else the token's account
+
+    @field_validator("timeout", "startup_timeout")
+    @classmethod
+    def _duration(cls, v: str | None) -> str | None:
+        return None if v is None else _positive_duration(v)
+
+    @field_validator("vllm_args")
+    @classmethod
+    def _vllm_args(cls, v: list[str]) -> list[str]:
+        seen: set[str] = set()
+        for entry in v:
+            key, _, value = entry.partition("=")
+            name = vllm_arg_key(entry)
+            if not _VLLM_KEY_RE.match(key.strip()) or not value.strip():
+                raise ValueError(f"vllm_args {entry!r}: use KEY=VALUE (a flag: KEY=true), e.g. "
+                                 "max_model_len=131072")
+            if name in VLLM_OWNED:
+                named = name in HFJobs.model_fields
+                raise ValueError(f"vllm_args {entry!r}: " + (
+                    f"set hf_jobs.{name} instead" if named else
+                    "the jobs proxy drops Authorization, so vLLM would refuse every request; "
+                    "the proxy's HF-token check authenticates" if name == "api_key" else
+                    "flock sets it"))
+            if name in seen:
+                raise ValueError(f"vllm_args: {name} is set twice")
+            seen.add(name)
+        return v
+
+
 class Inference(BaseModel):
-    """Where a model runs (design.md 'Inference'): the HF router (`hf_router`, the default) or
-    OpenAI-compatible servers you run (`urls`), plus settings for either. The same block in a
-    Harbor spec (the run's, a role's) and a swarm spec (the swarm's, a type's).
+    """Where a model runs (design.md 'Inference'): the HF router (`hf_router`, the default),
+    OpenAI-compatible servers you run (`urls`) or vLLM servers flock starts on HF Jobs
+    (`hf_jobs`), plus settings for any of them. The same block in a Harbor spec (the run's, a
+    role's) and a swarm spec (the swarm's, a type's).
 
     `api_key_env` names a secret / env var; the value is never in the spec. The controller
     sends that secret to the workers and uses it for its checks; the worker hands it to the
-    harness."""
+    harness.
+
+    With `hf_jobs`, `urls` is what the controller pins once the servers answer (only in
+    `resolved_model.inference`; a spec that sets both is refused)."""
 
     model_config = {"extra": "forbid"}
 
     hf_router: HFRouter | None = None
     # Servers (`.../v1`) that all serve the type's `model`; each agent calls one of them
     urls: list[str] | None = None
-    api_key_env: str | None = None  # default: HF_TOKEN for hf_router; no key for urls
+    hf_jobs: HFJobs | None = None
+    api_key_env: str | None = None  # default: HF_TOKEN for hf_router and hf_jobs; no key for urls
     # Max agents of this swarm on these endpoints in a turn at once. Enforced at prompt
     # admission by the controller (FLOCK_MAX_WORKING_ENFORCE=0: report only).
     max_working: int | None = Field(default=None, ge=1)
@@ -215,9 +289,12 @@ class Inference(BaseModel):
 
     @model_validator(mode="after")
     def _one(self) -> Inference:
-        if self.hf_router is not None and self.urls is not None:
-            raise ValueError("set hf_router or urls, not both")
-        if self.urls is None and self.hf_router is None:
+        given = [k for k in ("hf_router", "urls", "hf_jobs") if getattr(self, k) is not None]
+        if self.hf_jobs is not None and self.urls is not None:
+            given.remove("urls")  # the started servers', pinned (refused in a spec's own block)
+        if len(given) > 1:
+            raise ValueError(f"set one of hf_router, urls or hf_jobs, not {' and '.join(given)}")
+        if not given:
             self.hf_router = HFRouter()
         if self.metrics and self.urls is None:
             raise ValueError("metrics scrapes your servers' vLLM metrics: it needs urls")
@@ -230,13 +307,22 @@ class Inference(BaseModel):
 
     @property
     def endpoints(self) -> list[str]:
-        """The servers' base URLs, as written: `urls`, or the router's."""
-        return list(self.urls) if self.urls else [HF_ROUTER_URL]
+        """The servers' base URLs, as written: `urls` (with `hf_jobs`, the started servers'
+        once pinned), or the router's. Empty: hf_jobs servers not started yet."""
+        if self.urls:
+            return list(self.urls)
+        return [HF_ROUTER_URL] if self.hf_router is not None else []
 
     @property
     def key_env(self) -> str | None:
-        """The key's env name: `api_key_env`, else HF_TOKEN for the router; None: no key."""
-        return self.api_key_env or ("HF_TOKEN" if self.hf_router is not None else None)
+        """The key's env name: `api_key_env`, else HF_TOKEN for the router and the HF Jobs
+        proxy; None: no key."""
+        hf = self.hf_router is not None or self.hf_jobs is not None
+        return self.api_key_env or ("HF_TOKEN" if hf else None)
+
+    def unpinned(self) -> Inference:
+        """The block as a spec writes it: without the started servers' `urls`."""
+        return self.model_copy(update={"urls": None}) if self.hf_jobs is not None else self
 
     @property
     def headers(self) -> dict[str, str]:
@@ -257,10 +343,14 @@ class Inference(BaseModel):
         return max(self.endpoints, key=lambda u: hashlib.sha256(f"{agent}\n{u}".encode()).digest())
 
     def describe(self) -> str:
-        """One line for status: `hf_router deepinfra` or the URLs."""
+        """One line for status: `hf_router deepinfra`, the URLs, or `hf_jobs <flavor>` and the
+        started servers' URLs."""
         if self.hf_router is not None:
             return f"hf_router {self.hf_router.provider or 'fastest'}" + (
                 f", billed to {self.hf_router.bill_to}" if self.hf_router.bill_to else "")
+        if self.hf_jobs is not None:
+            return f"hf_jobs {self.hf_jobs.flavor}" + (
+                f", urls {', '.join(self.endpoints)}" if self.urls else ", not started")
         return "urls " + ", ".join(self.endpoints)
 
 
@@ -289,6 +379,8 @@ class ResolvedModel(BaseModel):
     # The inference block it runs on, which admission (`max_working`) and status count by:
     # `inference` (the swarm's) or `types.<type>.inference` (the type's own)
     provider_name: str
+    # The block; with `hf_jobs`, plus the started servers' `urls`, pinned by the controller
+    # once they answer (controller/servers.py) and kept while the block and model are the same
     inference: Inference
     model_id: str  # the type's `model`: what flock prices the usage under
     reasoning: Reasoning | None = None
@@ -1083,16 +1175,18 @@ class SwarmSpec(BaseModel):
         """Apply-time pinning: each type's inference block and price go into the spec
         (`resolved_model`), so the stored spec carries what admission and cost derive from. The
         context window the controller pinned stays while the block (but `max_working`, the
-        controller's) and the model are the same."""
+        controller's) and the model are the same, and so do the hf_jobs servers' `urls`."""
         if self.stop_on_success and not any(
                 ts.harbor and ts.harbor.config.get("success_check") for ts in self.types.values()):
             raise ValueError("stop_on_success requires a Harbor success_check")
         for type_name, ts in self.types.items():
             old, ts.resolved_model = ts.resolved_model, resolve_model(self, ts, type_name=type_name)
             new = ts.resolved_model
-            if old is not None and (old.inference.held(), old.model_id) == (
+            if old is not None and (old.inference.unpinned().held(), old.model_id) == (
                     new.inference.held(), new.model_id):
                 new.context_window = old.context_window
+                if new.inference.hf_jobs is not None:
+                    new.inference = new.inference.model_copy(update={"urls": old.inference.urls})
         for type_name, ts in self.types.items():
             cap = ts.loop.while_.agent_usd if ts.loop else None
             if isinstance(cap, dict) and agent_cap(ts) is None:
@@ -1226,6 +1320,10 @@ def resolve_model(spec: SwarmSpec, type_spec: TypeSpec, *, type_name: str = "?")
     (`pricing`, else $0). Raises ValueError for a model id the HF router cannot take."""
     inference = type_spec.inference or spec.inference
     model = type_spec.model
+    if inference.hf_jobs is not None and inference.urls is not None:
+        where = f"types.{type_name}.inference" if type_spec.inference else "inference"
+        raise ValueError(f"{where}: set one of hf_router, urls or hf_jobs, not urls and hf_jobs "
+                         "(flock pins the started servers' urls itself)")
     if inference.hf_router is not None and (model.startswith("huggingface/") or ":" in model):
         raise ValueError(f"types.{type_name}.model: {model!r}: the HF router takes a plain Hub id "
                          "(e.g. Qwen/Qwen3.8-27B); name the provider in "
@@ -1988,12 +2086,36 @@ class ProviderStatus(BaseModel):
     zero_usage_agents: int = 0
 
 
+class ServerStatus(BaseModel):
+    """One server flock started for an inference block (`hf_jobs`, controller/servers.py): a
+    replica of one model's group."""
+
+    model: str
+    kind: str  # the block kind that started it: hf_jobs
+    group: str  # the group's key (its jobs' `inference` label)
+    types: list[str]  # the agent types it serves
+    flavor: str
+    namespace: str
+    replica: int
+    job_id: str | None = None
+    url: str | None = None  # the OpenAI base URL (`.../v1`)
+    stage: str | None = None  # the job's: SCHEDULING, RUNNING, COMPLETED, CANCELED, ERROR, ...
+    message: str | None = None  # the job's status message (e.g. waiting for hardware)
+    # starting (the job is scheduled or the server does not answer yet), ready (it answers
+    # GET /v1/models), failed (the job ended or never answered: `error`), stopped (cancelled)
+    state: Literal["starting", "ready", "failed", "stopped"]
+    started_at: datetime | None = None  # the job's creation
+    ready_at: datetime | None = None
+    error: str | None = None
+
+
 class SwarmStatus(BaseModel):
     swarm: str
     namespace: str
     bucket: str
     types: dict[str, TypeStatus]
     providers: dict[str, ProviderStatus] = Field(default_factory=dict)
+    servers: list[ServerStatus] = Field(default_factory=list)  # hf_jobs servers flock started
     agents_total: int
     workers_total: int
     pending_prompts: int

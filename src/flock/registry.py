@@ -32,6 +32,13 @@ COMPUTE: dict[str, str] = {
     "slurm": "flock.controller.slurm:slurm_jobs_client",  # docs/slurm.md
 }
 
+# Inference servers flock starts itself: the `inference` block's key -> "module:function";
+# function(env) -> a Starter (flock.controller.servers), which starts a model's servers (or
+# reattaches to the running ones), checks them until they answer, and stops them
+SERVERS: dict[str, str] = {
+    "hf_jobs": "flock.controller.hf_jobs_servers:hf_jobs_servers",  # docs/open-models.md
+}
+
 
 def load(path: str) -> Any:
     module, _, name = path.partition(":")

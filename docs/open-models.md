@@ -6,6 +6,8 @@ A spec names its model with `model`, a Hub id, and says where it runs with one `
   (Inference Providers). This is the default when the spec has no `inference` block.
 - **`urls`**: OpenAI-compatible servers you run, on a Slurm cluster, a cloud box or your own
   machine.
+- **`hf_jobs`**: vLLM servers flock starts on [HF Jobs](https://huggingface.co/docs/huggingface_hub/guides/jobs)
+  for the run, and cancels when it ends.
 
 The block has the same shape in a Harbor spec (the run's, or a role's own) and in a swarm spec
 (the swarm's, or a type's own). This page is the how-to; the contract is in
@@ -28,7 +30,17 @@ inference:
   urls: [http://10.53.196.166:8000/v1, http://10.53.196.167:8000/v1]
   api_key_env: VLLM_API_KEY        # optional: no key by default
 
-# Settings for either
+# Servers flock starts on HF Jobs
+inference:
+  hf_jobs:
+    flavor: a100-large             # a GPU flavor (`hf jobs hardware`)
+    tool_call_parser: qwen3_coder  # Pi needs tool calls
+    reasoning_parser: qwen3
+    vllm_args: [max_model_len=131072]
+    startup_timeout: 30m           # default 20m
+  api_key_env: HF_INFERENCE_TOKEN  # default: HF_TOKEN
+
+# Settings for any of them
 inference:
   max_working: 3                   # agents of the swarm in a turn at once on these endpoints
   context_window: 131072           # used only when the servers report none
@@ -41,13 +53,22 @@ inference:
 | `hf_router.provider` | A router provider (`deepinfra`, `cerebras`, ...), or a selection policy: `fastest`, `cheapest`, `preferred`. Unset: the router's default (`fastest`). flock sends `<model>:<provider>`. |
 | `hf_router.bill_to` | An org the router bills instead of the key's owner: Pi and preflight send `X-HF-Bill-To`. |
 | `urls` | One or more base URLs ending in `/v1`, all serving `model`. A comma-separated string works too (`urls: ${VLLM_URLS}`). |
-| `api_key_env` | The env var that holds the key (never the key itself). Default: `HF_TOKEN` for `hf_router`, none for `urls`. |
+| `hf_jobs.flavor` | Required. The GPU flavor of each server's job, e.g. `l4x1`, `a100-large`, `h200`. |
+| `hf_jobs.tool_call_parser` | Required. vLLM's `--tool-call-parser` (`qwen3_coder` for Qwen3.5 and Qwen3.8); flock always adds `--enable-auto-tool-choice`. |
+| `hf_jobs.reasoning_parser` | vLLM's `--reasoning-parser` (`qwen3`). |
+| `hf_jobs.vllm_args` | Every other `vllm serve` flag, as `KEY=VALUE` strings ([below](#servers-flock-starts-hf_jobs)). |
+| `hf_jobs.timeout` | The job's lifetime, the backstop if the run never cancels it. Default: the run's `limits.run_timeout_seconds` plus `startup_timeout` plus 15 minutes. |
+| `hf_jobs.startup_timeout` | How long flock waits for every replica to answer (default `20m`). |
+| `hf_jobs.replicas` | Servers of the model (default 1); each agent calls one, as with several `urls`. |
+| `hf_jobs.image` | The vLLM image (default `vllm/vllm-openai:v0.33.0`). |
+| `hf_jobs.namespace` | Who runs and pays for the jobs. Default: the spec's `namespace`, else `HF_TOKEN`'s account. |
+| `api_key_env` | The env var that holds the key (never the key itself). Default: `HF_TOKEN` for `hf_router` and `hf_jobs`, none for `urls`. |
 | `max_working` | See [`max_working`](#max_working). |
 | `context_window` | The model's context window in tokens, for servers that do not report one. |
 | `reasoning_effort` | Pi's `--thinking` level (`off` ... `max`). |
 | `metrics` | `urls` only: scrape each server's vLLM `/metrics` into the health snapshots. |
 
-A role (Harbor spec) or a type (swarm spec) may set its own `model`, on the run's endpoints, and
+A spec sets one of `hf_router`, `urls` and `hf_jobs`. A role (Harbor spec) or a type (swarm spec) may set its own `model`, on the run's endpoints, and
 its own `inference`, which replaces the run's block as a whole. `pricing` stays where it was: the
 run's and a role's `[input, output, cached]` in USD per 1M tokens (see [Cost](#cost)).
 
@@ -182,6 +203,132 @@ environment:
 node gets a new address: update `VLLM_URLS` in run.env and run `flock update` (the type's
 workers restart on the new URLs).
 
+## Servers flock starts (`hf_jobs`)
+
+With `hf_jobs`, nobody starts a server by hand or copies a URL. `flock launch`:
+
+1. asks the controller to start the servers (`POST /swarms/{swarm}/servers`): one group per
+   model, `replicas` jobs each, or the running ones it finds again after a restart;
+2. waits until every replica answers `GET /v1/models` through the jobs proxy, for at most
+   `startup_timeout`, printing each job's progress (`SCHEDULING (Pulling container image)`,
+   `RUNNING`, `ready`);
+3. runs preflight against them, and the apply pins their URLs into the spec as `urls` would be
+   (`types.<t>.resolved_model.inference.urls`).
+
+From there on everything is the `urls` path: the model check, the context window read from the
+servers, preflight and Pi's model config. The run's end cancels the jobs: `flock stop --delete`,
+or a local run that ends by itself. `flock update` of a changed `hf_jobs` block or model starts
+its new servers first. The apply then pins them, and, as for any block change, the type's
+workers restart on them. With `hf_jobs`, `max_working` is also the servers' `max_num_seqs`, so
+changing it starts new servers too.
+
+**Cleanup is one rule**, which the controller applies to the swarm's server jobs every 30
+seconds: a job the applied spec does not use (its group, or a replica beyond the group's
+`replicas`) is cancelled once the deadline in its `retire` label has passed. The deadline sits
+on the job, so a restarted controller applies the same rule.
+
+- A new job's deadline is the time its launch or update has to apply it: `startup_timeout` plus
+  5 minutes, shortened to 5 minutes once it answers. An update that is refused or interrupted
+  thus leaves the applied servers as they were, and its own go shortly after.
+- An apply that stops using a job (another block, fewer replicas) gives it the types' longest
+  `turn_timeout`, for the turns of the agents draining from it. A reused job's deadline is only
+  ever pushed back, and a job the spec uses again keeps serving.
+- A failed group's jobs, and every job of a deleted swarm, are cancelled at once. A cancel the
+  Hub refuses is tried again at the next sweep.
+- Only jobs with an `inference` label are server jobs; the swarm's worker jobs are never
+  touched.
+
+```text
+servers Qwen/Qwen3.8-27B (hf_jobs a100-large, namespace you, types agent, context 131072):
+  replica 0: job 6afb00a85b0bff80b2ac4d54 RUNNING, ready, https://6afb00a85b0bff80b2ac4d54--8000.hf.jobs/v1, up 14m
+```
+
+- **One group per model.** A vLLM server serves one model, so a role with its own `model` gets
+  its own jobs: with the run's `hf_jobs` settings, or with its own if it sets its own
+  `inference` block (another flavor, say). Roles with the same model and settings share them,
+  with the most `replicas` (and the longest `startup_timeout`) any of them asks for.
+  `flock status`, `GET /swarms/{swarm}/servers` and the status page list each job by model,
+  with its URL, stage, state, flavor and uptime.
+- **The job.** `vllm serve <model>` on `hf_jobs.image`, with port 8000 exposed through the jobs
+  proxy (`expose=[8000]`, as `hf jobs run --expose 8000`) at `https://<job id>--8000.hf.jobs`,
+  and `hf_jobs.timeout` as its `--timeout`. The jobs carry labels as workers do (`swarm`,
+  `inference`: the group's settings hash, `replica`, `retire`: the deadline above); a restarted
+  controller finds them by these instead of starting new ones (it retries until the Hub
+  answers). The weights download inside the job, which gets no Hub token, so the model must be
+  public.
+- **The vLLM arguments** follow trl-internal's evals config. flock sets `--host`, `--port`,
+  `--served-model-name` (the Hub id) and the tool-calling flags. `vllm_args` holds every other
+  flag as a `KEY=VALUE` string: `max_model_len=131072` becomes `--max-model-len 131072`, and
+  `true` and `false` become `--flag` and `--no-flag`. Strings keep YAML from guessing types. A
+  key flock owns is refused: `host`, `port`, `served_model_name`, `model`, the tool-calling and
+  reasoning flags (named fields), and `api_key` ([below](#keys-and-the-jobs-proxy)). So is a key
+  given twice. `max_num_seqs` (the block's `max_working`) and `tensor_parallel_size` (the
+  flavor's GPUs, divided by any `data_parallel_size` or `pipeline_parallel_size`) are filled in
+  unless `vllm_args` sets them.
+- **Failures** stop the launch with the reason and the job's last log lines, show in `flock
+  status`, and cancel the group's jobs: an image that does not pull, vLLM running out of memory
+  (a `max_model_len` the GPU cannot hold), or no answer within `startup_timeout` (also when
+  the Hub does not answer). A start refused part-way (a quota) cancels the jobs it started. An
+  apply drops failed groups the spec no longer uses from the status. A job that ends
+  during the run marks its server `failed` in `flock status` (the verdict is failing); flock does
+  not replace it.
+- **Not cancelled:** `flock stop --release` keeps the servers (the run is held, not over), and a
+  controller killed outright leaves them to their `timeout`. A `flock launch` of the same spec
+  afterwards reuses them.
+- **Cost.** The flavor's hourly price while the job runs (`hf jobs hardware`). flock prices the
+  tokens as for `urls` ($0 unless the spec sets `pricing`) and does not count GPU time.
+
+### Keys and the jobs proxy
+
+The jobs proxy checks every request for `Authorization: Bearer <HF token>`, a token with read
+access to the job's namespace, and answers 401 otherwise. The agents' key (`api_key_env`) is
+such a token. The controller's own `HF_TOKEN` starts, lists, probes and cancels the jobs. The key
+sits in every agent's container, so with HF Sandboxes, HF Jobs or Slurm workers it must not be
+`HF_TOKEN` (the spec compiler refuses it): give the agents a fine-grained token of their own.
+
+What a request to an exposed job gets, as tested with an echo server and with vLLM v0.33:
+
+| Exposure | No token | A bogus token | An HF token that can read the namespace | Headers the container sees |
+|---|---|---|---|---|
+| `--expose 8000` | 401 | 401 | 200 | no `Authorization`; others (`X-Api-Key`) pass |
+| `--expose-public 8000` | 200 | 200 | 200 | no `Authorization` |
+
+- **flock uses `--expose`.** The proxy checks the HF token; vLLM runs without a key behind it.
+- **`--expose-public` with vLLM's `--api-key` does not work.** The proxy drops `Authorization` in
+  both modes, and vLLM's key check reads only `Authorization: Bearer`, so every request gets
+  vLLM's 401. A key in another header gets through the proxy, but vLLM would need a shim in the
+  job to check it. flock refuses `api_key` in `vllm_args`.
+- **The agents' token.** The Hub docs ask for "an HF token with read access to the job's
+  namespace". Tested: a fine-grained token of the namespace's user with `repo.content.read`,
+  `inference.serverless.write` and `job.write` passes; so does the user's write token. Not
+  tested: a token without `job.write` (whether repository read alone is enough), or an org's
+  namespace.
+
+### `flock serve`
+
+`flock serve <spec>` starts a spec's `hf_jobs` servers on their own, with the code a run uses,
+waits until they answer, and prints their URLs, the job ids and how to stop them. Several runs
+can then share one server, without each paying for its startup, by listing its URL:
+
+```sh
+uv run flock serve experiments/mini-swarm/hf-jobs.yaml --timeout 4h
+# ready:
+#   Qwen/Qwen3.8-27B replica 0: https://<job id>--8000.hf.jobs/v1 (job <job id>, a100-large, namespace <you>)
+# A run uses them with, in its spec:
+#   model: Qwen/Qwen3.8-27B
+#   inference:
+#     urls: [https://<job id>--8000.hf.jobs/v1]
+#     api_key_env: HF_INFERENCE_TOKEN  # an HF token that can read <you>
+uv run flock serve experiments/mini-swarm/hf-jobs.yaml --stop   # or: hf jobs cancel <job id>
+```
+
+It needs no controller: `HF_TOKEN` (or the saved login) starts and probes the jobs. They are
+labelled `serve` instead of `swarm`, so no run's controller adopts or cancels them; only
+`--stop` (every job `flock serve` labelled for the spec's name) or their `timeout`
+(`--timeout`, default the spec's) ends them. With `--run` (or `FLOCK_RUN_DIR`) it reads the
+run's cluster.env and run.env, as `flock launch` does. flock does not share
+servers across runs by itself.
+
 ## Model check and context window
 
 At apply the controller reads `GET <url>/models` from each endpoint, as written:
@@ -211,8 +358,9 @@ name:
 | the agent's Trial | the worker (Harbor) | Pi's requests |
 
 How the key travels: `Authorization: Bearer <key>`. Controller secrets to set: every
-`api_key_env` your blocks name (or `HF_TOKEN` for the router by default), plus the `secrets` your
-types list, plus `FLOCK_TOKEN`. A Trial's environment is the task's plus the inference key, the
+`api_key_env` your blocks name (or `HF_TOKEN` for the router and `hf_jobs` by default), plus the
+`secrets` your types list, plus `FLOCK_TOKEN`; with `hf_jobs`, also `HF_TOKEN`, which starts the
+jobs. A Trial's environment is the task's plus the inference key, the
 tools and the resources; `FLOCK_TOKEN` and the workers' `HF_TOKEN` stay in the worker.
 
 ## Reasoning
@@ -286,7 +434,8 @@ enforces it, on by default:
 
 `flock status`, `GET /swarms/{swarm}` (`status.providers`) and the status page show each
 inference block by name (`inference`, or `types.<t>.inference` for a type's own): where it
-points, each model's context window, and `working / max_working`. `GET /agents/{name}` and
+points, each model's context window, and `working / max_working`; with `hf_jobs`, each server
+job by model (`status.servers`). `GET /agents/{name}` and
 `flock status --agent` show an agent's block (`provider`) and the server it calls
 (`endpoint`); `session_started` events carry `provider` and `model_id`.
 

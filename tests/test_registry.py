@@ -1,4 +1,4 @@
-"""flock.registry: every harness and compute entry is complete and its code imports."""
+"""flock.registry: every harness, compute and server entry is complete and its code imports."""
 
 import inspect
 
@@ -6,8 +6,8 @@ import pytest
 from pydantic import ValidationError
 
 from flock.controller.main import build
-from flock.models import ComputeSpec, Harness, TypeSpec
-from flock.registry import COMPUTE, HARNESSES, load
+from flock.models import ComputeSpec, Harness, Inference, TypeSpec
+from flock.registry import COMPUTE, HARNESSES, SERVERS, load
 
 
 @pytest.mark.parametrize("name", HARNESSES)
@@ -22,6 +22,12 @@ def test_harness_entry_is_complete(name):
 def test_compute_entry_is_complete(kind):
     assert list(inspect.signature(load(COMPUTE[kind])).parameters) == ["env", "dep", "data_dir"]
     assert ComputeSpec(kind=kind).kind == kind
+
+
+@pytest.mark.parametrize("kind", SERVERS)
+def test_server_entry_is_complete(kind):
+    assert list(inspect.signature(load(SERVERS[kind])).parameters) == ["env"]
+    assert kind in Inference.model_fields  # the inference block's key
 
 
 def test_unknown_names_keep_their_errors():

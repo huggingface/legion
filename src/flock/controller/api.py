@@ -34,6 +34,7 @@ from flock.controller.inference import check as inference_check
 from flock.controller.loop import LoopEngine, loop_status, swarm_stream
 from flock.controller.preflight import run_preflight
 from flock.controller.reconcile import agent_state, record_heartbeat, worker_state
+from flock.controller.servers import Servers, drain_grace
 from flock.controller.spawn import (
     Refused,
     SpawnAck,
@@ -67,6 +68,7 @@ from flock.models import (
     PromptCommand,
     PromptRequest,
     ProviderStatus,
+    ServerStatus,
     SwarmSpec,
     SwarmStatus,
     TypeHealth,
@@ -78,6 +80,7 @@ from flock.models import (
     type_spec_rev,
     worker_type_spec,
 )
+from flock.status import uptime
 from flock.tools.bundle import MAX_BUNDLE_BYTES, read_manifest, version_of
 from flock.tools.loader import ToolsError
 from flock.tools.spec import comms_clashes
@@ -116,6 +119,7 @@ def spec_source(header: str | None) -> dict[str, Any]:
     if "dirty" in raw:
         out["dirty"] = bool(raw["dirty"])
     return out
+
 
 
 def _dt(ts: float | None) -> datetime | None:
@@ -302,7 +306,8 @@ def worker_status(w: Row, agents: list[str], now: float, lv: Liveness) -> Worker
     )
 
 
-def swarm_status(store: Store, spec: SwarmSpec, now: float) -> SwarmStatus:
+def swarm_status(store: Store, spec: SwarmSpec, now: float,
+                 servers: Servers | None = None) -> SwarmStatus:
     workers = {w["id"]: w for w in store.list_workers(spec.swarm)}
     agents = store.list_agents(spec.swarm)
     pending = store.pending_counts(spec.swarm)
@@ -346,6 +351,7 @@ def swarm_status(store: Store, spec: SwarmSpec, now: float) -> SwarmStatus:
         bucket=spec.bucket,
         types=types,
         providers=providers,
+        servers=servers.status(spec.swarm) if servers is not None else [],
         agents_total=len(agents),
         workers_total=len(workers),
         pending_prompts=sum(pending.values()),
@@ -488,12 +494,13 @@ def _health_line(health: Health | None, swarm: str) -> str:
     return f'<p class="sub">health: {" · ".join(bits)} {alerts}</p>'
 
 
-def _status_page(store: Store, now: float, sampler: Health | None = None) -> str:
+def _status_page(store: Store, now: float, sampler: Health | None = None,
+                 servers: Servers | None = None) -> str:
     e = html.escape
     parts = []
     for sw in store.list_swarms():
         spec: SwarmSpec = sw["spec"]
-        st = swarm_status(store, spec, now)
+        st = swarm_status(store, spec, now, servers)
         removing = '<span class="badge warn"><i></i>removing</span>' if sw["removing"] else ""
         stats = [
             (_fmt_count(st.agents_total), "agents"),
@@ -555,6 +562,11 @@ def _status_page(store: Store, now: float, sampler: Health | None = None) -> str
             for pv in st.providers.values()
         )
         provs = f'<p class="sub">inference: {provs}</p>' if provs else ""
+        provs += "".join(f'<p class="sub">server <code>{e(sv.model)}</code> ({e(sv.kind)} '
+                         f'{e(sv.flavor)}): job <code>{e(sv.job_id or "-")}</code> '
+                         f'{e(sv.stage or "-")}, {e(sv.state)}, {e(sv.url or "-")}'
+                         f'{", up " + uptime(now - sv.started_at.timestamp()) if sv.started_at else ""}'
+                         f'{" · " + e(sv.error) if sv.error else ""}</p>' for sv in st.servers)
         provs += _health_line(sampler, spec.swarm)
         parts.append(
             f'<section class="swarm"><div class="head"><span class="kicker">swarm</span>'
@@ -661,6 +673,8 @@ def create_app(
     health: Health | None = None,
     buckets: Callable[[str], Any] | None = None,
     checkpoint: Callable[[], int] | None = None,
+    servers: Servers | None = None,
+    servers_interval: float | None = None,
 ) -> FastAPI:
     """`secret_source` holds provider keys for preflight (default: the process environment,
     where the Space puts its secrets); `preflight_transport` lets tests fake the providers, and
@@ -683,8 +697,21 @@ def create_app(
     the caller (main, localrun). Default: one that only counts.
     `buckets(url)` opens a bucket (a `BucketStore`): `flock launch` checks the spec's bucket for
     agents of an earlier run. None: no bucket access (tests): no fresh-run guard.
-    `checkpoint()` pushes the state to the bucket (POST /checkpoint); None: no state sync."""
+    `checkpoint()` pushes the state to the bucket (POST /checkpoint); None: no state sync.
+    `servers` starts and stops the inference servers of `hf_jobs` blocks (controller/servers.py;
+    default: from `secret_source`), checked every `servers_interval` s (FLOCK_SERVERS_INTERVAL,
+    default 10; 0: off, tests call `app.state.servers.tick()`); its first tick reattaches to the
+    stored swarms' running servers (a restarted controller)."""
     secret_source = os.environ if secret_source is None else secret_source
+    servers = Servers(secret_source) if servers is None else servers
+    # the applied specs it reattaches to (first tick) and judges server jobs by (each sweep),
+    # and where each swarm's servers ran, kept across restarts
+    servers.applied = lambda: {sw["spec"].swarm: sw["spec"] for sw in store.list_swarms()
+                               if not sw["removing"]}
+    servers.memory = (lambda swarm: store.get_control(swarm, "servers_where"),
+                      lambda swarm, where: store.put_control(swarm, "servers_where", where))
+    if servers_interval is None:
+        servers_interval = float(os.environ.get("FLOCK_SERVERS_INTERVAL", "10"))
     worlds = WorldHost() if worlds is None else worlds
     health = Health(store, token=token, secrets=secret_source) if health is None else health
     if loop_interval is None:
@@ -720,6 +747,14 @@ def create_app(
                 logging.getLogger("flock.loop").exception("loop tick failed")
             await asyncio.sleep(loop_interval)
 
+    async def servers_ticker() -> None:
+        while True:  # the first tick reattaches to the stored swarms' running servers
+            try:
+                await asyncio.to_thread(servers.tick)
+            except Exception:
+                log.exception("servers tick failed")
+            await asyncio.sleep(servers_interval)
+
     def comms_event(agent: str, ev: Event) -> None:
         data = ev.data.get("data", ev.data) if isinstance(ev.data, dict) else {}
         # {resource, kind, data} from a harbor resource's watch
@@ -743,14 +778,16 @@ def create_app(
         notifier._loop = asyncio.get_running_loop()
         task = asyncio.create_task(background(notifier)) if background else None
         ticker = asyncio.create_task(loop_ticker()) if loop_interval and loop_interval > 0 else None
+        checker = asyncio.create_task(servers_ticker()) if servers_interval > 0 else None
         yield
-        for t in (task, ticker):
+        for t in (task, ticker, checker):
             if t:
                 t.cancel()
         await asyncio.to_thread(worlds.stop_all)  # started worlds end with the controller
 
     app = FastAPI(title="flock controller", lifespan=lifespan)
     app.state.store, app.state.notifier, app.state.loops = store, notifier, loops
+    app.state.servers = servers
     app.state.health = health
     health.loops = loops  # world-down holds (docs/health.md)
     request_stats: dict[str, RequestStats] = {}
@@ -807,7 +844,7 @@ def create_app(
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
-        return _status_page(store, clock().timestamp(), health)
+        return _status_page(store, clock().timestamp(), health, servers)
 
     @api.post("/checkpoint")
     async def push_checkpoint() -> dict:
@@ -826,7 +863,7 @@ def create_app(
     @api.get("/swarms")
     def list_swarms() -> list[SwarmStatus]:
         now = clock().timestamp()
-        return [swarm_status(store, sw["spec"], now) for sw in store.list_swarms()]
+        return [swarm_status(store, sw["spec"], now, servers) for sw in store.list_swarms()]
 
     def reused_bucket(spec: SwarmSpec) -> str | None:
         """Why a fresh `flock launch` must not create this swarm: its bucket already holds
@@ -926,6 +963,7 @@ def create_app(
                                          "and instructions are fixed at launch; revert the "
                                          "change, or use a new type name")
         try:  # each model where its `inference` says, its context window pinned (docs/open-models.md)
+            servers.pin(spec, previous=prev["spec"] if prev else None)  # hf_jobs: their urls
             inference_check(spec, secret_source, transport=inference_transport,
                             previous=prev["spec"] if prev else None)
         except InferenceError as e:
@@ -947,6 +985,9 @@ def create_app(
             return {"dry_run": True, "spec": spec.model_dump(mode="json"),
                     "deletes": deletions(prev["spec"], spec) if prev else []}
         diff = diff_specs(prev["spec"], spec) if prev else ["created"]
+        # hf_jobs servers the spec no longer uses keep serving the turns of the agents on them
+        # (their workers drain) until their deadline, set before any sweep sees the spec
+        servers.retire_unused(spec, drain_grace(spec))
         with create_lock:  # two `flock launch` racing: one creates, the other gets 412
             if create and store.get_swarm(swarm):
                 worlds.discard(swarm)  # the candidate world this losing launch started
@@ -961,7 +1002,7 @@ def create_app(
         worlds.commit(swarm)  # a replaced world stops only now, after every check passed
         if spec.world is None or spec.world.endpoint != worlds.url(swarm):
             worlds.stop(swarm)  # the block went away or now names a url
-        return swarm_status(store, spec, clock().timestamp())
+        return swarm_status(store, spec, clock().timestamp(), servers)
 
     # ------------------------------------------------------------- health (docs/health.md)
 
@@ -1061,13 +1102,39 @@ def create_app(
             spec = spec_or_404(swarm)["spec"]
         elif spec.swarm != swarm:
             raise HTTPException(400, "spec.swarm does not match the path")
+        else:
+            prev = store.get_swarm(swarm)
+            try:  # hf_jobs: the started servers' urls
+                servers.pin(spec, previous=prev["spec"] if prev else None)
+            except InferenceError as e:
+                raise HTTPException(400, str(e)) from None
         async with httpx.AsyncClient(transport=preflight_transport) as http:
             return await run_preflight(spec, secret_source, http)
+
+    @api.post("/swarms/{swarm}/servers")
+    def start_servers(swarm: str, spec: SwarmSpec) -> list[ServerStatus]:
+        """Start the inference servers of the spec's `hf_jobs` blocks, or reattach to the
+        running ones (docs/open-models.md); returns at once. The controller then checks them
+        until every replica answers `GET /v1/models` (state `ready`) or the group fails;
+        `flock launch` polls GET and runs preflight once they are ready. The swarm need not
+        exist yet."""
+        if spec.swarm != swarm:
+            raise HTTPException(400, "spec.swarm does not match the path")
+        return servers.start(spec)
+
+    @api.get("/swarms/{swarm}/servers")
+    def list_servers(swarm: str) -> list[ServerStatus]:
+        return servers.status(swarm)
+
+    @api.delete("/swarms/{swarm}/servers")
+    def stop_servers(swarm: str) -> dict:
+        """Cancel the swarm's servers (a launch that failed after starting them)."""
+        return {"swarm": swarm, "cancelled": servers.stop(swarm)}
 
     @api.get("/swarms/{swarm}")
     def get_swarm(swarm: str) -> dict:
         row = spec_or_404(swarm)
-        status = swarm_status(store, row["spec"], clock().timestamp())
+        status = swarm_status(store, row["spec"], clock().timestamp(), servers)
         return {
             "spec": row["spec"].model_dump(mode="json"),
             "status": status.model_dump(mode="json"),
@@ -1079,7 +1146,8 @@ def create_app(
         spec_or_404(swarm)
         store.set_removing(swarm)
         worlds.stop(swarm)  # a world flock started ends with its swarm (docs/world.md)
-        return {"swarm": swarm, "removing": True}
+        cancelled = servers.stop(swarm)  # so do its hf_jobs servers
+        return {"swarm": swarm, "removing": True, **({"cancelled": cancelled} if cancelled else {})}
 
     @api.get("/swarms/{swarm}/agents")
     def list_agents(

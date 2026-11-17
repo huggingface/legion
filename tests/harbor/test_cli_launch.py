@@ -124,14 +124,15 @@ def test_launch_resume_and_update_on_a_harbor_spec(tmp_path, monkeypatch, app, s
 
 
 def experiment_spec(monkeypatch, pins, name, rev, env=None):
-    """An experiments/ folder's spec (or an absolute folder's) as `flock launch` reads it, the
-    task pin faked."""
+    """An experiments/ folder's spec (or an absolute folder's, or a spec file in one) as `flock
+    launch` reads it, the task pin faked."""
     pins[rev] = "a" * 40
     for key in ("RUN_NAME", "BUCKET"):
         monkeypatch.delenv(key, raising=False)
     for key, value in (env or {}).items():
         monkeypatch.setenv(key, value)
-    path = EXPERIMENTS / name / "spec.yaml"
+    path = EXPERIMENTS / name
+    path = path / "spec.yaml" if path.is_dir() else path
     swarm = read_spec(str(path))
     assert check_spec(swarm, str(path))[1] == []  # no refusals, no warnings
     assert all(ts.harbor.task["task"]["git_commit_id"] == "a" * 40 for ts in swarm.types.values())
@@ -219,6 +220,19 @@ def test_the_mini_swarm_spec_compiles(monkeypatch, pins):
     assert ts.harbor.config["tools"] == ["message_board.*"]
     assert ts.harbor.config["environment"] == {"backend": "hf-sandbox", "flavor": "cpu-basic"}
     assert ts.secrets == ["HF_TOKEN"]  # the worker deploys the Space and starts the sandboxes
+    # hf-jobs.yaml: the same run (task pin, roster, loop, limits) with the same model on a vLLM
+    # job flock starts
+    for key in ("MODEL", "FLAVOR", "MAX_MODEL_LEN"):
+        monkeypatch.delenv(key, raising=False)
+    hf = experiment_spec(monkeypatch, pins, "mini-swarm/hf-jobs.yaml",
+                         "d0e1fee0f1036a80d5400d67f7fad9143668ba94")
+    other = hf.types["agent"]
+    assert (hf.swarm, other.model, other.harbor, other.loop, other.secrets) == (
+        "mini-swarm-hf-jobs-1", ts.model, ts.harbor, ts.loop, ts.secrets)
+    hj = hf.inference.hf_jobs
+    assert (hj.flavor, hj.vllm_args, hf.inference.api_key_env) == (
+        "h200", ["max_model_len=131072"], "HF_INFERENCE_TOKEN")
+    assert hj.timeout == "3300s"  # startup_timeout 30m + run_timeout_seconds 600 + 15m
 
 
 def test_the_escape_room_spec_compiles(monkeypatch, pins):
@@ -231,3 +245,28 @@ def test_the_escape_room_spec_compiles(monkeypatch, pins):
     assert swarm.naming == "words" and ts.harbor.config["environment"]["backend"] == "docker"
     assert ts.harbor.team.startswith("Solve the escape-room puzzle")
     assert ts.harbor.config["tools"] == ["message_board.*"] and ts.secrets == []
+
+
+def test_serve_takes_the_run_dirs_environment(tmp_path, monkeypatch, pins):
+    """`flock --run RUN serve SPEC` fills the spec from the run's run.env and starts the servers
+    with its environment (the Hub faked)."""
+    from flock.controller.hf_jobs_servers import HFJobsServers
+
+    from ..fake_hub_jobs import FakeHubJobs
+
+    pins["d0e1fee0f1036a80d5400d67f7fad9143668ba94"] = "a" * 40
+    monkeypatch.delenv("RUN_NAME", raising=False)
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "run.env").write_text("RUN_NAME=from-run-env\nHF_TOKEN=run-env-token\n")
+    tokens = []
+
+    def starter(env):
+        tokens.append(env.get("HF_TOKEN"))
+        return HFJobsServers(FakeHubJobs(), env.get("HF_TOKEN"))
+
+    monkeypatch.setattr("flock.controller.hf_jobs_servers.hf_jobs_servers", starter)
+    r = runner.invoke(cli.app, ["--run", str(run), "serve",
+                                str(EXPERIMENTS / "mini-swarm" / "hf-jobs.yaml"), "--stop"])
+    assert r.exit_code == 0, r.output
+    assert "no running servers of from-run-env" in r.output and tokens == ["run-env-token"]

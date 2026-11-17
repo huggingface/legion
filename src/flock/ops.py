@@ -28,7 +28,7 @@ import yaml
 from pydantic import ValidationError
 
 from flock.client import Client, ClientError, local_run
-from flock.models import SwarmSpec, loop_refusals
+from flock.models import SwarmSpec, loop_refusals, parse_duration
 from flock.specrender import render, source_of
 from flock.worker.agents import VERIFY_WAIT
 
@@ -219,6 +219,82 @@ def provider_backed(spec: SwarmSpec) -> bool:
     return any(ts.resolved_model is not None for ts in spec.types.values())
 
 
+def has_servers(spec: SwarmSpec) -> bool:
+    """The spec has an inference block whose servers flock starts (`hf_jobs`)."""
+    from flock.controller.servers import server_kind
+
+    return any(ts.resolved_model is not None and server_kind(ts.resolved_model.inference)
+               for ts in spec.types.values())
+
+
+SERVERS_POLL_S = 10.0  # s between `wait_servers`' checks
+SERVERS_SAY_S = 120.0  # s between its progress lines when nothing changed
+
+
+def server_line(r: dict) -> str:
+    """One server as launch, serve and status print it."""
+    job = f"job {r['job_id']} {r['stage'] or '-'}" if r.get("job_id") else "no job"
+    if r.get("message") and r["state"] == "starting":
+        job += f" ({r['message']})"
+    return (f"server {r['model']} ({r['kind']} {r['flavor']}) replica {r['replica']}: {job}, "
+            f"{r['state']}" + (f", {r['url']}" if r.get("url") and r["state"] == "ready" else "")
+            + (f": {r['error']}" if r.get("error") else ""))
+
+
+def server_groups(spec: SwarmSpec) -> tuple[set[str], float]:
+    """The keys of the spec's server groups, and how long to wait for them at most: their
+    longest `startup_timeout` plus 5 minutes (the controller ends a startup at its
+    `startup_timeout`; this only covers a controller that stopped checking)."""
+    from flock.controller.servers import groups
+
+    gs = groups(spec)
+    return ({g.key for g in gs},
+            max(parse_duration(g.block.startup_timeout).total_seconds() for g in gs) + 300)
+
+
+def wait_servers(spec: SwarmSpec, rows: list[dict], poll: Callable[[], list[dict]],
+                 say: Callable[[str], None]) -> list[dict]:
+    """Wait until every server of the spec's groups is `ready` (`rows`, then `poll()`: the
+    swarm's, which may hold groups an earlier spec used), saying each change (and every
+    SERVERS_SAY_S); returns its rows. SpecError when one fails or is stopped, or after the
+    wait's limit (`server_groups`)."""
+    keys, limit = server_groups(spec)
+    rows = [r for r in rows if r["group"] in keys]
+    seen: dict[tuple, tuple] = {}
+    t0 = last = time.monotonic()
+    while True:
+        now = time.monotonic()
+        for r in rows:
+            key, state = (r["group"], r["replica"]), (r["job_id"], r["stage"], r["state"],
+                                                       r.get("message"))
+            if seen.get(key) != state or now - last >= SERVERS_SAY_S:
+                seen[key], last = state, now
+                say(f"{server_line(r)} ({int(now - t0)} s)")
+        if bad := [r for r in rows if r["state"] in ("failed", "stopped")]:
+            raise SpecError([*sorted({f"server {r['model']}: {r['error'] or r['state']}"
+                                      for r in bad})])
+        if rows and all(r["state"] == "ready" for r in rows):
+            return rows
+        if now - t0 > limit:
+            raise SpecError([f"servers: not ready after {int(limit)} s"])
+        _sleep(SERVERS_POLL_S)
+        rows = [r for r in poll() if r["group"] in keys]
+
+
+def start_servers(api: Client, spec: SwarmSpec, say: Callable[[str], None] = lambda _: None,
+                  cancel: bool = True) -> list[dict]:
+    """Start the spec's `hf_jobs` servers through the controller (it reuses running ones) and
+    wait until they answer. A failure raises SpecError, after cancelling them (`cancel`)."""
+    try:
+        return wait_servers(spec, api.start_servers(spec), lambda: api.servers(spec.swarm), say)
+    except SpecError as e:
+        if cancel:
+            with contextlib.suppress(Exception):
+                api.stop_servers(spec.swarm)
+        raise SpecError([*e.lines, "the inference servers did not start"
+                         + (" (cancelled)" if cancel else "")]) from None
+
+
 def preflight_lines(results: list[dict]) -> list[str]:
     """One line per probed model: `MODEL: ok|unverified|FAIL[ N ms][ (error)]`."""
     return [f"{r['model']}: " + ("unverified" if r.get("unverified") else "ok" if r["ok"] else "FAIL")
@@ -328,16 +404,20 @@ def launch(api: Client, spec: SwarmSpec, spec_file: str, *, env_files=(),
                     done["held"] = None
                 return done
             return _launch(api, spec, spec_file, bundle, done, source, types, agents,
-                           preflight, strict)
+                           preflight, strict, say)
         except ClientError as e:
             raise SpecError([str(e)], done) from None
     except BaseException:  # also Ctrl-C during the preflight
-        if "local" in done:  # nothing created: do not leave a controller behind
-            end_local(done["local"], api.env)
+        if "local" in done:  # nothing created: do not leave a controller behind (its end
+            end_local(done["local"], api.env)  # cancels the servers it started)
+        elif "servers" in done:  # nor GPU jobs
+            with contextlib.suppress(Exception):
+                api.stop_servers(spec.swarm)
         raise
 
 
-def _launch(api, spec, spec_file, bundle, done, source, types, agents, preflight, strict) -> dict[str, Any]:
+def _launch(api, spec, spec_file, bundle, done, source, types, agents, preflight, strict,
+            say) -> dict[str, Any]:
 
     def refuse(*lines: str):
         raise SpecError(list(lines), done)
@@ -362,6 +442,9 @@ def _launch(api, spec, spec_file, bundle, done, source, types, agents, preflight
                    "`flock update` first, then `flock launch`")
         done["resumed"] = api.resume(spec.swarm, types=types, agents=agents)
         return done
+    if has_servers(spec):  # hf_jobs: start them and wait, before preflight probes them
+        done["servers"] = []
+        done["servers"] = start_servers(api, spec, say)
     if preflight is None:
         preflight = provider_backed(spec)
     if preflight:
@@ -382,7 +465,8 @@ def _launch(api, spec, spec_file, bundle, done, source, types, agents, preflight
 
 def update(api: Client, spec: SwarmSpec, spec_file: str, *, sources: dict[str, str] | None = None,
            preflight: bool | None = None, strict: bool = False, replicas: str = "keep",
-           check: bool = False, source: dict[str, str] | None = None) -> dict[str, Any]:
+           check: bool = False, source: dict[str, str] | None = None,
+           say: Callable[[str], None] = lambda _: None) -> dict[str, Any]:
     """`flock update`: apply a spec read with `read_spec` (and its folder's tools) to the
     running swarm (docs/live.md). Returns {"warnings", "probed" (preflight lines, with
     `check`), "kept" (live replica counts kept), "diff" (what changed), "deletes" (what the
@@ -392,7 +476,9 @@ def update(api: Client, spec: SwarmSpec, spec_file: str, *, sources: dict[str, s
     `replicas="keep"` keeps the live counts of existing types; `check` runs the controller's
     validation (dry run), stores nothing and names where each changed value came from.
     `sources` (from `read_spec`) names the origins for `check`; `source` replaces the
-    `X-Flock-Source` header (--ref)."""
+    `X-Flock-Source` header (--ref). Without `check`, `hf_jobs` servers the spec needs and that
+    do not run yet (a changed block or model) are started and waited for first (`say` gets the
+    progress); the controller cancels the ones no applied spec uses (controller/servers.py)."""
     from flock.live import diff_specs, keep_replicas, world_tool_changes
 
     if replicas not in ("keep", "spec"):
@@ -406,8 +492,14 @@ def update(api: Client, spec: SwarmSpec, spec_file: str, *, sources: dict[str, s
         raise SpecError([(f"no swarm {spec.swarm!r} is running on this controller: start it "
                           "with `flock launch`") if e.status == 404
                          else f"error {e.status}: {e.detail}"]) from None
+    if has_servers(spec) and not check:
+        try:
+            start_servers(api, spec, say, cancel=False)  # the running ones serve on
+        except ClientError as e:
+            raise SpecError([f"servers: error {e.status}: {e.detail}"]) from None
     if preflight is None:  # --check probes every model; an update the ones it adds or moves
-        preflight = bool(probe_targets(spec) - probe_targets(old)) or (check and bool(unprobed(spec)))
+        preflight = (bool(probe_targets(spec) - probe_targets(old))
+                     or (check and bool(unprobed(spec))))
     probed: list[str] = []
     if preflight:
         try:
@@ -577,7 +669,7 @@ def _run_dir(api: Client) -> Path | None:
     return Path(d).resolve() if d else None
 
 
-def _values(api: Client, env_files=()) -> dict[str, str]:
+def environment(api: Client, env_files=()) -> dict[str, str]:
     """The environment, then the env files (later wins), as `read_spec` reads them."""
     from flock.specrender import read_env_file
 
@@ -649,7 +741,7 @@ def up(api: Client, spec: SwarmSpec, spec_file: str, env_files=(), *,
     is already queued: it would start without it)."""
     if spec.compute.kind == "local":
         return start_local(spec, spec_file, env_files, api.env)
-    vals = _values(api, env_files)
+    vals = environment(api, env_files)
     if spec.compute.kind == "slurm":
         return _up_slurm(api, spec, vals, say, hold)
     return _up_hf(api, spec, vals, say)
@@ -782,7 +874,7 @@ def down(api: Client, swarm: str) -> dict[str, Any]:
     else:
         from flock.controller import jobdeploy as jd
 
-        vals = _values(api, api.env_files)
+        vals = environment(api, api.env_files)
         group = vals.get("FLOCK_NETWORK_GROUP") or jd.DEFAULT_GROUP
         try:
             hf = _hf_api(vals)
