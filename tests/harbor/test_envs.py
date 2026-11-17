@@ -4,12 +4,13 @@ Harbor's default), and the docker and podman environments on a fake subprocess (
 in an argv)."""
 
 import asyncio
+import collections
 import importlib.metadata
 import re
 from types import SimpleNamespace
 
 import pytest
-from harbor.environments import hf_sandbox
+from harbor.environments import e2b, hf_sandbox
 from harbor.environments.base import ExecResult
 from harbor.environments.docker import docker
 from harbor.environments.factory import EnvironmentFactory
@@ -18,6 +19,7 @@ from harbor.models.trial.config import EnvironmentConfig as TrialEnvironmentConf
 from harbor.models.trial.paths import TrialPaths
 
 from flock import secrets_file
+from flock.harbor import envs
 from flock.harbor.envs import E2B, ENVIRONMENTS, HFSandbox, sandbox_name
 
 
@@ -76,12 +78,8 @@ async def test_e2b_trials_of_one_task_build_its_template_once(monkeypatch, tmp_p
 
     monkeypatch.setattr(E2B, "_create_template", build)
     monkeypatch.setattr(E2B, "_does_template_exist", exists)
-    async def sandbox(self):
-        self._sandbox = object()
-
-    monkeypatch.setattr(E2B, "_create_sandbox", sandbox)
-    monkeypatch.setattr(E2B, "ensure_dirs", lambda self, dirs: _done())
-    monkeypatch.setattr(E2B, "_upload_environment_dir_after_start", lambda self: _done())
+    monkeypatch.setattr(e2b.E2BEnvironment, "start", lambda self, force_build: _done())
+    monkeypatch.setattr(envs, "_E2B_BUILDS", collections.defaultdict(asyncio.Lock))  # this loop's
     (tmp_path / "environment").mkdir()
 
     def env(session):

@@ -89,8 +89,9 @@ or commit them in the spec.
   (Harbor's E2B environment). The worker needs `E2B_API_KEY` in its environment
   (not on Slurm, whose workers keep secrets out of it). The first Trial of a task
   builds an E2B template from the task's `docker_image` or Dockerfile while the
-  worker's other Trials wait; later ones reuse it. Several workers starting a new
-  task at once would race to build it: launch one first. As on hf-sandbox: no mounts or local networks, and private model URLs
+  worker's other Trials wait; later ones reuse it. Workers that start a new task
+  at once cancel each other's builds and their Trials fail (404): start one worker
+  until the template exists, then scale up. As on hf-sandbox: no mounts or local networks, and private model URLs
   are refused. A sandbox's lifetime is set when it starts: its Trial's
   (`limits.trial_hours` plus a turn and 10 minutes of setup), at most 24 h (1 h on
   E2B's Hobby plan: lower `trial_hours` there). A Trial that ends kills its sandbox;

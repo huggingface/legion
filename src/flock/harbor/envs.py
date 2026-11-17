@@ -2,6 +2,7 @@
 it for every Trial: `ENVIRONMENTS`)."""
 
 import asyncio
+import collections
 import contextvars
 import hashlib
 import re
@@ -129,7 +130,7 @@ class HFSandbox(hf_sandbox.HFSandboxEnvironment):
                                f"{result.stderr or result.stdout}")
 
 
-_E2B_BUILDS: dict[str, asyncio.Lock] = {}  # template -> lock, in this worker
+_E2B_BUILDS = collections.defaultdict(asyncio.Lock)  # template -> lock, in this worker
 
 
 class E2B(e2b.E2BEnvironment):
@@ -139,7 +140,7 @@ class E2B(e2b.E2BEnvironment):
     async def start(self, force_build: bool) -> None:
         # shortcut: one worker's Trials wait for each other; workers that start one new task's
         # Trials at once still race (prebuild the template, or lock on E2B, if that matters)
-        async with _E2B_BUILDS.setdefault(self._template_name, asyncio.Lock()):
+        async with _E2B_BUILDS[self._template_name]:
             if force_build or not await self._does_template_exist():
                 await self._create_template()
         await super().start(force_build=False)
