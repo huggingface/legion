@@ -7,7 +7,7 @@ inference:
   api_format: openai_chat_completions
   reasoning_effort: low
 task:
-  repo: https://huggingface.co/datasets/HuggingFaceSwarms/collaborative-intelligence-harbor
+  repo: https://huggingface.co/datasets/HuggingFaceSwarms/collaborative-intelligence
   revision: 61bfd4fe1749264c291751e6dc02540398eb3e4d
   selector: ci-sharing-h2-r-choosing-the-safe-field-station-solo-s0
 agents:
