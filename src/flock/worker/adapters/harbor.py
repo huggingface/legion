@@ -426,7 +426,7 @@ class HarborAdapter:
                     self._emit(AdapterEvent("error", error=error,
                                             data={"reason": "success_check"}))
                 self._success_error = error
-            await asyncio.sleep(5)
+            await asyncio.sleep(30)
 
     async def _drop_network(self, networks: Any) -> None:
         """Remove a Trial's network once its environment has stopped."""
