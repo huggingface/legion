@@ -11,7 +11,7 @@ inference:
 task:
   repo: https://huggingface.co/datasets/HuggingFaceSwarms/s3-aggregation
   selector: ${TEAM:-agg-p01-n04}-s*           # the team's N slots, sorted: one per agent
-  revision: 9445a96048014fe9c5b50203843643eb9aa694b1
+  revision: 48d58242b8e914b651bcf81619ba03fba0a739a7
 agents:
   count: ${N:-4}                              # TEAM's size
 resources:
