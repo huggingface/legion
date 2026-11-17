@@ -725,7 +725,7 @@ async def test_a_sandbox_trial_gets_no_network(fakes, tmp_path, backend):
     env = fakes.trials[0].config.environment
     assert fakes.net == [] and env.extra_docker_compose == []
     if backend == "e2b":  # Harbor's own E2B environment, living as long as the Trial
-        assert env.import_path == "harbor.environments.e2b:E2BEnvironment"
+        assert env.import_path == "flock.harbor.envs:E2B"
         assert env.kwargs["sandbox_timeout_secs"] == math.ceil(
             fakes.trials[0].config.agent.override_timeout_sec) + 600
 

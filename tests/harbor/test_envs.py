@@ -18,7 +18,7 @@ from harbor.models.trial.config import EnvironmentConfig as TrialEnvironmentConf
 from harbor.models.trial.paths import TrialPaths
 
 from flock import secrets_file
-from flock.harbor.envs import ENVIRONMENTS, HFSandbox, sandbox_name
+from flock.harbor.envs import E2B, ENVIRONMENTS, HFSandbox, sandbox_name
 
 
 @pytest.mark.parametrize("kwargs, namespace, file_token, token", [
@@ -61,18 +61,38 @@ def test_sandbox_name_is_short_for_a_digest_image():
     assert name == sandbox_name("trial/x" * 30, image) != sandbox_name("trial/x" * 30, "other")
 
 
-def test_e2b_is_harbors_own_environment(tmp_path):
-    """`backend: e2b` builds Harbor's E2BEnvironment (the e2b extra installed), no subclass."""
-    from harbor.environments.e2b import E2BEnvironment
+async def test_e2b_trials_of_one_task_build_its_template_once(monkeypatch, tmp_path):
+    """Two Trials starting at once: one builds the template, the other waits for it (E2B
+    cancels a build when a second one of the same template starts)."""
+    built, builds = set(), []
 
+    async def build(self):
+        builds.append(self._template_name)
+        await asyncio.sleep(0)  # the other Trial's turn, mid-build
+        built.add(self._template_name)
+
+    async def exists(self):
+        return self._template_name in built
+
+    monkeypatch.setattr(E2B, "_create_template", build)
+    monkeypatch.setattr(E2B, "_does_template_exist", exists)
+    async def sandbox(self):
+        self._sandbox = object()
+
+    monkeypatch.setattr(E2B, "_create_sandbox", sandbox)
+    monkeypatch.setattr(E2B, "ensure_dirs", lambda self, dirs: _done())
+    monkeypatch.setattr(E2B, "_upload_environment_dir_after_start", lambda self: _done())
     (tmp_path / "environment").mkdir()
-    env = EnvironmentFactory.create_environment_from_config(
-        TrialEnvironmentConfig(type="e2b", import_path=ENVIRONMENTS["e2b"],
-                               kwargs={"sandbox_timeout_secs": 120}),
-        environment_dir=tmp_path / "environment", environment_name="t", session_id="s",
-        trial_paths=TrialPaths(tmp_path / "trial"),
-        task_env_config=EnvironmentConfig(docker_image="python:3.12"))
-    assert type(env) is E2BEnvironment and env._sandbox_timeout == 120
+
+    def env(session):
+        return EnvironmentFactory.create_environment_from_config(
+            TrialEnvironmentConfig(type="e2b", import_path=ENVIRONMENTS["e2b"]),
+            environment_dir=tmp_path / "environment", environment_name="t", session_id=session,
+            trial_paths=TrialPaths(tmp_path / session),
+            task_env_config=EnvironmentConfig(docker_image="python:3.12"))
+
+    await asyncio.gather(env("a").start(force_build=False), env("b").start(force_build=False))
+    assert len(builds) == 1
 
 
 async def _done():

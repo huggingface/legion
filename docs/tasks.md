@@ -86,10 +86,11 @@ or commit them in the spec.
   task configuration. Local mounts and multi-container Compose tasks are not
   supported. Use a Space or existing HTTP board rather than a local socket board.
 - `environment.backend: e2b` runs each Trial in an [E2B](https://e2b.dev/) sandbox
-  (Harbor's own E2B environment). The worker needs `E2B_API_KEY` in its environment
+  (Harbor's E2B environment). The worker needs `E2B_API_KEY` in its environment
   (not on Slurm, whose workers keep secrets out of it). The first Trial of a task
-  builds an E2B template from the task's `docker_image` or Dockerfile; later ones
-  reuse it. As on hf-sandbox: no mounts or local networks, and private model URLs
+  builds an E2B template from the task's `docker_image` or Dockerfile while the
+  worker's other Trials wait; later ones reuse it. Several workers starting a new
+  task at once would race to build it: launch one first. As on hf-sandbox: no mounts or local networks, and private model URLs
   are refused. A sandbox's lifetime is set when it starts: its Trial's
   (`limits.trial_hours` plus a turn and 10 minutes of setup), at most 24 h (1 h on
   E2B's Hobby plan: lower `trial_hours` there). A Trial that ends kills its sandbox;
