@@ -98,9 +98,11 @@ on, e.g. vLLM's `--enable-auto-tool-choice --tool-call-parser <parser>` (the par
 model family; `qwen3_coder` for Qwen3.5 and Qwen3.8).
 
 - **Several servers.** Each agent calls one of the `urls`, picked by rendezvous hashing on its
-  name: the agents spread over the servers, an agent keeps its server while the list is the same,
-  and a server added or removed moves only the agents that must move. Preflight probes every
-  server, and with `metrics: true` the health snapshots cover each one (docs/health.md).
+  swarm's name and its own: the agents spread over the servers, as do the same names in
+  concurrent swarms (each run's `agent-001`); an agent keeps its server, and so its prefix cache,
+  across Trials and restarts while the list is the same; and a server added or removed moves only
+  the agents that must move. Preflight probes every server, and with `metrics: true` the health
+  snapshots cover each one (docs/health.md).
 - **Reachability.** The agents must reach every URL; the controller's checks use the URLs as
   written.
   - A private cluster address (`10.x`) needs the swarm on the same cluster (`compute: slurm`,

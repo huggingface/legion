@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 
 import pytest
 from pydantic import ValidationError
@@ -60,11 +61,21 @@ def test_servers_you_run_take_any_name_and_no_key():
 def test_agents_spread_over_several_urls():
     one = Inference(urls=["http://a:8000/v1", "http://b:8000/v1", "http://c:8000/v1"])
     agents = [f"agent-{i:03d}" for i in range(60)]
-    picked = {a: one.endpoint_for(a) for a in agents}
+    picked = {a: one.endpoint_for("s", a) for a in agents}
     assert set(picked.values()) == set(one.urls)  # every server gets agents
-    assert all(one.endpoint_for(a) == u for a, u in picked.items())  # stable
+    assert all(one.endpoint_for("s", a) == u for a, u in picked.items())  # stable
     fewer = Inference(urls=one.urls[:2])  # a server removed: only its agents move
-    assert all(fewer.endpoint_for(a) == u for a, u in picked.items() if u in fewer.urls)
+    assert all(fewer.endpoint_for("s", a) == u for a, u in picked.items() if u in fewer.urls)
+
+
+def test_concurrent_runs_spread_their_same_named_agents():
+    """A sweep: 40 `consecutive-id` teams of 4 on 14 shared servers. Every team's agent-001
+    used to land on one server (40 agents there, 80 on another, 11 servers idle)."""
+    servers = Inference(urls=[f"http://gpu-{i:02d}:8000/v1" for i in range(14)])
+    runs = [f"s3-maze-{t:02d}" for t in range(40)]
+    load = Counter(servers.endpoint_for(r, f"agent-{n:03d}") for r in runs for n in range(1, 5))
+    assert len(load) == 14 and max(load.values()) <= 2 * 160 / 14  # a share is 11.4
+    assert len({servers.endpoint_for(r, "agent-001") for r in runs}) >= 10
 
 
 @pytest.mark.parametrize(("inference", "needle"), [
