@@ -151,6 +151,7 @@ class SpecLimits(Limits):
 
 
 class Spec(Config):
+    stop_on_success: bool = False
     agents: Agents = Field(default_factory=Agents)
     inference: Inference = Field(default_factory=Inference)
     environment: EnvironmentSettings = Field(default_factory=EnvironmentSettings)
@@ -197,6 +198,10 @@ class Spec(Config):
     @model_validator(mode="after")
     def checks(self):
         limits, backend = self.limits, self.environment.backend
+        if self.stop_on_success and self.success_check is None:
+            raise ValueError("stop_on_success requires success_check")
+        if self.success_check and backend not in ("docker", "podman"):
+            raise ValueError("success_check requires a docker or podman sidecar")
         loops = self.type_loops().values()
         for loop in loops:
             try:
@@ -293,7 +298,11 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
     label = {name: name if spec.agents.roles else None for name in roles}
     # the folders: a worker builds the tool bundle and loads the resource modules from them
     config = spec.model_dump(mode="json", include={
-        "inference", "task", "environment", "tools_dir", "tools", "resources_dir", "namespace"})
+        "inference", "task", "environment", "tools_dir", "tools", "resources_dir", "namespace", "success_check"})
+    if spec.success_check is None:
+        config.pop("success_check", None)
+    if spec.stop_on_success:
+        config["stop_on_success"] = True
     config["limits"] = spec.limits.model_dump(
         include={"agent_max_turns", "agent_timeout_seconds", "trial_hours"}
     )
@@ -390,6 +399,7 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
         }},
         "types": types,
         "dashboard": spec.dashboard,
+        "stop_on_success": spec.stop_on_success,
         "spawn": spec.spawn,
         "limits": spec.limits.model_dump(include={"alive", "spawned_total", "budget_usd"}),
         "compute": spec.compute,

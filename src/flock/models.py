@@ -967,6 +967,7 @@ class SwarmSpec(BaseModel):
     namespace: str = ""
     bucket: str = ""
     providers: dict[str, ProviderSpec] = Field(default_factory=dict)
+    stop_on_success: bool = False
     models: dict[str, ModelSpec] = Field(default_factory=dict)
     types: dict[str, TypeSpec]
     # The tools folder, relative to the spec file; None: `tools/` next to it.
@@ -1009,6 +1010,9 @@ class SwarmSpec(BaseModel):
         provider-backed model has a price, harness and provider speak the same API. The price
         used is written into the spec (`resolved_model.pricing`, and the self-hosted default
         into the provider's `pricing`), so the stored spec carries what cost is derived from."""
+        if self.stop_on_success and not any(
+                ts.harbor and ts.harbor.config.get("success_check") for ts in self.types.values()):
+            raise ValueError("stop_on_success requires a Harbor success_check")
         for alias, m in self.models.items():
             if ":" in alias:
                 raise ValueError(f"models.{alias}: an alias cannot contain ':'")
@@ -1944,6 +1948,7 @@ class SwarmStatus(BaseModel):
     # `flock stop --release`: {since, reason, unsynced: {agent: error}}; None when not released
     released: dict[str, Any] | None = None
     # bumped by every apply that changes the spec (docs/live.md)
+    success: dict[str, Any] | None = None
     generation: int | None = None
 
 
