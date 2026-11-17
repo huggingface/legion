@@ -39,6 +39,7 @@ from typing import Any
 from flock.models import TypeSpec, parse_duration
 from flock.secrets_file import exposed
 from flock.worker.adapters.base import AdapterEvent, EventQueue, ResumeError
+from flock.worker.harbor import TRIAL_RESULTS, keep_results, results_dir
 
 log = logging.getLogger(__name__)
 
@@ -355,8 +356,6 @@ class HarborAdapter:
         """Done callback of a Trial's run(): roll over after trial_hours, report a failure
         (now, or at the next burst). Its results go to the results dir too, when there is
         one (flock.worker.harbor)."""
-        from flock.worker.harbor import TRIAL_RESULTS, keep_results, results_dir
-
         self.result = _result(task)
         if (results := results_dir()) is not None:
             name = trial.config.trial_name
