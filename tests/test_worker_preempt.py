@@ -282,7 +282,8 @@ async def test_repeated_signals_drain_once(tmp_path, caplog):
     assert await asyncio.wait_for(run, 10) == PREEMPT_EXIT
     assert caplog.text.count("preempted (") == 1
     assert len([u for u in store.uploads if any("preempted.json" in r for r in u)]) == 1
-    assert [hb.preempted for hb in ctrl.heartbeats].count(True) == 1
+    # drained once (the log line, the marker); every heartbeat after the sync says preempted
+    assert ctrl.heartbeats[-1].preempted
 
 
 # ---------------------------------------------------------------------- memory relief ladder

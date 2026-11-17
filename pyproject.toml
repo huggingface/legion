@@ -24,7 +24,7 @@ dependencies = [
 [project.optional-dependencies]
 controller = []  # compatibility: existing deployments install `[controller]`
 worker = []  # kept: Dockerfile.worker installs `[worker]`
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6", "respx>=0.21"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "pytest-xdist>=3", "ruff>=0.6", "respx>=0.21"]
 
 [project.scripts]
 flock = "flock.cli:app"
