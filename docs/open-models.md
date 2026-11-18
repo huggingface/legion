@@ -319,6 +319,7 @@ waits until they answer, and prints their URLs, the job ids and how to stop them
 can then share one server, without each paying for its startup, by listing its URL:
 
 ```sh
+export BOARD_SPACE="HuggingFaceSwarms/mini-swarm-$(uv run python -c 'import uuid; print(uuid.uuid4().hex[:12])')"
 uv run flock serve experiments/mini-swarm/hf-jobs.yaml --timeout 4h
 # ready:
 #   Qwen/Qwen3.8-27B replica 0: https://<job id>--8000.hf.jobs/v1 (job <job id>, a100-large, namespace HuggingFaceSwarms)
@@ -329,6 +330,9 @@ uv run flock serve experiments/mini-swarm/hf-jobs.yaml --timeout 4h
 #     api_key_env: HF_INFERENCE_TOKEN  # an HF token that can read HuggingFaceSwarms
 uv run flock serve experiments/mini-swarm/hf-jobs.yaml --stop   # or: hf jobs cancel <job id>
 ```
+
+This swarm config requires `BOARD_SPACE`; `serve` itself starts no board. If you later
+launch independent swarms with a Space board, give each one its own qualified ID.
 
 It needs no controller: `HF_TOKEN` (or the saved login) starts and probes the jobs. They are
 labelled `serve` instead of `swarm`, so no run's controller adopts or cancels them; only

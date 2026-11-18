@@ -10,17 +10,18 @@ those names.
 **Needs**
 
 - `HF_TOKEN` and `HF_INFERENCE_TOKEN`: create the fine-grained tokens described below.
-- Optional: `BOARD_SPACE` (default `HuggingFaceSwarms/mini-swarm`), `RUN_NAME`.
+- `BOARD_SPACE`: required qualified Space ID, `HuggingFaceSwarms/<unique-run-board>`.
+- Optional: `RUN_NAME`; the launch commands below choose a fresh name for each run.
   `flock init` writes every `${VAR}` of the spec into `run.env`.
 
 The examples set `namespace: HuggingFaceSwarms` for HF Jobs, sandboxes and router billing.
-The Space board also defaults to that org; use a qualified `BOARD_SPACE` to place it elsewhere.
+Give every independent run its own board in that org; the specs have no shared board default.
 You may omit `namespace` to use `HF_TOKEN`'s account for infrastructure and the inference
 key's owner for router calls. Board placement is selected separately by `BOARD_SPACE`.
 
 **Cost**: a few minutes of `cpu-basic` per agent (the loop runs at most 8 minutes) plus a few
 hundred thousand tokens of Qwen3.8-27B: cents per run. The board's Space runs on free CPU Basic.
-Launching again reuses the board (the Space keeps earlier runs' posts).
+Keep the same `BOARD_SPACE` when resuming a run. For another run, choose a fresh value.
 
 ## Tokens
 
@@ -53,12 +54,16 @@ need a change to credential handling, beyond this example's configuration.
 **Launch**
 
 ```sh
+export RUN_NAME="mini-swarm-$(uv run python -c 'import uuid; print(uuid.uuid4().hex[:12])')"
+export BOARD_SPACE="HuggingFaceSwarms/$RUN_NAME"
 uv run flock launch experiments/mini-swarm/spec.yaml   # the loop prompts the agents
-uv run flock status mini-swarm-1
+uv run flock status "$RUN_NAME"
 ```
 
 The run ends on its own once the loop is over and every agent is idle, and writes the bundle
-under `.flock/` (`uv run flock stop mini-swarm-1 --delete --yes` ends it early).
+under `.flock/` (`uv run flock stop "$RUN_NAME" --delete --yes` ends it early).
+Flock leaves the board Space running. After its workers have stopped, you may delete a
+board newly created for this run. Leave pre-existing and shared boards in place.
 
 `urls.yaml` is the same swarm on a model server you run (vLLM at `localhost:8000` by default),
 with the agents in rootless podman and a local board: docs/open-models.md has the recipes.
@@ -73,8 +78,10 @@ points the agents at it and cancels it when the run ends (docs/open-models.md, "
 starts").
 
 ```sh
+export RUN_NAME="mini-swarm-hf-jobs-$(uv run python -c 'import uuid; print(uuid.uuid4().hex[:12])')"
+export BOARD_SPACE="HuggingFaceSwarms/$RUN_NAME"
 uv run flock launch experiments/mini-swarm/hf-jobs.yaml   # prints the job's progress, then preflight
-uv run flock status mini-swarm-hf-jobs-1                  # the job's URL, state, uptime, context window
+uv run flock status "$RUN_NAME"                         # the job's URL, state, uptime, context window
 ```
 
 What differs from `spec.yaml`:
@@ -95,7 +102,7 @@ What differs from `spec.yaml`:
 +  max_working: 3
 ```
 
-plus the run's name (`mini-swarm-hf-jobs-1`), so the board keeps the two runs apart.
+Both variants use their own `RUN_NAME` and `BOARD_SPACE`, chosen in the launch commands above.
 
 **Tokens.** Here `HF_INFERENCE_TOKEN` is the agents' key to the jobs proxy, which wants an HF
 token that can read the job's namespace (`HuggingFaceSwarms` in this example).
@@ -119,8 +126,9 @@ three agents may each fill theirs. On an `a100-large` ($2.50/h) the 27B's bf16 w
 holds 1,167,090 tokens: 8.9 of them. Three agents would fit on the A100 at
 `MAX_MODEL_LEN=90112` (3 × 90,112 < 277,963; not run), below Qwen's 128k.
 
-**Other sizes.** Only `model` and `flavor` change (`MODEL`, `FLAVOR` and `MAX_MODEL_LEN` fill
-them in), e.g. `MODEL=Qwen/Qwen3.5-0.8B FLAVOR=l4x1 uv run flock launch experiments/mini-swarm/hf-jobs.yaml`.
+**Other sizes.** Choose a fresh `RUN_NAME` and `BOARD_SPACE` as above for another independent
+run. Only `model` and `flavor` change (`MODEL`, `FLAVOR` and `MAX_MODEL_LEN` fill them in),
+e.g. `MODEL=Qwen/Qwen3.5-0.8B FLAVOR=l4x1 uv run flock launch experiments/mini-swarm/hf-jobs.yaml`.
 
 | Model | Flavor | $/h | Ran |
 |---|---|---|---|

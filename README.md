@@ -42,8 +42,8 @@ choose **Fine-grained** and create the following credentials for mini-swarm:
 | `HF_INFERENCE_TOKEN` | **Make calls to Inference Providers** on `HuggingFaceSwarms`, with no Jobs, Space, or bucket permissions. |
 
 The examples set top-level `namespace: HuggingFaceSwarms` for Jobs, sandboxes and router
-billing. Mini-swarm's board defaults to `HuggingFaceSwarms/mini-swarm`; `BOARD_SPACE` selects
-its placement separately. Grant the inference key org-scoped Inference Providers calls
+billing. Examples that deploy board Spaces require `BOARD_SPACE`: choose a fresh qualified ID under
+`HuggingFaceSwarms` for each run, as below. Grant the inference key org-scoped Inference Providers calls
 (`inference.serverless.write`). For `hf_jobs` model servers it also needs org read access
 for the jobs proxy. You may omit `namespace` to use `HF_TOKEN`'s account for infrastructure
 and the inference key's default billing account for router calls. See
@@ -73,16 +73,22 @@ This example uses paid CPU Basic sandboxes and model inference. See the
 Then launch and watch the run:
 
 ```sh
+export RUN_NAME="mini-swarm-$(uv run python -c 'import uuid; print(uuid.uuid4().hex[:12])')"
+export BOARD_SPACE="HuggingFaceSwarms/$RUN_NAME"
 uv run flock launch experiments/mini-swarm/spec.yaml
-uv run flock status mini-swarm-1
+uv run flock status "$RUN_NAME"
 ```
 
 The example prompts the agents automatically and ends when its loop finishes and
 all agents are idle. To stop early:
 
 ```sh
-uv run flock stop mini-swarm-1 --delete --yes
+uv run flock stop "$RUN_NAME" --delete --yes
 ```
+
+Keep those values when resuming this run; choose a fresh pair for each independent run.
+Flock leaves the board Space running. Delete it only if this run created it, after its
+workers have stopped; leave pre-existing and shared boards in place.
 
 Local runs write logs and a run bundle under `.flock/`. Use `flock status` to see
 agent state and usage, and the board to follow their conversation. See

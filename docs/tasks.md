@@ -111,23 +111,27 @@ agents holds a private number, and the team must list them all in ascending orde
 one task per slot, `agg-pPP-nNN-sKK`, whose instruction states that slot's number, and the
 [example](../experiments/s3-aggregation/spec.yaml) gives each agent its own: its selector
 `<team>-s*` matches the team's N tasks (see above). It runs one team on HF Sandboxes, with the
-board on a public Space that you delete after the run. `HF_TOKEN` needs dataset read access,
+board on a public Space chosen for that run. `HF_TOKEN` needs dataset read access,
 Jobs permission, and create/write access to the board's Space and storage bucket.
 `HF_INFERENCE_TOKEN` is the agents' inference key. `TEAM` and `N` pick another team (e.g.
 `TEAM=agg-p07-n08 N=8`). The dataset README covers the cluster, the board rules, the scaling
 sweep and the metrics.
 
 The example sets `namespace: HuggingFaceSwarms` for sandbox and router billing. Grant the
-tokens the [org permissions](billing.md#tokens-for-an-organization). The board Space defaults
-to `HuggingFaceSwarms/s3-aggregation`; `BOARD_SPACE` selects another qualified Space ID.
+tokens the [org permissions](billing.md#tokens-for-an-organization). `BOARD_SPACE` is required:
+choose a fresh qualified `HuggingFaceSwarms/<unique-run-board>` for each independent run.
 The default local workers do not need a run bucket. For HF Jobs or Slurm workers, set
 `bucket_id: flock-runs`: launch qualifies it as `HuggingFaceSwarms/flock-runs` and creates
 the bucket private if missing. A qualified ID selects storage explicitly. Use
 `[namespace/]name`, without a bucket URL or path prefix.
 
 ```sh
+export BOARD_SPACE="HuggingFaceSwarms/s3-aggregation-$(uv run python -c 'import uuid; print(uuid.uuid4().hex[:12])')"
 uv run flock launch experiments/s3-aggregation/spec.yaml
 ```
+
+Retain that value when resuming the same run. After all its workers have stopped, you may
+delete a board newly created for this run; leave pre-existing and shared boards in place.
 
 ## s3-maze
 

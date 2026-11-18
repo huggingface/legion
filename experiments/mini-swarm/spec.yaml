@@ -15,7 +15,7 @@ agents:
   count: 3
 resources:
   message_board:                              # its message_board.* tools come with it
-    space_id: ${BOARD_SPACE:-HuggingFaceSwarms/mini-swarm}
+    space_id: ${BOARD_SPACE}                 # required: HuggingFaceSwarms/<unique-run-board>
     private: false                            # a private Space's gate needs HF_TOKEN in every sandbox
 environment:
   backend: hf-sandbox                         # flavor: cpu-basic (the default)
