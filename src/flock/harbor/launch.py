@@ -311,7 +311,8 @@ async def _run_experiment(config: Config):
                     bundle.manifest,
                     instructions,
                     role_instructions.get(record["role"], ""),
-                    run_id=run_id,
+                    # The run ID only matters to agents sharing resources like the message board
+                    run_id=run_id if config.resources else None,
                 )
                 instructions_file = inputs / f"{name}-instructions.md"
                 instructions_file.write_text(agent_instructions, encoding="utf-8")
