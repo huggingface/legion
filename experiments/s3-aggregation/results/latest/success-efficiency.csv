@@ -1,0 +1,11 @@
+model,agents,teams,successes,success_rate,mean_output_tokens_per_team,mean_output_tokens_per_agent,reference_tokens_per_agent,token_efficiency
+"Qwen3.5-27B, thinking off, max_channels: 1",1,32,32,1.0,273.40625,273.40625,9216,33.70808092353412
+"Qwen3.5-27B, thinking off, max_channels: 1",2,32,32,1.0,1738.25,869.125,9216,10.6037681576298
+"Qwen3.5-27B, thinking off, max_channels: 1",4,32,32,1.0,4419.59375,1104.8984375,9216,8.34103813274693
+"Qwen3.5-27B, thinking off, max_channels: 1",8,32,32,1.0,11770.8125,1471.3515625,9216,6.26362878518369
+"Qwen3.5-27B, thinking off, max_channels: 1",16,32,32,1.0,34149.5625,2134.34765625,9216,4.317946972234271
+"Qwen3.5-2B, thinking off, max_channels: 1",1,32,25,0.78125,2897.5625,2897.5625,9216,2.4848471775846077
+"Qwen3.5-2B, thinking off, max_channels: 1",2,32,14,0.4375,21709.21875,10854.609375,9216,0.3714550990002807
+"Qwen3.5-2B, thinking off, max_channels: 1",4,32,3,0.09375,78182.4375,19545.609375,9216,0.044204300997906336
+"Qwen3.5-2B, thinking off, max_channels: 1",8,32,0,0.0,183564.3125,22945.5390625,9216,0.0
+"Qwen3.5-2B, thinking off, max_channels: 1",16,32,0,0.0,392919.5,24557.46875,9216,0.0

@@ -11,6 +11,7 @@ results (figure, CSVs, tables, the rows and why each set-aside attempt didn't co
 | `serve-vllm.sbatch` | the model server: vLLM with `$MODEL` (default `Qwen/Qwen3.5-27B`) on one B200 GPU (docs/open-models.md) |
 | `sweep.py` | runs the grid, one command, resumable: a row per team in `<root>/rows.jsonl` |
 | `plot.py` | `scaling.png` (Figure 5's style), `teams.csv`, `by_n.csv` and `by_n.md` from the rows, one series per model |
+| `efficiency.py` | success and reference-normalized token efficiency side by side from a finalized `teams.csv`; PNG, SVG and summary CSV |
 | `setaside.py` | why each attempt in `rows-discarded.jsonl` didn't count, and how many teams needed a rerun |
 | `failures.py` | per agent: the answer the verifier saw (no answer, malformed, wrong count, wrong numbers, right) and, from the state bucket's event streams, its tool calls, failed calls and posts |
 | `waits.py` | how long each kept team's worker queued |
@@ -62,6 +63,11 @@ controller is gone), and one that never launched runs again. Stopping the driver
 is safe: in-flight teams keep running and are adopted.
 
 ## How it differs from the paper's Figure 5
+
+The latest PR figure adds an efficiency panel using the paper's formula, with its 9,216
+tokens per agent as a **reference scale**, not an enforced budget. It includes failed teams
+and counts generated tokens only. See [the definition and reproduction command](../results/latest/README.md).
+The original five-panel `scaling.png` remains available for absolute costs.
 
 | | s³ (Figure 5, top row) | here |
 | --- | --- | --- |
