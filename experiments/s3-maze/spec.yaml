@@ -37,7 +37,7 @@ resources:
       max_len: 1000
       min_post_gap: 5s
       max_posts: 40
-      max_channels: 1                         # #general only: no new channels (DMs still work)
+      max_channels: 1
 environment:
   backend: podman                             # each agent: its container and its maze service
 workers:
