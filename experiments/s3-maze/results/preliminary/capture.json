@@ -1,0 +1,37 @@
+{
+  "at": "2026-11-18T17:10:56.936712+01:00",
+  "evaluated_flock_revision": "03ec1dd9be659bde3751d37e393d014cdd8e5061",
+  "render_slurm_job": "431427",
+  "source_snapshot": {
+    "row_files_sha256": {
+      "27b-hint/rows.jsonl": "ac77e3255e39f02d2f302445541a1d5ce6f0e3da8ccadfd7bb01d40ac3a21bd5",
+      "27b-hint/rows-discarded.jsonl": "928b1194108bb121031e3f39acd47586c9272716e3a5c495730fba595ca4b90e",
+      "2b-hint/rows.jsonl": "2a1101177b33141c29f021cef049d1841bc485af4e8b66fbde57812513580539",
+      "2b-hint/rows-discarded.jsonl": "de5e3f6a5efe2c9e2c4ba01a11330f9ebc6217b5c894d203fdde57ed88d0de17"
+    },
+    "teams": {
+      "27b-hint": 160,
+      "2b-hint": 133
+    },
+    "at": "2026-11-18T17:10:56.936712+01:00"
+  },
+  "evaluated_dataset_revisions": [
+    "3b6c363d92626bd4d97a7ca89964fb850982d9ab"
+  ],
+  "discard_accounting": {
+    "27b-hint": {
+      "discard_records": 15,
+      "distinct_runs_in_discard_log": 15,
+      "repeated_discard_records": 0,
+      "eventually_accepted_runs": [],
+      "distinct_set_aside_runs": 15
+    },
+    "2b-hint": {
+      "discard_records": 249,
+      "distinct_runs_in_discard_log": 184,
+      "repeated_discard_records": 65,
+      "eventually_accepted_runs": [],
+      "distinct_set_aside_runs": 184
+    }
+  }
+}
