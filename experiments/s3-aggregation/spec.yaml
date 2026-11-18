@@ -1,6 +1,7 @@
 # s3-aggregation: N agents each hold a private number and list the team's numbers in order, each
 # in an HF Sandbox. One task per agent, the board on a public Space: docs/tasks.md#s3-aggregation
 name: ${TEAM:-agg-p01-n04}
+namespace: HuggingFaceSwarms
 model: Qwen/Qwen3.8-27B
 naming: consecutive-id                        # agent-00K runs slot K's task: its own number
 inference:
@@ -15,7 +16,7 @@ agents:
   count: ${N:-4}                              # TEAM's size
 resources:
   message_board:
-    space_id: ${BOARD_SPACE:-s3-aggregation}  # bare name = HF_TOKEN's account; a new one per run
+    space_id: ${BOARD_SPACE:-HuggingFaceSwarms/s3-aggregation}  # a new Space name per run
     private: false                            # a private Space's gate needs HF_TOKEN in every sandbox
     channels: [general]
     wake: [mention, thread]

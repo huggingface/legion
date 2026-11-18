@@ -2,6 +2,7 @@
 # container, calling an OpenAI-compatible server (by default at this machine's localhost), with a
 # local board. Recipes (vLLM or Ollama, and the HF cluster): docs/open-models.md.
 name: ${RUN_NAME:-mini-swarm-urls}
+namespace: HuggingFaceSwarms
 model: ${MODEL:-Qwen/Qwen3.5-0.8B}                  # the name the server serves
 naming: consecutive-id                              # agent-001..003: the task's test expects agent-NNN
 inference:

@@ -1,20 +1,18 @@
 # Billing and storage
 
 `namespace` is the optional account that pays for worker and controller Jobs, hf-sandbox
-sandboxes, vLLM servers started with `inference.hf_jobs`, and HF router requests. Examples
-omit it to use the launcher's account for infrastructure. You can set it on any compute
+sandboxes, vLLM servers started with `inference.hf_jobs`, and HF router requests. The runnable
+Flock examples explicitly select `HuggingFaceSwarms`. You can set it on any compute
 backend, including Slurm: it still selects billing for HF sandboxes and inference.
 
 ```yaml
-namespace: my-org
+namespace: HuggingFaceSwarms
 bucket_id: flock-runs
 ```
 
-With `namespace` omitted or empty, infrastructure uses `HF_TOKEN`'s account. Router requests
-send no bill-to header, so the inference key's owner pays. An explicit namespace sends
-`X-HF-Bill-To: my-org` on both preflight and agent requests. Flock never fills that header from
-`whoami(HF_TOKEN)`: the two tokens can belong to different people. There is no
-`inference.hf_router.bill_to` or `inference.hf_jobs.namespace` setting.
+With `namespace` omitted or empty, HF infrastructure uses `HF_TOKEN`'s account and HF router
+requests use the inference key's default billing account. Setting `namespace: HuggingFaceSwarms`
+selects the org for both; router requests include `X-HF-Bill-To: HuggingFaceSwarms`.
 
 ## Tokens for an organization
 
@@ -36,7 +34,7 @@ plan. It makes billable inference requests.
 
 ## Bucket IDs
 
-Set `bucket_id` to a bare name (`flock-runs`) or a qualified ID (`storage-org/flock-runs`), as
+Set `bucket_id` to a bare name (`flock-runs`) or a qualified ID (`HuggingFaceSwarms/flock-runs`), as
 in [huggingface_hub](https://huggingface.co/docs/huggingface_hub/guides/buckets).
 Bare names use the explicit namespace, else `HF_TOKEN`'s account. Qualified IDs select storage
 independently of billing. `hf://buckets/...` URLs and user-provided path prefixes are refused
@@ -59,6 +57,7 @@ bucket create/write credentials even with `FLOCK_STATE_URL=` (checkpointing off)
 `python -m flock.controller.localrun` command uses the same bucket preparation as `flock launch`.
 
 A manually org-deployed job controller refuses a blank namespace when `HF_TOKEN` belongs
-to another account: set `namespace: my-org` explicitly so worker placement and billing use
-that org. Matching-account controllers accept an unset namespace and keep it empty in the
-stored spec and router headers. See [job deployment](deploy-job.md).
+to another account. For a controller in `HuggingFaceSwarms`, set `namespace: HuggingFaceSwarms`
+explicitly so worker placement and billing use that org. Matching-account controllers accept
+an unset namespace, keep it empty in the stored spec and send no router bill-to header.
+See [job deployment](deploy-job.md).

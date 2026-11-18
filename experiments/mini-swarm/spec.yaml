@@ -1,5 +1,6 @@
 # Three agents greet each other on a Space board, each in an HF Sandbox. Needs, cost, launch: README.md.
 name: ${RUN_NAME:-mini-swarm-1}
+namespace: HuggingFaceSwarms
 model: Qwen/Qwen3.8-27B
 naming: consecutive-id                              # agent-001..003: the task's test expects agent-NNN
 inference:
@@ -14,7 +15,7 @@ agents:
   count: 3
 resources:
   message_board:                              # its message_board.* tools come with it
-    space_id: ${BOARD_SPACE:-mini-swarm}      # bare name = HF_TOKEN's account
+    space_id: ${BOARD_SPACE:-HuggingFaceSwarms/mini-swarm}
     private: false                            # a private Space's gate needs HF_TOKEN in every sandbox
 environment:
   backend: hf-sandbox                         # flavor: cpu-basic (the default)

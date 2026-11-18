@@ -44,7 +44,7 @@ the controller never reads your files.
 ```yaml
 comms:
   board: space                        # or a board url (= `url:`); unset: `url` as above
-  template: your-org/msgboard         # required: a Space running msgboard's Space app
+  template: HuggingFaceSwarms/msgboard  # required: a Space running msgboard's Space app
   space: ${BOARD_SPACE:-}             # default <template namespace>/board-<swarm>
   space_secrets:                                     # Space secret -> run.env name (default {})
     HF_TOKEN: BOARD_BUCKET_TOKEN

@@ -30,6 +30,7 @@ has more; experiments/mini-swarm/spec.yaml adds a Space board and a loop, on hf-
 
 ```yaml
 name: hello
+namespace: HuggingFaceSwarms
 model: moonshotai/Kimi-K2.5             # on the HF router (the default inference)
 task:
   repo: https://huggingface.co/datasets/harborframework/terminal-bench-2.1
@@ -47,6 +48,9 @@ limits:
 
 `pricing: [in, out, cached]` (USD per 1M tokens) gives the run a cost; Harbor reports none for
 router models ([docs/open-models.md](open-models.md)).
+This example bills router requests to `HuggingFaceSwarms`; `HF_TOKEN` needs Inference
+Providers permission on that org. Omitting `namespace` instead bills the inference key's
+owner, as described in [billing and storage](billing.md).
 
 Run it:
 
@@ -120,7 +124,9 @@ budget check, the view and the bundle use the spec as currently applied, so a
 ## Switching to HF Jobs
 
 Change `compute: local` to `compute: hf-jobs` and set `bucket_id: flock-runs` (created private
-if missing). `namespace` is optional; omit it to bill your account. See
+if missing, under `HuggingFaceSwarms` with the namespace above). `namespace` remains optional:
+omitting it uses `HF_TOKEN`'s account for infrastructure and the inference key's owner for
+router calls. See
 [billing and storage](billing.md), [deploy a controller](deploy-job.md), and run
 `flock launch spec.yaml`. `flock launch` of a
 `hf-jobs` spec goes to the jobs controller, and a jobs controller refuses a `local` spec (HTTP 400), so a spec never runs

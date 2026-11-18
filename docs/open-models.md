@@ -19,7 +19,7 @@ The block has the same shape in a Harbor spec (the run's, or a role's own) and i
 model: Qwen/Qwen3.8-27B            # a Hub id; with urls, the name the servers serve
 
 # The HF router (the default)
-namespace: huggingface           # optional: bill this org for Jobs, sandboxes and router calls
+namespace: HuggingFaceSwarms      # bill this org for Jobs, sandboxes and router calls
 inference:
   hf_router:
     provider: deepinfra            # a provider, or a policy: fastest (the router's default), cheapest, preferred
@@ -196,6 +196,7 @@ Big models are servers you run: start them with your own job script (one per ser
 addresses:
 
 ```yaml
+namespace: HuggingFaceSwarms
 compute:
   kind: slurm
 model: Qwen/Qwen3.5-0.8B
@@ -320,12 +321,12 @@ can then share one server, without each paying for its startup, by listing its U
 ```sh
 uv run flock serve experiments/mini-swarm/hf-jobs.yaml --timeout 4h
 # ready:
-#   Qwen/Qwen3.8-27B replica 0: https://<job id>--8000.hf.jobs/v1 (job <job id>, a100-large, namespace <you>)
+#   Qwen/Qwen3.8-27B replica 0: https://<job id>--8000.hf.jobs/v1 (job <job id>, a100-large, namespace HuggingFaceSwarms)
 # A run uses them with, in its spec:
 #   model: Qwen/Qwen3.8-27B
 #   inference:
 #     urls: [https://<job id>--8000.hf.jobs/v1]
-#     api_key_env: HF_INFERENCE_TOKEN  # an HF token that can read <you>
+#     api_key_env: HF_INFERENCE_TOKEN  # an HF token that can read HuggingFaceSwarms
 uv run flock serve experiments/mini-swarm/hf-jobs.yaml --stop   # or: hf jobs cancel <job id>
 ```
 

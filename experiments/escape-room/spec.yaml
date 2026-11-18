@@ -1,6 +1,7 @@
 # Four agents solve one AgentEscapeBench room (difficulty 20) in local Docker, sharing a board.
 # What it needs, cost and how to launch: README.md.
 name: ${RUN_NAME:-escape-room-1}
+namespace: HuggingFaceSwarms
 model: Qwen/Qwen3.8-27B
 inference:
   hf_router:

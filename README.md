@@ -38,16 +38,17 @@ choose **Fine-grained** and create the following credentials for mini-swarm:
 
 | Variable | Permissions |
 | --- | --- |
-| `HF_TOKEN` | Manage Jobs in the sandbox namespace; create and write the board's Space and storage bucket in their namespace. |
-| `HF_INFERENCE_TOKEN` | **Make calls to Inference Providers**, with no Jobs, Space, or bucket permissions. |
+| `HF_TOKEN` | Manage Jobs, create/write the board's Space and storage bucket, and read the private task dataset in `HuggingFaceSwarms`. |
+| `HF_INFERENCE_TOKEN` | **Make calls to Inference Providers** on `HuggingFaceSwarms`, with no Jobs, Space, or bucket permissions. |
 
-By default, the sandboxes, board Space, and bucket use your account's namespace.
-Set top-level `namespace: my-org` to bill an organization for Jobs, sandboxes and router
-requests. Grant `HF_TOKEN` Jobs and bucket write access there, and the inference key
-Inference Providers calls on the org (`inference.serverless.write`). For `hf_jobs` model
-servers the inference key also needs org read access for the jobs proxy. Board placement
-uses `BOARD_SPACE`. See [billing and storage](docs/billing.md). Then export the two
-different token values in the shell where you launch Flock:
+The examples set top-level `namespace: HuggingFaceSwarms` for Jobs, sandboxes and router
+billing. Mini-swarm's board defaults to `HuggingFaceSwarms/mini-swarm`; `BOARD_SPACE` selects
+its placement separately. Grant the inference key org-scoped Inference Providers calls
+(`inference.serverless.write`). For `hf_jobs` model servers it also needs org read access
+for the jobs proxy. You may omit `namespace` to use `HF_TOKEN`'s account for infrastructure
+and the inference key's default billing account for router calls. See
+[billing and storage](docs/billing.md). Then export the two different token values in the
+shell where you launch Flock:
 
 ```sh
 export HF_TOKEN="<token with Jobs, Space, and bucket permissions>"

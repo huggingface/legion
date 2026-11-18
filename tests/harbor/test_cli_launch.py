@@ -212,9 +212,12 @@ def test_the_mini_swarm_spec_compiles(monkeypatch, pins):
     swarm = experiment_spec(monkeypatch, pins, "mini-swarm",
                             "d0e1fee0f1036a80d5400d67f7fad9143668ba94")
     assert (swarm.swarm, swarm.compute.kind, list(swarm.types)) == ("mini-swarm-1", "local", ["agent"])
+    assert swarm.namespace == "HuggingFaceSwarms"
     ts = swarm.types["agent"]
     assert (ts.replicas, ts.agents_per_worker) == (3, 3)  # one worker: it deploys the board
-    assert ts.harbor.resources == {"message_board": {"space_id": "mini-swarm", "private": False}}
+    assert ts.harbor.resources == {"message_board": {
+        "space_id": "HuggingFaceSwarms/mini-swarm", "private": False}}
+    assert ts.resolved_model.headers == {"X-HF-Bill-To": "HuggingFaceSwarms"}
     assert swarm.naming == "consecutive-id" and ts.harbor.names() == ["agent-001", "agent-002", "agent-003"]
     assert ts.harbor.config["tools"] == ["message_board.*"]
     assert ts.harbor.config["environment"] == {"backend": "hf-sandbox", "flavor": "cpu-basic"}

@@ -10,12 +10,13 @@ those names.
 **Needs**
 
 - `HF_TOKEN` and `HF_INFERENCE_TOKEN`: create the fine-grained tokens described below.
-- Optional: `BOARD_SPACE` (default `mini-swarm` in `HF_TOKEN`'s account), `RUN_NAME`.
+- Optional: `BOARD_SPACE` (default `HuggingFaceSwarms/mini-swarm`), `RUN_NAME`.
   `flock init` writes every `${VAR}` of the spec into `run.env`.
 
-The examples omit `namespace`. Sandboxes and model Jobs use `HF_TOKEN`'s account; router calls
-use the inference key's owner. To bill an org, add top-level `namespace: my-org`; this covers
-Jobs, sandboxes and router calls. Board placement is still selected by `BOARD_SPACE`.
+The examples set `namespace: HuggingFaceSwarms` for HF Jobs, sandboxes and router billing.
+The Space board also defaults to that org; use a qualified `BOARD_SPACE` to place it elsewhere.
+You may omit `namespace` to use `HF_TOKEN`'s account for infrastructure and the inference
+key's owner for router calls. Board placement is selected separately by `BOARD_SPACE`.
 
 **Cost**: a few minutes of `cpu-basic` per agent (the loop runs at most 8 minutes) plus a few
 hundred thousand tokens of Qwen3.8-27B: cents per run. The board's Space runs on free CPU Basic.
@@ -25,18 +26,17 @@ Launching again reuses the board (the Space keeps earlier runs' posts).
 
 Create two [fine-grained tokens](https://huggingface.co/settings/tokens/new?tokenType=fineGrained):
 
-- `HF_TOKEN`: permission to manage Jobs in `namespace` (your account by
-  default), plus permission to create and write the board's Space and storage
-  bucket in the namespace selected by `BOARD_SPACE`. The board deployment creates
+- `HF_TOKEN`: permission to manage Jobs and read the private task dataset in `HuggingFaceSwarms`,
+  plus permission to create and write the board's Space and storage bucket in the namespace
+  selected by `BOARD_SPACE`. The board deployment creates
   these resources if needed, so access to an unrelated existing repository is not
   sufficient. For an organization namespace, your account also needs the
   corresponding organization access.
-- `HF_INFERENCE_TOKEN`: enable **Make calls to Inference Providers** only. It does
-  not need Jobs, repository-write, or bucket access.
+- `HF_INFERENCE_TOKEN`: enable **Make calls to Inference Providers** on `HuggingFaceSwarms`.
+  It does not need Jobs, repository-write, or bucket access.
 
-For org billing, grant the inference key Inference Providers calls on the org
-(`inference.serverless.write`). The `hf-jobs.yaml` variant also needs org read access on
-that key for the jobs proxy. See [billing and storage](../../docs/billing.md).
+The `hf-jobs.yaml` variant also needs org read access on the inference key for the jobs
+proxy. See [billing and storage](../../docs/billing.md).
 
 Export the token values under those names in the shell that launches Flock.
 Keep them out of the spec and source control. See Hugging Face's
@@ -62,6 +62,7 @@ under `.flock/` (`uv run flock stop mini-swarm-1 --delete --yes` ends it early).
 
 `urls.yaml` is the same swarm on a model server you run (vLLM at `localhost:8000` by default),
 with the agents in rootless podman and a local board: docs/open-models.md has the recipes.
+Its model endpoint's billing is independent of the HF namespace.
 
 ## On a vLLM server flock starts: `hf-jobs.yaml`
 
@@ -97,11 +98,12 @@ What differs from `spec.yaml`:
 plus the run's name (`mini-swarm-hf-jobs-1`), so the board keeps the two runs apart.
 
 **Tokens.** Here `HF_INFERENCE_TOKEN` is the agents' key to the jobs proxy, which wants an HF
-token that can read the job's namespace (`namespace`, else `HF_TOKEN`'s account).
+token that can read the job's namespace (`HuggingFaceSwarms` in this example).
 `HF_TOKEN` also starts, probes and cancels the job, so it needs permission to run Jobs there.
 As for `spec.yaml`, never give the agents `HF_TOKEN`. A fine-grained token with **Make calls to
-Inference Providers**, repository read and Jobs on your account works for both examples
-(tested); whether one without the Jobs permission passes the proxy has not been tested.
+Inference Providers**, repository read and Jobs on a user's account was tested in the earlier
+run below; that is not an org proxy validation. Whether one without the Jobs permission
+passes the proxy has not been tested.
 
 **Cost.** `h200` is $5/h while the job runs: 3.5 to 8 minutes to start (the image, 56 GB of
 weights, `torch.compile`) and the run's ten minutes at most, about $1.50, plus the sandboxes as
