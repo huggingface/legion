@@ -27,6 +27,7 @@ from flock.models import (
     DashboardSpec,
     Inference,
     LoopSpec,
+    Namespace,
     SpawnRule,
     SwarmSpec,
     TypeSpec,
@@ -161,7 +162,7 @@ class Spec(Config):
     workers: Workers = Field(default_factory=Workers)
     # Where flock's workers run (docs/local.md); an upstream config runs here, on its engine.
     compute: ComputeSpec = Field(default_factory=lambda: ComputeSpec(kind="local"))
-    namespace: str = ""  # bills Jobs, sandboxes and router calls (unset: each token's account)
+    namespace: Namespace = ""  # bills Jobs, sandboxes and router calls (unset: each token's account)
     bucket_id: BucketId = ""
     dashboard: DashboardSpec | None = None
     spawn: dict[str, SpawnRule] = Field(default_factory=dict)

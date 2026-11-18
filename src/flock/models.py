@@ -11,11 +11,18 @@ import ipaddress
 import re
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
-from typing import Any, Literal, NamedTuple
+from typing import Annotated, Any, Literal, NamedTuple
 from urllib.parse import urlsplit
 
 import yaml
-from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from flock.buckets import BucketId
 from flock.registry import COMPUTE, HARNESSES
@@ -130,6 +137,16 @@ ROUTER_POLICIES = ("fastest", "cheapest", "preferred")
 # What a Trial gets for servers that take no key: Pi needs a key reference all the same
 NO_KEY_ENV, NO_KEY = "FLOCK_INFERENCE_KEY", "none"
 _ROUTER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def namespace_name(value: str) -> str:
+    """A namespace is also an HTTP header value: allow empty, otherwise one ASCII name."""
+    if value and not _ROUTER_NAME_RE.fullmatch(value):
+        raise ValueError("namespace must be empty or an account name, e.g. my-org")
+    return value
+
+
+Namespace = Annotated[str, AfterValidator(namespace_name)]
 
 
 class HFRouter(BaseModel):
@@ -1136,7 +1153,7 @@ class SwarmSpec(BaseModel):
     swarm: str
     # Billing account for Jobs, sandboxes and router calls. Empty: each token's account;
     # stays empty in the stored spec, so the router never gets an inferred bill-to.
-    namespace: str = ""
+    namespace: Namespace = ""
     bucket_id: BucketId = ""
     # Where the types' models run (design.md 'Inference'), unless a type sets its own
     inference: Inference = Field(default_factory=Inference)

@@ -8,6 +8,7 @@ from collections import Counter
 import pytest
 from pydantic import ValidationError
 
+from flock.harbor.spec import Spec
 from flock.models import HF_ROUTER_URL, Inference, SwarmSpec, TypeSpec
 
 from .conftest import HB
@@ -33,6 +34,24 @@ def test_the_hf_router_is_the_default():
     assert r.request_model == r.model_id == "Qwen/Qwen3.8-27B"
     assert r.inference.key_env == "HF_TOKEN" and r.provider_name == "inference"
     assert r.pricing == [0, 0, 0]
+
+
+@pytest.mark.parametrize("namespace", [" ", "my org", "org\n", "org\r\nX-HF-Bill-To: other",
+                                       "org/other", "ümlaut", "_org"])
+def test_both_spec_forms_reject_malformed_namespace(namespace):
+    with pytest.raises(ValidationError, match="namespace must be"):
+        spec({"a": {**HB, "model": "Qwen/Qwen3.8-27B"}}, namespace=namespace)
+    with pytest.raises(ValidationError, match="namespace must be"):
+        Spec.model_validate({"name": "demo", "namespace": namespace, "model": "Qwen/Qwen3.8-27B",
+                             "task": {"repo": "https://huggingface.co/datasets/ns/tasks",
+                                      "selector": "task"}})
+
+
+@pytest.mark.parametrize("namespace", ["", "my-org", "HuggingFaceSwarms", "org.test_1"])
+def test_valid_namespace_names_preserve_explicit_router_billing(namespace):
+    s = spec({"a": {**HB, "model": "Qwen/Qwen3.8-27B"}}, namespace=namespace)
+    assert s.namespace == namespace
+    assert s.types["a"].resolved_model.headers == ({"X-HF-Bill-To": namespace} if namespace else {})
 
 
 @pytest.mark.parametrize(("provider", "sent", "policy"), [
