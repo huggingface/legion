@@ -10,9 +10,12 @@ those names.
 **Needs**
 
 - `HF_TOKEN` and `HF_INFERENCE_TOKEN`: create the fine-grained tokens described below.
-- Optional: `SANDBOX_NAMESPACE` (who pays for the sandboxes; default `HF_TOKEN`'s account),
-  `BOARD_SPACE` (default `mini-swarm` in `HF_TOKEN`'s account), `RUN_NAME`.
+- Optional: `BOARD_SPACE` (default `mini-swarm` in `HF_TOKEN`'s account), `RUN_NAME`.
   `flock init` writes every `${VAR}` of the spec into `run.env`.
+
+The examples omit `namespace`. Sandboxes and model Jobs use `HF_TOKEN`'s account; router calls
+use the inference key's owner. To bill an org, add top-level `namespace: my-org`; this covers
+Jobs, sandboxes and router calls. Board placement is still selected by `BOARD_SPACE`.
 
 **Cost**: a few minutes of `cpu-basic` per agent (the loop runs at most 8 minutes) plus a few
 hundred thousand tokens of Qwen3.8-27B: cents per run. The board's Space runs on free CPU Basic.
@@ -22,7 +25,7 @@ Launching again reuses the board (the Space keeps earlier runs' posts).
 
 Create two [fine-grained tokens](https://huggingface.co/settings/tokens/new?tokenType=fineGrained):
 
-- `HF_TOKEN`: permission to manage Jobs in `SANDBOX_NAMESPACE` (your account by
+- `HF_TOKEN`: permission to manage Jobs in `namespace` (your account by
   default), plus permission to create and write the board's Space and storage
   bucket in the namespace selected by `BOARD_SPACE`. The board deployment creates
   these resources if needed, so access to an unrelated existing repository is not
@@ -30,6 +33,10 @@ Create two [fine-grained tokens](https://huggingface.co/settings/tokens/new?toke
   corresponding organization access.
 - `HF_INFERENCE_TOKEN`: enable **Make calls to Inference Providers** only. It does
   not need Jobs, repository-write, or bucket access.
+
+For org billing, grant the inference key Inference Providers calls on the org
+(`inference.serverless.write`). The `hf-jobs.yaml` variant also needs org read access on
+that key for the jobs proxy. See [billing and storage](../../docs/billing.md).
 
 Export the token values under those names in the shell that launches Flock.
 Keep them out of the spec and source control. See Hugging Face's
@@ -90,7 +97,7 @@ What differs from `spec.yaml`:
 plus the run's name (`mini-swarm-hf-jobs-1`), so the board keeps the two runs apart.
 
 **Tokens.** Here `HF_INFERENCE_TOKEN` is the agents' key to the jobs proxy, which wants an HF
-token that can read the job's namespace (`SANDBOX_NAMESPACE`, else `HF_TOKEN`'s account).
+token that can read the job's namespace (`namespace`, else `HF_TOKEN`'s account).
 `HF_TOKEN` also starts, probes and cancels the job, so it needs permission to run Jobs there.
 As for `spec.yaml`, never give the agents `HF_TOKEN`. A fine-grained token with **Make calls to
 Inference Providers**, repository read and Jobs on your account works for both examples

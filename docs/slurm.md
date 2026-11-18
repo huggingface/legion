@@ -122,7 +122,7 @@ sbatch --parsable [-p <partition>] [-A <account>] -c <cpus> --mem=<mem> --time=<
        -o <log_dir>/<worker id>-%j.out <worker_script> <env file>
 ```
 
-The env file holds `WORKER_ID WORKER_INCARNATION SWARM TYPE DEADLINE DRAIN_WINDOW BUCKET RUN
+The env file holds `WORKER_ID WORKER_INCARNATION SWARM TYPE DEADLINE DRAIN_WINDOW BUCKET_ID RUN
 FLOCK_URL WORK_ROOT PYTHONUNBUFFERED INFERENCE_REV` (the inference block the job holds, read back
 when a restored controller re-adopts it), the type's `env`, and when configured
 `FLOCK_CTL_HOST_FILE FLOCK_VENV FLOCK_SECRETS_FILE FLOCK_CONTAINER_IMAGE` (and, with
@@ -206,7 +206,7 @@ limits) < `FLOCK_SLURM_*` on the controller < spec keys < `types.<type>`: the sp
 only fills keys the spec leaves unset.
 A size over `max_cpus`/`max_mem` (when set) is refused at apply and at launch (`launch_refused`): Slurm
 would accept it and leave it pending forever. A missing `worker_script`/`log_dir`/`launch_dir`
-is refused too. `bucket` is required; `world.url` is required (no `command` worlds).
+is refused too. `bucket_id` is required; `world.url` is required (no `command` worlds).
 
 ### Worker knobs
 

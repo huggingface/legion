@@ -42,8 +42,11 @@ choose **Fine-grained** and create the following credentials for mini-swarm:
 | `HF_INFERENCE_TOKEN` | **Make calls to Inference Providers**, with no Jobs, Space, or bucket permissions. |
 
 By default, the sandboxes, board Space, and bucket use your account's namespace.
-If you select an organization, grant access to that namespace and ensure your
-account has the corresponding organization permissions. Then export the two
+Set top-level `namespace: my-org` to bill an organization for Jobs, sandboxes and router
+requests. Grant `HF_TOKEN` Jobs and bucket write access there, and the inference key
+Inference Providers calls on the org (`inference.serverless.write`). For `hf_jobs` model
+servers the inference key also needs org read access for the jobs proxy. Board placement
+uses `BOARD_SPACE`. See [billing and storage](docs/billing.md). Then export the two
 different token values in the shell where you launch Flock:
 
 ```sh

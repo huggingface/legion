@@ -114,8 +114,10 @@ budget check, the view and the bundle use the spec as currently applied, so a
 
 ## Switching to HF Jobs
 
-Change `compute: local` to `compute: hf-jobs` (and give `namespace` and `bucket` if the spec does
-not have them), [deploy a controller](deploy-job.md), and run `flock launch spec.yaml`. `flock launch` of a
+Change `compute: local` to `compute: hf-jobs` and set `bucket_id: flock-runs` (created private
+if missing). `namespace` is optional; omit it to bill your account. See
+[billing and storage](billing.md), [deploy a controller](deploy-job.md), and run
+`flock launch spec.yaml`. `flock launch` of a
 `hf-jobs` spec goes to the jobs controller, and a jobs controller refuses a `local` spec (HTTP 400), so a spec never runs
 on a backend it did not ask for.
 
@@ -144,7 +146,7 @@ Different:
    Exit 0 is `COMPLETED`, any other exit `ERROR` ("exit N"), a process past its lifetime is
    killed and reported as `Job timeout` (a planned restart, as on HF Jobs).
 2. **Ignored:** `image`, `flavor`, the network group, the wheel and bootstrap, `namespace` and
-   `bucket`. There is no bucket sync: agent workdirs live in `<run>/agents/` (shared by the
+   `bucket_id`. There is no bucket sync: agent workdirs live in `<run>/agents/` (shared by the
    run's workers, so a restarted worker slot finds them on disk).
 3. **Secrets come from your shell.** The names a spec lists (`secrets:`, `api_key_env`) are read from the environment of `flock launch` and passed to the workers as
    env, as HF Jobs passes job secrets. Workers inherit your environment minus your own flock

@@ -3,8 +3,7 @@
 # are resources, reached over HTTP through the world.* and message_board.* tools. What it needs,
 # cost and how to launch: README.md. `flock init` writes every ${VAR} below into run.env.
 name: ${RUN_NAME:-pybot-1}
-namespace: ${NAMESPACE:-HuggingFaceSwarms}     # bills the workers and the sandboxes
-bucket: ${BUCKET}                              # the run's checkpoint bucket, hf://buckets/<ns>/<name>
+bucket_id: ${BUCKET_ID}                              # [namespace/]name; created private at launch if missing
 compute: hf-jobs
 harness: pi
 model: deepseek-ai/DeepSeek-V4.1-Flash-1017

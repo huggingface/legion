@@ -19,10 +19,10 @@ The block has the same shape in a Harbor spec (the run's, or a role's own) and i
 model: Qwen/Qwen3.8-27B            # a Hub id; with urls, the name the servers serve
 
 # The HF router (the default)
+namespace: huggingface           # optional: bill this org for Jobs, sandboxes and router calls
 inference:
   hf_router:
     provider: deepinfra            # a provider, or a policy: fastest (the router's default), cheapest, preferred
-    bill_to: huggingface           # optional: bill an org (X-HF-Bill-To)
   api_key_env: HF_INFERENCE_TOKEN  # default: HF_TOKEN
 
 # Servers you run
@@ -51,7 +51,6 @@ inference:
 | Field | Meaning |
 |---|---|
 | `hf_router.provider` | A router provider (`deepinfra`, `cerebras`, ...), or a selection policy: `fastest`, `cheapest`, `preferred`. Unset: the router's default (`fastest`). flock sends `<model>:<provider>`. |
-| `hf_router.bill_to` | An org the router bills instead of the key's owner: Pi and preflight send `X-HF-Bill-To`. |
 | `urls` | One or more base URLs ending in `/v1`, all serving `model`. A comma-separated string works too (`urls: ${VLLM_URLS}`). |
 | `hf_jobs.flavor` | Required. The GPU flavor of each server's job, e.g. `l4x1`, `a100-large`, `h200`. |
 | `hf_jobs.tool_call_parser` | Required. vLLM's `--tool-call-parser` (`qwen3_coder` for Qwen3.5 and Qwen3.8); flock always adds `--enable-auto-tool-choice`. |
@@ -61,7 +60,6 @@ inference:
 | `hf_jobs.startup_timeout` | How long flock waits for every replica to answer (default `20m`). |
 | `hf_jobs.replicas` | Servers of the model (default 1); each agent calls one, as with several `urls`. |
 | `hf_jobs.image` | The vLLM image (default `vllm/vllm-openai:v0.33.0`). |
-| `hf_jobs.namespace` | Who runs and pays for the jobs. Default: the spec's `namespace`, else `HF_TOKEN`'s account. |
 | `api_key_env` | The env var that holds the key (never the key itself). Default: `HF_TOKEN` for `hf_router` and `hf_jobs`, none for `urls`. |
 | `max_working` | See [`max_working`](#max_working). |
 | `context_window` | The model's context window in tokens, for servers that do not report one. |
@@ -71,6 +69,13 @@ inference:
 A spec sets one of `hf_router`, `urls` and `hf_jobs`. A role (Harbor spec) or a type (swarm spec) may set its own `model`, on the run's endpoints, and
 its own `inference`, which replaces the run's block as a whole. `pricing` stays where it was: the
 run's and a role's `[input, output, cached]` in USD per 1M tokens (see [Cost](#cost)).
+
+The top-level `namespace` selects the billing account for all HF Jobs (including vLLM),
+hf-sandbox and router calls. With it unset, Jobs use `HF_TOKEN`'s account and the router bills
+the inference key's owner; flock sends no `X-HF-Bill-To` header. With an org set, the inference
+key needs Inference Providers permission on that org (`inference.serverless.write`); for
+`hf_jobs` it also needs read access to the org to pass the jobs proxy. `HF_TOKEN` needs Jobs
+and bucket write access there. See [billing and storage](billing.md) for token details.
 
 `flock launch` compiles a Harbor spec's block into the swarm spec as it is. Each type's
 `resolved_model` then pins the block it runs on, its price and, at apply, the context window

@@ -3,7 +3,6 @@
 # flock starts the job, waits until it answers, and cancels it when the run ends.
 # Needs, cost, launch, other sizes: README.md.
 name: ${RUN_NAME:-mini-swarm-hf-jobs-1}
-namespace: ${SANDBOX_NAMESPACE:-}              # bills the sandboxes and the GPU job; unset: HF_TOKEN's account
 model: ${MODEL:-Qwen/Qwen3.8-27B}
 naming: consecutive-id                              # agent-001..003: the task's test expects agent-NNN
 inference:
