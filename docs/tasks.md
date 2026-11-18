@@ -139,7 +139,7 @@ the Git credential helper for a private task repo ([Slurm](slurm.md), "Container
 
 ```sh
 DS=/fsx/$USER/s3-maze
-hf download HuggingFaceSwarms/s3-maze --repo-type dataset --revision a43f73c3610cd66bc5e40077901b52eb0fe77314 --local-dir $DS
+hf download HuggingFaceSwarms/s3-maze --repo-type dataset --revision 3b6c363d92626bd4d97a7ca89964fb850982d9ab --local-dir $DS
 printf 'SLURM_PARTITION=hopper-cpu\nSLURM_MAX_MEM_PER_CPU_MB=2000\nVENV=%s\nCONTAINERS_REGISTRIES_CONF=%s\n' \
   "$PWD/.venv" "$DS/flock/registries.conf" > cluster.env
 # secrets.env (mode 600): HF_TOKEN, HF_INFERENCE_TOKEN, NAMESPACE, BUCKET
