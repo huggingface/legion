@@ -210,7 +210,8 @@ class HubJobsClient:
 
 def hub_jobs_client(env: Mapping[str, str], dep: Any, data_dir: str) -> HubJobsClient:
     """The controller's client for compute `hf-jobs` (flock.registry)."""
-    return HubJobsClient(token=env.get("HF_TOKEN"), network_group=dep.network_group)
+    return HubJobsClient(token=env.get("HF_TOKEN"), wheel_url=env.get("FLOCK_WHEEL_URL"),
+                         network_group=dep.network_group)
 
 
 @dataclass

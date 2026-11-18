@@ -268,6 +268,7 @@ def build(env: Mapping[str, str] = os.environ) -> Built:
         return HubBucketStore(url, token=env.get("HF_TOKEN") or None)
 
     app = create_app(store, token, background=background, stats=stats, namespace=dep.namespace,
+                     namespace_resolver=getattr(jobs, "namespace", None),
                      compute=compute, health=health, buckets=buckets,
                      checkpoint=None if state is None else lambda: state.push(store, force=True))
     if env.get("FLOCK_HOLD_ON_START") == "1":  # `flock launch --hold` (docs/live.md "Lifecycle")

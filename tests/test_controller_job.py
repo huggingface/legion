@@ -29,6 +29,7 @@ from flock.models import Event
 from flock.worker.main import WorkerConfig, expand_env
 
 from .conftest import TOKEN, make_spec
+from .fake_hub_jobs import FakeHubJobs
 
 GROUP_URL = "http://${HF_NETWORK_GROUP_PREFIX}controller:7860"
 JOB_ENV = {
@@ -92,8 +93,7 @@ def test_space_mode_launches_workers_without_a_group(tmp_path):
     b.store.close()
 
 
-@pytest.mark.parametrize("namespace", ["ns", ""])
-async def test_job_mode_refuses_specs_in_another_namespace(tmp_path, namespace):
+async def test_job_mode_refuses_specs_in_another_namespace(tmp_path):
     b = _built(tmp_path)
     transport = httpx.ASGITransport(app=b.app)
     headers = {"X-Flock-Token": TOKEN}
@@ -102,11 +102,53 @@ async def test_job_mode_refuses_specs_in_another_namespace(tmp_path, namespace):
         r = await c.put("/swarms/demo", json=spec.model_dump(mode="json"))
         assert r.status_code == 400 and "network group" in r.text
         spec = make_spec().model_dump(mode="json")
-        spec["namespace"] = namespace
+        spec["namespace"] = "ns"
         r = await c.put("/swarms/demo", json=spec)
         assert r.status_code == 200, r.text
-        assert b.store.get_swarm("demo")["spec"].namespace == namespace
+        assert b.store.get_swarm("demo")["spec"].namespace == "ns"
     b.store.close()
+
+
+@pytest.mark.parametrize(("mode", "controller_ns", "spec_ns", "status", "expected"), [
+    ("job", "org", "", 400, None),
+    ("job", "token-owner", "", 200, "token-owner"),
+    ("job", "org", "org", 200, "org"),
+    ("space", "org", "", 200, "token-owner"),
+])
+async def test_job_mode_checks_the_token_account_without_changing_billing_defaults(
+        tmp_path, monkeypatch, mode, controller_ns, spec_ns, status, expected):
+    hub = FakeHubJobs(account="token-owner")
+    monkeypatch.setattr("huggingface_hub.HfApi", lambda **_: hub)
+    built = build({**JOB_ENV, "FLOCK_MODE": mode, "FLOCK_NAMESPACE": controller_ns,
+                   "FLOCK_FAKE_JOBS": "0", "FLOCK_DATA": str(tmp_path / "data"),
+                   "FLOCK_WHEEL_URL": "hf://buckets/token-owner/wheels/flock.whl"})
+    spec = make_spec().model_dump(mode="json")
+    spec["namespace"] = spec_ns
+    spec["inference"] = {"hf_router": {"provider": "deepinfra"}}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=built.app),
+                                base_url="http://controller", headers={"X-Flock-Token": TOKEN}) as c:
+        applied = await c.put("/swarms/demo", json=spec)
+        assert applied.status_code == status, applied.text
+        if status == 400:
+            assert "set namespace: org" in applied.text
+            assert built.store.get_swarm("demo") is None and hub.runs == []
+            built.store.close()
+            return
+        reconcile(built.store, built.jobs, datetime(2026, 10, 20, tzinfo=UTC), built.settings)
+        assert hub.runs and {job["namespace"] for job in hub.runs} == {expected}
+        assert {job["network_group"] for job in hub.runs} == {
+            "flock-smoke" if mode == "job" else None}
+        stored = built.store.get_swarm("demo")["spec"]
+        assert stored.namespace == spec_ns
+        assert all(ts.resolved_model.headers == ({"X-HF-Bill-To": spec_ns} if spec_ns else {})
+                   for ts in stored.types.values())
+        assert {job.job_id for job in built.jobs.list({"swarm": "demo"}, namespace=spec_ns)} == {
+            job["id"] for job in hub.runs}
+        for job in hub.runs:
+            assert built.jobs.inspect(job["id"], namespace=spec_ns).stage == "SCHEDULING"
+            built.jobs.cancel(job["id"], namespace=spec_ns)
+        assert set(hub.cancelled) == {job["id"] for job in hub.runs}
+    built.store.close()
 
 
 def test_hub_client_sends_network_group_only_when_set(monkeypatch):

@@ -665,6 +665,7 @@ def create_app(
     inference_transport: httpx.BaseTransport | None = None,
     enforce_max_working: bool | None = None,
     namespace: str | None = None,
+    namespace_resolver: Callable[[str], str] | None = None,
     compute: str | None = None,
     loop_interval: float | None = None,
     comms_transport: httpx.BaseTransport | None = None,
@@ -683,6 +684,8 @@ def create_app(
     `enforce_max_working` defaults to FLOCK_MAX_WORKING_ENFORCE (on unless "0").
     `namespace`, when set (job mode), is the only namespace a spec may launch workers in: a
     network group spans one namespace, so workers elsewhere could never reach the controller.
+    `namespace_resolver` is the jobs client's cached lookup of HF_TOKEN's account, used
+    when a job-mode controller receives a spec with no explicit namespace.
     `compute`, when set ("hf-jobs", "local" or "slurm"), is the only `compute.kind` a spec may ask for:
     this controller's jobs client launches workers one way (docs/local.md).
     `loop_interval`: seconds between loop ticks (controller/loop.py) while the app runs;
@@ -925,12 +928,22 @@ def create_app(
             raise HTTPException(400, "spec.swarm does not match the path")
         if create and (why := reused_bucket(spec)):
             raise HTTPException(409, why)
-        if namespace and (spec.namespace or namespace) != namespace:
-            raise HTTPException(
-                400,
-                f"this controller runs as a job in namespace {namespace!r} and its workers must "
-                f"join its network group there; spec.namespace is {spec.namespace!r}",
-            )
+        if namespace:
+            effective_namespace = spec.namespace
+            if not effective_namespace:
+                if namespace_resolver is None:
+                    raise HTTPException(400, f"cannot resolve HF_TOKEN's account for this job "
+                        f"controller; set namespace: {namespace} explicitly to join its network group")
+                try:
+                    effective_namespace = namespace_resolver("")
+                except Exception as exc:  # noqa: BLE001 - refuse before launching workers
+                    raise HTTPException(400, f"cannot resolve HF_TOKEN's account: "
+                        f"{type(exc).__name__}: {exc}") from None
+            if effective_namespace != namespace:
+                raise HTTPException(400,
+                    f"this controller runs as a job in namespace {namespace!r} and its workers "
+                    f"must join its network group there; spec.namespace is {spec.namespace!r}, "
+                    f"resolving to {effective_namespace!r}; set namespace: {namespace} explicitly")
         if compute and spec.compute.kind != compute:
             raise HTTPException(
                 400,
