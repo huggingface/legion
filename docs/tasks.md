@@ -73,6 +73,12 @@ set `dataset: name@version`; registry entries may point to their own task commit
 `selector` matches task names and must select exactly one task. Pin `revision` to
 a commit to make the selection reproducible.
 
+To give each agent its own task, e.g. private information per agent, use a glob that
+matches exactly `agents.count` tasks, with `naming: consecutive-id` and no roles. The
+matches are sorted by name and `agent-00k` runs the k-th, so zero-pad any numbers in
+the names. The team stays one type on one worker and board. Each agent's Trial gets
+only its own task (instruction, files and tests).
+
 For a private dataset, the process resolving and downloading the task needs Git
 credentials with read access. Configure your existing HF login for Git, for
 example with `hf auth login --add-to-git-credential`. Do not put tokens in the URL
@@ -96,3 +102,20 @@ lifecycle, while a spec's loop controls when agents receive more prompts.
 
 See [local usage](local.md) for launching and inspecting a run, and
 [escape-room](../experiments/escape-room/) for an existing task integration.
+
+## s3-aggregation
+
+The private [s3-aggregation dataset](https://huggingface.co/datasets/HuggingFaceSwarms/s3-aggregation)
+adapts the information-aggregation task of [s³](https://arxiv.org/abs/2611.08615): each of N
+agents holds a private number, and the team must list them all in ascending order. A team has
+one task per slot, `agg-pPP-nNN-sKK`, whose instruction states that slot's number, and the
+[example](../experiments/s3-aggregation/spec.yaml) gives each agent its own: its selector
+`<team>-s*` matches the team's N tasks (see above). It runs one team on HF Sandboxes, with the
+board on a public Space that you delete after the run. It needs `HF_TOKEN` with read access to
+the dataset and `HF_INFERENCE_TOKEN` for the agents. `TEAM` and `N` pick another team (e.g.
+`TEAM=agg-p07-n08 N=8`). The dataset README covers the cluster, the board rules, the scaling
+sweep and the metrics.
+
+```sh
+uv run flock launch experiments/s3-aggregation/spec.yaml
+```

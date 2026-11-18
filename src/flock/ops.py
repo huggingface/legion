@@ -116,8 +116,11 @@ def harbor_spec(path: Path, env_files=()) -> SwarmSpec:
 
     env = {**os.environ, **{k: v for f in env_files for k, v in read_env_file(f).items()}}
     spec = Spec.load(path, env)
+    # a selector may match one task per agent: consecutive names, one type (sources.pin_tasks)
+    one_type = spec.naming == "consecutive-id" and not spec.agents.roles
+    names = list(spec.agents.roster()) if one_type else []
     try:
-        task = asyncio.run(sources.resolve_task(spec.task)).manifest()
+        task = asyncio.run(sources.pin_tasks(spec.task, names))
     except Exception as e:  # noqa: BLE001 - the Hub, git or the selector: the operator's to fix
         raise SpecError([(f"{path}: task: cannot pin {spec.task.repo} "
                           f"({spec.task.selector}@{spec.task.revision}): {e}")]) from None
@@ -144,6 +147,7 @@ def keep_pins(old: SwarmSpec, spec: SwarmSpec) -> None:
     replicas and ramp were kept (`keep_replicas` first), so teammates are never told of agents
     that do not exist; a count change that would rename running agents is refused. With words
     there is no roster in the file: each assign carries the run's agents (reconcile.harbor_roster).
+    A type whose agents each run their own task keeps its pinned map, so a resize is refused.
     Changes `spec` in place."""
     if any(ts.harbor for ts in spec.types.values()) and old.naming != spec.naming:
         raise SpecError([(f"naming: the run names its agents `{old.naming}`, the file "
@@ -176,6 +180,12 @@ def keep_pins(old: SwarmSpec, spec: SwarmSpec) -> None:
             continue
         if was.harbor.config["task"] == ts.harbor.config["task"]:
             ts.harbor.task = was.harbor.task
+        # one task per agent (sources.pin_tasks): the map must cover the agents the run keeps
+        if (tasks := ts.harbor.task.get("tasks")) and set(tasks) != set(ts.harbor.names()):
+            raise SpecError([(f"type {name}: its selector gives one task to each of "
+                              f"{', '.join(tasks)}, and the update would run "
+                              f"{', '.join(ts.harbor.names()) or 'none'}: a type with one task "
+                              "per agent can't be resized in a run: launch a new run")])
         if was.harbor.folders is not None and was.harbor.folders == ts.harbor.folders:
             for key in ("tools_dir", "resources_dir"):
                 ts.harbor.config[key] = was.harbor.config[key]

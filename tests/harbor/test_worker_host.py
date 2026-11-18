@@ -232,6 +232,51 @@ async def test_a_trials_grading_and_the_exports_outlive_the_worker(world, tmp_pa
     assert (export / "board.jsonl").read_text() == "{}\n"
 
 
+async def test_one_task_per_agent_gives_each_trial_only_its_own(world, tmp_path, monkeypatch):
+    """A selector matching agents.count tasks with naming: consecutive-id (sources.pin_tasks):
+    sorted by name, agent k runs the k-th, the worker downloads them at once, and each agent's
+    Trial gets only its own task. A count that doesn't match is refused."""
+    from harbor.models.registry import DatasetMetadata
+    from harbor.models.task.id import GitTaskId
+
+    async def metadata(self, name):  # the registry's order isn't the agents'
+        return DatasetMetadata(name="tasks", version="1", task_ids=[GitTaskId(
+            git_url="https://huggingface.co/datasets/org/tasks", git_commit_id="a" * 40,
+            path=Path(f"tasks/team-s{k:02d}")) for k in (3, 1, 2)])
+
+    downloads = []
+
+    async def download_tasks(tasks, directory):
+        downloads.append([t.task_id.get_name() for t in tasks])
+        for t in tasks:
+            t.local_path = directory / t.task_id.get_name()
+            t.local_path.mkdir(parents=True)
+        return [t.local_path for t in tasks]
+
+    monkeypatch.setattr(sources.GitRepoRegistryClient, "get_dataset_metadata", metadata)
+    monkeypatch.setattr(sources, "download_tasks", download_tasks)
+    text = SPEC.replace("MOUNT", "false").replace("regex-log", "team-*")
+    (tmp_path / "spec.yaml").write_text(text.replace(
+        "agents: {count: 20}", "naming: consecutive-id\nagents:\n  count: 3").replace(
+        "workers: {agents_per_worker: 20}", "workers:\n  agents_per_worker: 3"))
+    spec = Spec.load(tmp_path / "spec.yaml", env={})
+    with pytest.raises(ValueError, match="one task per agent needs"):
+        await sources.pin_tasks(spec.task, ["agent-001", "agent-002"])
+    task = await sources.pin_tasks(spec.task, list(spec.agents.roster()))
+    bundle = build_tool_bundle(spec.tools_dir, spec.tools, tmp_path / "launcher-tools.tar.gz")
+    ts = compile_spec(spec, task, bundle).types["agent"]
+    host = HarborHost(tmp_path / "work" / "_harbor" / "_worker")
+    adapters = [make_adapter(tmp_path / "work" / n, n, ts, host=host) for n in ts.harbor.names()]
+    await asyncio.gather(*(a.start(a.workdir, None, a.spec) for a in adapters))
+    assert downloads == [["team-s01", "team-s02", "team-s03"]]
+    assert len(world.trials) == 3 and [a.agent for a in adapters] == [
+        "agent-001", "agent-002", "agent-003"]
+    for a in adapters:  # agent-00k: the k-th task, and no other
+        assert a.trial.config.task.path.name == f"team-s{a.agent[-2:]}"
+    await asyncio.gather(*(a.close() for a in adapters))
+    await host.close()
+
+
 async def test_a_failed_prepare_is_retried_by_the_next_trial(world, tmp_path):
     host, (a, *_) = agents(tmp_path)
     world.download_fails = True
