@@ -68,6 +68,7 @@ def main():
     args.out.mkdir(parents=True, exist_ok=True)
     hint = args.hint.read_text().strip()
     snapshot, teams, audit, attempts, seen = {}, [], [], [], set()
+    configs = []
     metadata = {
         "evaluated_flock_revision": SOURCE, "evaluated_dataset_revision": REVISION,
         "render_slurm_job": os.environ.get("SLURM_JOB_ID"),
@@ -88,6 +89,11 @@ def main():
     frozen = row_source / "snapshot.json"
     metadata["at"] = (json.loads(frozen.read_text())["at"] if frozen.exists() else
                       datetime.now(ZoneInfo("Europe/Zurich")).isoformat())
+    if any(len(rows) != 160 for rows in snapshot.values()):
+        raise ValueError("Final capture requires both complete 160-team grids before reading Trial evidence")
+    if frozen.exists():
+        metadata["snapshot_proof"] = json.loads(frozen.read_text())
+    metadata["final_metadata_pending"] = True
     for grid, model in GRIDS:
         kept = {row["run"] for row in snapshot[grid]}
         raw = (row_source / grid / "rows-discarded.jsonl").read_bytes()
@@ -121,7 +127,14 @@ def main():
                     or (run / "experiment/team.md").read_text().strip() != hint
                     or len(list((run / "launch").glob("*.env"))) != 1):
                 raise ValueError(f"Unexpected source configuration: {key}")
-            outputs, trial_hashes = defaultdict(int), {}
+            configs.append({"grid": grid, "run": row["run"], "model": model, "tree": row["tree"],
+                            "n": row["agents"], "spec_sha256": digest((run / "experiment/spec.yaml").read_bytes()),
+                            "team_file_sha256": digest((run / "experiment/team.md").read_bytes()),
+                            "worker_cpus": spec["compute"]["cpus"], "worker_mem": spec["compute"]["mem"],
+                            "initial_worker_dead_after": spec["compute"].get("worker_dead_after", "default180s"),
+                            "inference_sha256": digest(json.dumps(spec["inference"], sort_keys=True).encode()),
+                            "loop_sha256": digest(json.dumps(spec["loop"], sort_keys=True).encode())})
+            outputs, trial_hashes, rewards = defaultdict(int), {}, defaultdict(list)
             for path in sorted((run / "results").rglob("trials/*/result.json")):
                 agent, trial = path.parent.parent.parent.name, path.parent.name
                 raw = path.read_bytes()
@@ -132,6 +145,11 @@ def main():
                     continue
                 trial_hashes[identity] = digest(raw)
                 result = json.loads(raw)
+                verified = (result.get("verifier_result") or {}).get("rewards") or {}
+                if "reward" in verified:
+                    if path.is_symlink():
+                        raise ValueError(f"Linked verifier result: {path}")
+                    rewards[agent].append((int(trial.rsplit("-t", 1)[1]), float(verified["reward"])))
                 output, evidence = trial_output(result, path)
                 outputs[agent] += output
                 audit.append({"model": model, "grid": grid, "run": row["run"], "agent": agent,
@@ -143,12 +161,19 @@ def main():
             expected_agents = {f"agent-{i:03d}" for i in range(1, row["agents"] + 1)}
             if set(outputs) != expected_agents or set(row["per_agent"]) != expected_agents:
                 raise ValueError(f"Missing or unplanned agent token source: {key}")
+            if set(rewards) != expected_agents:
+                raise ValueError(f"Missing verified reward source: {key}")
             for agent, output in outputs.items():
+                reward = max(rewards[agent])[1]
+                if reward not in [0, 1] or reward != row["per_agent"][agent]["reward"] or reward != row["rewards"][agent]:
+                    raise ValueError(f"Verified reward mismatch: {key}, {agent}")
                 if output != count(row["per_agent"][agent]["tokens"].get("output"), (key, agent)):
                     raise ValueError(f"Per-agent output mismatch: {key}, {agent}")
             total = sum(outputs.values())
             if total != count(row["tokens"].get("output"), key):
                 raise ValueError(f"Team output mismatch: {key}")
+            if row["success"] != any(max(values)[1] == 1 for values in rewards.values()):
+                raise ValueError(f"Team success differs from verified rewards: {key}")
             if type(row["success"]) is not bool:
                 raise ValueError(f"Unknown success outcome: {key}")
             teams.append({"model": model, "grid": grid, "tree": row["tree"], "n": row["agents"],
@@ -158,11 +183,15 @@ def main():
     write_csv(args.out / "teams.csv", teams)
     write_csv(args.out / "token-audit.csv", audit)
     write_csv(args.out / "attempts.csv", attempts)
+    write_csv(args.out / "run-config-audit.csv", configs)
     metadata["audited_teams"] = len(teams)
     metadata["audited_trials"] = len(audit)
     metadata["proven_pre_execution_zero_trials"] = sum(
         row["output_evidence"] == "proven_pre_execution_setup_failure" for row in audit)
     metadata["zero_output_teams"] = [row["run"] for row in teams if row["output_tokens"] == 0]
+    metadata["verified_reward_teams"] = len(teams)
+    metadata["valid_failures"] = sum(not row["success"] for row in teams)
+    metadata["run_config_audit_sha256"] = digest((args.out / "run-config-audit.csv").read_bytes())
     metadata["cohort_sha256"] = digest((args.out / "teams.csv").read_bytes())
     metadata["token_audit_sha256"] = digest((args.out / "token-audit.csv").read_bytes())
     (args.out / "capture.json").write_text(json.dumps(metadata, indent=2) + "\n")

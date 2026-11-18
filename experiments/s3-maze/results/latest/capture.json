@@ -1,7 +1,7 @@
 {
   "evaluated_flock_revision": "03ec1dd9be659bde3751d37e393d014cdd8e5061",
   "evaluated_dataset_revision": "3b6c363d92626bd4d97a7ca89964fb850982d9ab",
-  "render_slurm_job": "432547",
+  "render_slurm_job": "436342",
   "collaboration": {
     "instructions": "Before you go through a door, read the board and post which door you are taking; pick one no teammate has claimed; post when a branch is a dead end.",
     "max_channels": 1,
@@ -21,9 +21,9 @@
   },
   "source_row_files_sha256": {
     "27b-hint/rows.jsonl": "ac77e3255e39f02d2f302445541a1d5ce6f0e3da8ccadfd7bb01d40ac3a21bd5",
-    "2b-hint/rows.jsonl": "0b9a51a7b3df3fe1ac29bc370750af5d5753db8043668ef6357fb040d705dd37",
+    "2b-hint/rows.jsonl": "0be5ecc47ca331608d2565095eadf16d493b5e7efe0b5da1fbdcb085098721e0",
     "27b-hint/rows-discarded.jsonl": "928b1194108bb121031e3f39acd47586c9272716e3a5c495730fba595ca4b90e",
-    "2b-hint/rows-discarded.jsonl": "4e8e29a48144f918b91ddbfbd28c4c6ecbb1caab033485a83f1aed8c3ed78894"
+    "2b-hint/rows-discarded.jsonl": "fece3c46b17f6e0f0a60a4c0add7973c98ba7db4d095d4d17adf5622e350abff"
   },
   "discard_accounting": {
     "27b-hint": {
@@ -34,21 +34,122 @@
       "distinct_set_aside_runs": 15
     },
     "2b-hint": {
-      "discard_records": 251,
-      "distinct_runs_in_discard_log": 186,
-      "repeated_discard_records": 65,
-      "eventually_accepted_runs": [],
-      "distinct_set_aside_runs": 186
+      "discard_records": 392,
+      "distinct_runs_in_discard_log": 210,
+      "repeated_discard_records": 182,
+      "eventually_accepted_runs": [
+        "q2fh-maze-t07-n16-r2"
+      ],
+      "distinct_set_aside_runs": 209
     }
   },
   "output_source": "Harbor result.json agent_result.n_output_tokens; exact per-Trial/agent/team checks",
   "missing_output_policy": "abort unless hashed pre-execution setup failure proves zero; never exclude teams",
   "zero_output_policy": "include explicit zeros; abort only if a whole group's mean is zero",
-  "at": "2026-11-18T17:26:57.507333+01:00",
-  "audited_teams": 295,
-  "audited_trials": 1646,
-  "proven_pre_execution_zero_trials": 62,
+  "at": "2026-11-18T21:56:54.256187+01:00",
+  "snapshot_proof": {
+    "at": "2026-11-18T21:56:54.256187+01:00",
+    "teams": {
+      "27b-hint": 160,
+      "2b-hint": 160
+    },
+    "hashes": {
+      "27b-hint/rows.jsonl": "ac77e3255e39f02d2f302445541a1d5ce6f0e3da8ccadfd7bb01d40ac3a21bd5",
+      "27b-hint/rows-discarded.jsonl": "928b1194108bb121031e3f39acd47586c9272716e3a5c495730fba595ca4b90e",
+      "2b-hint/rows.jsonl": "0be5ecc47ca331608d2565095eadf16d493b5e7efe0b5da1fbdcb085098721e0",
+      "2b-hint/rows-discarded.jsonl": "fece3c46b17f6e0f0a60a4c0add7973c98ba7db4d095d4d17adf5622e350abff"
+    },
+    "preflight_prefixes": {
+      "27b-hint": {
+        "bytes": 374683,
+        "sha256": "ac77e3255e39f02d2f302445541a1d5ce6f0e3da8ccadfd7bb01d40ac3a21bd5",
+        "teams": 160
+      },
+      "2b-hint": {
+        "bytes": 359623,
+        "sha256": "3ea300d33f5ffddfbcce7a1500e508e07c7859161913872cda955141fb6b73b9",
+        "teams": 158
+      }
+    },
+    "appended_only": [
+      "q2fh-maze-t19-n16-r9",
+      "q2fh-maze-t03-n16-r9"
+    ]
+  },
+  "final_metadata_pending": false,
+  "audited_teams": 320,
+  "audited_trials": 2089,
+  "proven_pre_execution_zero_trials": 105,
   "zero_output_teams": [],
-  "cohort_sha256": "7af43d5ded94bb6210ff2407a17789dbaf5a04575d990dbb869a90a26d984412",
-  "token_audit_sha256": "6ff147a264b18a5ed91d96a7964f84e4de9fb547b0c5963837a58ecb3396f190"
+  "verified_reward_teams": 320,
+  "valid_failures": 188,
+  "run_config_audit_sha256": "4cb1e3d79ef646536c3419ce3a42bcd0e972ff776a427d94f73ae171a0a54d64",
+  "cohort_sha256": "ce0a185a093314ec7a937797c5e1f0972eaf5fcd45f1ea847c97eb23a6d37c82",
+  "token_audit_sha256": "6f2bcf43a7f9553297406a8cc249698b2868e9f164285b10d5d308a022d37606",
+  "final_accounting": {
+    "source": "provenance/server-allocations.csv",
+    "source_sha256": "d773ebfd5e06316005ffb566e7bd84d399dc4832b264033c181cb25cc7f5f758",
+    "gpu_seconds": {
+      "27b-hint": 54404,
+      "2b-hint": 60757
+    },
+    "gpu_hours": {
+      "27b-hint": "15.11222222222222222222222222",
+      "2b-hint": "16.87694444444444444444444444"
+    },
+    "gpu_hours_exact": {
+      "27b-hint": "13601/900",
+      "2b-hint": "60757/3600"
+    },
+    "total_gpu_hours": "31.98916666666666666666666667",
+    "provenance_files_sha256": {
+      "README.md": "379318c713627206d515f0198394fca0b192cda5e7043302455e254df71096ac",
+      "health-summary.jsonl": "e71f4e1c0c2fe16c52de78d47e0f88542e5e5732f252cc2a8fb31a9afc53a118",
+      "manifest.jsonl": "11a39624aca2a8287476652fb6f69e726c2a38cb057ef617ab3e5ea5966a33da",
+      "original-2b-cache-summaries.jsonl": "cf529846108c14bce818885c7d687c71d934d8292b32d9ebd102dc8a6f26a066",
+      "original-2b-minutes.jsonl": "dc0fe45065f9c995840f0d4d71478c1f159f5f3a878b176650bd42031f0c7137",
+      "recovery-2b-minutes.jsonl": "a6d8989c68b14b5f78db83e07acfb6eed0fe674e9f9a82a0c9b5004aa4c366c0",
+      "recovery-receipts.jsonl": "6ae2d19ff9e787e50cdb16c3c30a0ab31de1e76cb95be1d0af83613d6422b43f",
+      "server-allocations.csv": "d773ebfd5e06316005ffb566e7bd84d399dc4832b264033c181cb25cc7f5f758"
+    },
+    "accepted_2b_n16_resources": [
+      {
+        "cpus": 22,
+        "mem": "41800M",
+        "teams": 22
+      },
+      {
+        "cpus": 28,
+        "mem": "53200M",
+        "teams": 2
+      },
+      {
+        "cpus": 38,
+        "mem": "72200M",
+        "teams": 8
+      }
+    ],
+    "28_cpu_runs": [
+      "q2fh-maze-t19-n16-r9",
+      "q2fh-maze-t03-n16-r9"
+    ]
+  },
+  "publication": {
+    "raw_dataset": "HuggingFaceSwarms/s3-maze-results",
+    "raw_archives": {
+      "27b-hint": {
+        "status": "archived",
+        "revision": "2c61c9e0f2282d2052d8beabfdb5b8ebad2a82ca",
+        "prefix": "final-27b-hint"
+      },
+      "2b-hint": {
+        "prefix": "final-2b-hint",
+        "status": "pending exact approval; no upload executed",
+        "files": 13142,
+        "bytes": 230105055,
+        "preflight_manifest_sha256": "b75e272928305d0745dfc7339a935bed8258a883e02105132f0593be8749ab58"
+      }
+    },
+    "task_tooling_publication": "pending separate approval; evaluated pin unchanged"
+  }
 }

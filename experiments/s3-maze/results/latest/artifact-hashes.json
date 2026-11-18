@@ -1,0 +1,17 @@
+{
+  "algorithm": "sha256",
+  "files": {
+    "capture.py": "647576c6f36e0e77d9c466dfd8a5993b91c3ba66624d51a9b4e510529448523d",
+    "capture.json": "8046403d46170069b5174bad9b08dd2aae2093a1bb8409477490d66bb732fbe0",
+    "teams.csv": "ce0a185a093314ec7a937797c5e1f0972eaf5fcd45f1ea847c97eb23a6d37c82",
+    "success-efficiency.png": "c1169b511b9908d243b1c18e5c8a912b8e085afe0ef76511e16061b2d1d870ef",
+    "validation-receipts.json": "ecf6aa50c34340d2124e127548239da9511418999c36a64fa84bc9632ff3f033",
+    "success-efficiency.svg": "b88c7ec3b3e230ca5b2a269388cfaf05e2ea27ce03e393cdeab367f758c08053",
+    "token-audit.csv": "6f2bcf43a7f9553297406a8cc249698b2868e9f164285b10d5d308a022d37606",
+    "success-efficiency.csv": "0c754922eee88eddda2ef7f3fe8b061cd02ca6c4b93a9c8c25fc246bfd79665f",
+    "efficiency.py": "65a81d39ed45226064168da84000f1153e6e0f7c3db76ff3d1ea052bc8d7d475",
+    "attempts.csv": "395dce63ca9c760e33281359bda0805be7a2827ad1a183da5f184a37f292e5f7",
+    "run-config-audit.csv": "4cb1e3d79ef646536c3419ce3a42bcd0e972ff776a427d94f73ae171a0a54d64",
+    "README.md": "714512eb61aac5e4a5b58e0a9a5ca8eba6924fb50d6b328b13414dce352bb7ae"
+  }
+}

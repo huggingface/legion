@@ -1,0 +1,217 @@
+{
+  "captured_at": "2026-11-18T18:16:25+01:00",
+  "timezone": "Europe/Zurich",
+  "evaluated_flock": "03ec1dd9be659bde3751d37e393d014cdd8e5061",
+  "evaluated_task": "3b6c363d92626bd4d97a7ca89964fb850982d9ab",
+  "logs": [
+    {
+      "log": "archive-27b-430903.out",
+      "bytes": 346,
+      "sha256": "20a1de93c7b70b6ffbeaa3dbfe3e021b458c250466ac1252724711df2fdf0f91",
+      "allocation": {
+        "job_id": "430903",
+        "job_name": "s3-maze-cx-archive",
+        "state": "COMPLETED",
+        "exit_code": "0:0",
+        "start": "2026-11-18T16:56:39",
+        "end": "2026-11-18T16:58:57",
+        "allocated_cpus": "4",
+        "requested_memory": "7G"
+      },
+      "outcome": "Private 27B raw archive completed at 2c61c9e0f2282d2052d8beabfdb5b8ebad2a82ca; archive receipt retained."
+    },
+    {
+      "log": "archive-preflight-430495.out",
+      "bytes": 319,
+      "sha256": "1ed6432a2e7b2b8ab0c85d13fe9467f7749d604f6043821546793108f1a5e140",
+      "allocation": {
+        "job_id": "430495",
+        "job_name": "s3-maze-cx-archive",
+        "state": "COMPLETED",
+        "exit_code": "0:0",
+        "start": "2026-11-18T16:24:47",
+        "end": "2026-11-18T16:25:25",
+        "allocated_cpus": "4",
+        "requested_memory": "7G"
+      },
+      "outcome": "Private 27B archive preflight: 160 teams, 8408 files, 102287911 bytes, env excluded and HF token scan passed. Detailed manifest retained."
+    },
+    {
+      "log": "audit-430211.out",
+      "bytes": 229,
+      "sha256": "ee7a41f46a11fb0c1290f17a349ddd65028bf01f1c5b1560f44b4efeaa94f371",
+      "allocation": {
+        "job_id": "430211",
+        "job_name": "s3-maze-cx-audit",
+        "state": "COMPLETED",
+        "exit_code": "0:0",
+        "start": "2026-11-18T16:04:12",
+        "end": "2026-11-18T16:04:31",
+        "allocated_cpus": "4",
+        "requested_memory": "7G"
+      },
+      "outcome": "Fixed metrics re-audited 160/160 27B rows and the then-recorded 111 2B rows; zero bad or duplicate final rows."
+    },
+    {
+      "log": "baseline-430437.out",
+      "bytes": 455,
+      "sha256": "e65817f06a5d963832f75c4b8d14a1359ec9e03e6d0caa613aef80eb60b6d2ba",
+      "allocation": {
+        "job_id": "430437",
+        "job_name": "s3-maze-cx-baseline",
+        "state": "COMPLETED",
+        "exit_code": "0:0",
+        "start": "2026-11-18T16:20:41",
+        "end": "2026-11-18T16:21:12",
+        "allocated_cpus": "3",
+        "requested_memory": "5G"
+      },
+      "outcome": "Current a97 and evaluated 3b6 snapshots captured; task/template payloads byte-identical to candidate. Frozen publication manifest is authoritative."
+    },
+    {
+      "log": "health-430391.out",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "allocation": {
+        "job_id": "430391",
+        "job_name": "s3-maze-cx-health",
+        "state": "COMPLETED",
+        "exit_code": "0:0",
+        "start": "2026-11-18T16:16:35",
+        "end": "2026-11-18T17:45:02",
+        "allocated_cpus": "1",
+        "requested_memory": "1G"
+      },
+      "outcome": "Original-server read-only minute collector ended normally; final/servers.jsonl and final-original-capture retain source data and hashes."
+    },
+    {
+      "log": "health-audit-430406.out",
+      "bytes": 2626,
+      "sha256": "3d688a5c378001587f51ad97a51da069010d6affc1a1e70921e6f3270cd8ed80",
+      "allocation": {
+        "job_id": "430406",
+        "job_name": "s3-maze-cx-health-audit",
+        "state": "COMPLETED",
+        "exit_code": "0:0",
+        "start": "2026-11-18T16:17:37",
+        "end": "2026-11-18T16:17:40",
+        "allocated_cpus": "2",
+        "requested_memory": "3G"
+      },
+      "outcome": "Early supporting cache audit superseded by hint-health-audit/final-original-capture with corrected source scopes."
+    },
+    {
+      "log": "preliminary-428650.out",
+      "bytes": 471,
+      "sha256": "c4fbe49eb023faeb12de1211d5ed54f5a28d39c02a4df820adcb305d9beac5e3",
+      "allocation": {
+        "job_id": "428650",
+        "job_name": "s3-maze-cx-preliminary",
+        "state": "COMPLETED",
+        "exit_code": "0:0",
+        "start": "2026-11-18T15:49:45",
+        "end": "2026-11-18T15:51:15",
+        "allocated_cpus": "4",
+        "requested_memory": "7G"
+      },
+      "outcome": "Earlier preliminary plot render; historical results preserved on s3-maze-results. Superseded by independently reviewed fc4fc42."
+    },
+    {
+      "log": "repo-checks-430098.out",
+      "bytes": 1398,
+      "sha256": "13364b0965152c4bc12a5c4700b3c2e6bff9277bcc738f8f6e7d771c123e5545",
+      "allocation": {
+        "job_id": "430098",
+        "job_name": "s3-maze-cx-repo-checks",
+        "state": "COMPLETED",
+        "exit_code": "0:0",
+        "start": "2026-11-18T15:58:03",
+        "end": "2026-11-18T16:03:51",
+        "allocated_cpus": "4",
+        "requested_memory": "7G"
+      },
+      "outcome": "Evaluated flock 03ec1dd: Ruff clean; 1102 passed, 4 skipped in 336.63s."
+    },
+    {
+      "log": "report-preview-430335.out",
+      "bytes": 964,
+      "sha256": "e9fafaf4d0a28d5e363617c6c23b2499c1d167a1e967ee5a16f48056b534432a",
+      "allocation": {
+        "job_id": "430335",
+        "job_name": "s3-maze-cx-report-preview",
+        "state": "COMPLETED",
+        "exit_code": "0:0",
+        "start": "2026-11-18T16:12:28",
+        "end": "2026-11-18T16:12:36",
+        "allocated_cpus": "3",
+        "requested_memory": "5G"
+      },
+      "outcome": "Earlier preliminary visual review; historical figures preserved on results branch. Superseded by fc4fc42."
+    },
+    {
+      "log": "static-430304.out",
+      "bytes": 6281,
+      "sha256": "42053f104ed0a1b14cea720a47350f09ae6ad1d0868f2a5ffb4bfc1eae6508fc",
+      "allocation": {
+        "job_id": "430304",
+        "job_name": "s3-maze-cx-static",
+        "state": "FAILED",
+        "exit_code": "1:0",
+        "start": "2026-11-18T16:09:52",
+        "end": "2026-11-18T16:09:53",
+        "allocated_cpus": "1",
+        "requested_memory": "1G"
+      },
+      "outcome": "Strict external-dataset lint has eight pre-existing findings. Targeted E4,E7,E9,F lint is clean; later independent driver checks passed in 430986."
+    },
+    {
+      "log": "validation-430047.out",
+      "bytes": 13355,
+      "sha256": "95e8d13470dfb1d12818eb8e24bf40727bf3a0aeb7b9f404801308b29e7ece69",
+      "allocation": {
+        "job_id": "430047",
+        "job_name": "s3-maze-cx-validation",
+        "state": "FAILED",
+        "exit_code": "1:0",
+        "start": "2026-11-18T15:53:25",
+        "end": "2026-11-18T15:57:37",
+        "allocated_cpus": "4",
+        "requested_memory": "7G"
+      },
+      "outcome": "Initial check failed because podman-compose was absent from job PATH; superseded by 430154."
+    },
+    {
+      "log": "validation-430154.out",
+      "bytes": 13175,
+      "sha256": "92c136860250b8f2e6ad098931066df868a2bf0b4a9f62c7aef9f0a1676e4794",
+      "allocation": {
+        "job_id": "430154",
+        "job_name": "s3-maze-cx-validation",
+        "state": "FAILED",
+        "exit_code": "1:0",
+        "start": "2026-11-18T16:01:07",
+        "end": "2026-11-18T16:08:18",
+        "allocated_cpus": "4",
+        "requested_memory": "7G"
+      },
+      "outcome": "All six dataset behaviour groups passed, including seven metrics cases and three real Podman Trials (walker=1, oracle=1, probe=0). Overall job failed only at appended strict lint: eight baseline findings."
+    }
+  ],
+  "external_dataset_lint": {
+    "strict_baseline_and_candidate_findings": {
+      "RUF100": 4,
+      "FURB167": 1,
+      "PLW1510": 2,
+      "ASYNC221": 1
+    },
+    "codes_and_messages_unchanged_from_baseline": true,
+    "targeted_clean_selection": [
+      "E4",
+      "E7",
+      "E9",
+      "F"
+    ],
+    "full_strict_lint_clean": false,
+    "independent_driver_validation_job": 430986
+  }
+}
