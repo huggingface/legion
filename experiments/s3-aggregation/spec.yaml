@@ -24,7 +24,7 @@ resources:
       max_len: 1000
       min_post_gap: 5s
       max_posts: 40
-      max_channels: 1                         # #general only: no new channels (DMs still work)
+      max_channels: 1                         # #general only: no new channels
 environment:
   backend: hf-sandbox                         # flavor: cpu-basic (the default)
 workers:
