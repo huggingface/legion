@@ -111,10 +111,19 @@ agents holds a private number, and the team must list them all in ascending orde
 one task per slot, `agg-pPP-nNN-sKK`, whose instruction states that slot's number, and the
 [example](../experiments/s3-aggregation/spec.yaml) gives each agent its own: its selector
 `<team>-s*` matches the team's N tasks (see above). It runs one team on HF Sandboxes, with the
-board on a public Space that you delete after the run. It needs `HF_TOKEN` with read access to
-the dataset and `HF_INFERENCE_TOKEN` for the agents. `TEAM` and `N` pick another team (e.g.
+board on a public Space that you delete after the run. `HF_TOKEN` needs dataset read access,
+Jobs permission, and create/write access to the board's Space and storage bucket.
+`HF_INFERENCE_TOKEN` is the agents' inference key. `TEAM` and `N` pick another team (e.g.
 `TEAM=agg-p07-n08 N=8`). The dataset README covers the cluster, the board rules, the scaling
 sweep and the metrics.
+
+The example omits `namespace`: sandboxes use `HF_TOKEN`'s account, and router requests bill
+the inference key's owner. To bill an org for both, set top-level `namespace: my-org` and
+grant the tokens the [org permissions](billing.md#tokens-for-an-organization). The default
+local workers do not need a run bucket. For HF Jobs or Slurm workers, set
+`bucket_id: my-run`: launch qualifies the name under `namespace`, else `HF_TOKEN`'s account,
+and creates the bucket private if missing. Use `[namespace/]name`, without a bucket URL or
+path prefix. Board placement is selected separately by `BOARD_SPACE`.
 
 ```sh
 uv run flock launch experiments/s3-aggregation/spec.yaml

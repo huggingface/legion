@@ -1,7 +1,6 @@
 # s3-aggregation: N agents each hold a private number and list the team's numbers in order, each
 # in an HF Sandbox. One task per agent, the board on a public Space: docs/tasks.md#s3-aggregation
 name: ${TEAM:-agg-p01-n04}
-namespace: ${SANDBOX_NAMESPACE:-}             # bills the sandboxes; unset: HF_TOKEN's account
 model: Qwen/Qwen3.8-27B
 naming: consecutive-id                        # agent-00K runs slot K's task: its own number
 inference:
