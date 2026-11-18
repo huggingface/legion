@@ -1,0 +1,53 @@
+# maze-t01 with N = 4 for the s3-maze positive control (hint): the scaling sweep's spec with Qwen/Qwen3.5-27B, plus the condition.
+name: q27oh-maze-t01-n04
+model: Qwen/Qwen3.5-27B
+naming: consecutive-id
+inference:
+  urls:
+  - http://10.53.7.103:9103/v1
+  - http://10.53.7.103:9104/v1
+  - http://10.53.7.103:9108/v1
+task:
+  repo: https://huggingface.co/datasets/HuggingFaceSwarms/s3-maze
+  selector: maze-t01
+  revision: a43f73c3610cd66bc5e40077901b52eb0fe77314
+agents:
+  count: 4
+stop_on_success: true
+success_check:
+  service: maze
+  command: python3 -I -S /app/success.py
+resources:
+  message_board:
+    channels:
+    - general
+    wake:
+    - mention
+    - thread
+    rules:
+      max_len: 1000
+      min_post_gap: 5s
+      max_posts: 40
+workers:
+  agents_per_worker: 4
+  turn_timeout: 20m
+loop:
+  prompt: Continue the task until it is complete, then stop.
+  every: turn_end
+  while:
+    until: 45m
+    max_rounds: 6
+limits:
+  run_timeout_seconds: 3600
+  agent_max_turns: 150
+namespace: ${NAMESPACE}
+bucket: ${BUCKET}
+compute:
+  kind: slurm
+  partition: ${SLURM_PARTITION:-}
+  cpus: 7
+  mem: 13300M
+  time: '2:00:00'
+environment:
+  backend: podman
+team_file: hint.md
