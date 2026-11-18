@@ -18,7 +18,7 @@ from flock.models import SwarmSpec
 from flock.ops import launch, read_spec, up, update
 from flock.worker.sync import HubBucketStore
 
-from .conftest import make_spec, wire, write_spec
+from .conftest import TOKEN, make_spec, wire, write_spec
 from .fake_hub_jobs import FakeHubJobs
 
 
@@ -112,6 +112,49 @@ def test_update_resolves_a_bare_name_after_explicit_storage_namespace(api, tmp_p
     path = write_spec(tmp_path / "spec.yaml", SwarmSpec.model_validate({**data, "bucket_id": "runs"}))
     assert update(api, read_spec(path), path, preflight=False)["applied"]
     assert api.swarm("demo")["spec"]["bucket_id"] == "org/runs"
+
+
+@pytest.mark.parametrize("token_file", ["cluster.env", "run.env", "explicit.env"])
+@pytest.mark.parametrize("saved_login", ["saved-login-user", None])
+def test_cli_update_uses_launch_env_files_without_retargeting_bucket(
+        app, store, tmp_path, monkeypatch, token_file, saved_login):
+    wire(monkeypatch, app)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("FLOCK_RUN_DIR", raising=False)
+    monkeypatch.delenv("FLOCK_URL", raising=False)
+    tokens = []
+
+    def hf_api(token=None):
+        tokens.append(token)
+        if token != "file-only-token" and saved_login is None:
+            raise RuntimeError("no saved login")
+        hub = BillingHub()
+        hub.account = "launcher" if token == "file-only-token" else saved_login
+        return hub
+
+    monkeypatch.setattr("huggingface_hub.HfApi", hf_api)
+    run = tmp_path / "run"
+    (run / "hosts").mkdir(parents=True)
+    (run / "hosts" / "controller.host").write_text("http://controller.invalid\n")
+    (run / "run.env").write_text(f"FLOCK_TOKEN={TOKEN}\n")
+    with (run / token_file).open("a") as f:
+        f.write("HF_TOKEN=file-only-token\n")
+    args = ["--env", str(run / token_file)] if token_file == "explicit.env" else []
+    spec = SwarmSpec.model_validate({**make_spec().model_dump(),
+                                     "namespace": "", "bucket_id": "runs"})
+    path = write_spec(tmp_path / "spec.yaml", spec)
+    runner = CliRunner()
+    launched = runner.invoke(cli.app, ["--run", str(run), "launch", path,
+                                      "--skip-preflight", *args])
+    assert launched.exit_code == 0, launched.output
+    assert store.get_swarm("demo")["spec"].bucket_id == "launcher/runs"
+    for check in (["--check"], []):
+        updated = runner.invoke(cli.app, ["--run", str(run), "update", path,
+                                         "--skip-preflight", *check, *args])
+        assert updated.exit_code == 0, updated.output
+        assert "bucket_id:" not in updated.output
+        assert store.get_swarm("demo")["spec"].bucket_id == "launcher/runs"
+    assert tokens == ["file-only-token"] * 3
 
 
 def test_local_start_uses_the_resolved_bucket_and_token_from_env_file(monkeypatch, tmp_path):

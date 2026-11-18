@@ -481,7 +481,8 @@ def _launch(api, spec, spec_file, bundle, done, source, types, agents, preflight
     return done
 
 
-def update(api: Client, spec: SwarmSpec, spec_file: str, *, sources: dict[str, str] | None = None,
+def update(api: Client, spec: SwarmSpec, spec_file: str, *, env_files=(),
+           sources: dict[str, str] | None = None,
            preflight: bool | None = None, strict: bool = False, replicas: str = "keep",
            check: bool = False, source: dict[str, str] | None = None,
            say: Callable[[str], None] = lambda _: None) -> dict[str, Any]:
@@ -496,7 +497,9 @@ def update(api: Client, spec: SwarmSpec, spec_file: str, *, sources: dict[str, s
     `sources` (from `read_spec`) names the origins for `check`; `source` replaces the
     `X-Flock-Source` header (--ref). Without `check`, `hf_jobs` servers the spec needs and that
     do not run yet (a changed block or model) are started and waited for first (`say` gets the
-    progress); the controller cancels the ones no applied spec uses (controller/servers.py)."""
+    progress); the controller cancels the ones no applied spec uses (controller/servers.py).
+    `env_files` is the complete list used by `read_spec`, as for `launch`: it also supplies
+    HF_TOKEN for resolving a bare bucket ID."""
     from flock.live import diff_specs, keep_replicas, world_tool_changes
 
     if replicas not in ("keep", "spec"):
@@ -512,7 +515,8 @@ def update(api: Client, spec: SwarmSpec, spec_file: str, *, sources: dict[str, s
                          else f"error {e.status}: {e.detail}"]) from None
     if spec.bucket_id and "/" not in spec.bucket_id:
         try:
-            spec.bucket_id = resolve_bucket_id(spec.bucket_id, spec.namespace, _hf_api(api.env))
+            spec.bucket_id = resolve_bucket_id(
+                spec.bucket_id, spec.namespace, _hf_api(environment(api, env_files)))
         except Exception as e:  # noqa: BLE001 - report a Hub lookup failure
             raise SpecError([f"bucket {spec.bucket_id}: {type(e).__name__}: {e}"]) from None
     if has_servers(spec) and not check:

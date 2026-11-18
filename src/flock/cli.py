@@ -433,9 +433,11 @@ def update(
     Prints what changed; a refused change applies nothing."""
     spec_file, ref_header = _at_ref(_spec_file(target), ref)
     sources: dict[str, str] = {}
-    spec = load_spec(spec_file, [*_api().env_files, *(env_files or ())], sources)
+    env_files = [*_api().env_files, *(env_files or ())]
+    spec = load_spec(spec_file, env_files, sources)
     try:
-        done = ops.update(_api(), spec, spec_file, sources=sources, preflight=preflight,
+        done = ops.update(_api(), spec, spec_file, env_files=env_files,
+                          sources=sources, preflight=preflight,
                           strict=strict, replicas=replicas, check=check, source=ref_header,
                           say=lambda line: typer.echo(f"  {line}"))
     except SpecError as e:
