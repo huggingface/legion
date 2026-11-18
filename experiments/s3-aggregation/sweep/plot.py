@@ -156,7 +156,9 @@ def figure(path: Path, series: list[tuple[str, list[dict], list[dict]]], title: 
 
     plt.rcParams.update({"font.size": 10, "axes.edgecolor": GRID, "axes.labelcolor": INK_2,
                          "xtick.color": INK_2, "ytick.color": INK_2, "text.color": INK})
-    fig, axes = plt.subplots(1, 5, figsize=(17, 4.4), facecolor=SURFACE)
+    columns = min(len(series), 3)  # legend columns; more series take more rows
+    rows = math.ceil(len(series) / columns)
+    fig, axes = plt.subplots(1, 5, figsize=(17, 4.4 + 0.25 * (rows - 1)), facecolor=SURFACE)
     models = list(dict.fromkeys(label.split()[0] for label, _, _ in series))
     dashes = iter(["--", ":", "-."] * len(series))
     for k, (model, teams, summary) in enumerate(series):
@@ -189,14 +191,14 @@ def figure(path: Path, series: list[tuple[str, list[dict], list[dict]]], title: 
         ax.spines[["top", "right"]].set_visible(False)
         ax.set_xlabel("Swarm size N")
     if len(series) > 1:
-        fig.legend(*axes[0].get_legend_handles_labels(), loc="upper left", ncol=len(series),
+        fig.legend(*axes[0].get_legend_handles_labels(), loc="upper left", ncol=columns,
                    bbox_to_anchor=(0.01, 0.935), frameon=False, fontsize=9)
     fig.suptitle(title, fontsize=11, color=INK, x=0.01, ha="left")
     fig.text(0.01, 0.01, "One attempt per problem. Success: share of teams with any agent right, "
              "95% Wilson intervals. Tokens (log scale) and posts: means, 95% intervals. Wall time (init "
-             "to release): median and interquartile range." + (f" {note}" if note else ""),
+             "to release): median and interquartile range." + (f"\n{note}" if note else ""),
              fontsize=8, color=INK_2)
-    fig.tight_layout(rect=(0, 0.05, 1, 0.87))
+    fig.tight_layout(rect=(0, 0.08 if note else 0.05, 1, 0.87 - 0.05 * (rows - 1)))
     fig.savefig(path, dpi=200, facecolor=SURFACE)
 
 
