@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 
 from flock import cli, rundir
 from flock.client import Client
+from flock.controller import localrun
 from flock.controller.jobs import HubJobsClient
 from flock.controller.localrun import state_env
 from flock.controller.reconcile import reconcile
@@ -42,6 +43,12 @@ class BillingHub(FakeHubJobs):
 
     def batch_bucket_files(self, bucket_id, *, add):
         self.uploads.append((bucket_id, [r for _, r in add]))
+
+    def list_bucket_tree(self, bucket_id, *, prefix, recursive):
+        return []
+
+    def sync_bucket(self, *_a, **_k):
+        pass
 
 
 @pytest.mark.parametrize(("namespace", "bucket_id", "qualified", "lookups"), [
@@ -171,6 +178,69 @@ def test_local_start_uses_the_resolved_bucket_and_token_from_env_file(monkeypatc
     monkeypatch.setattr("subprocess.Popen", start)
     with pytest.raises(RuntimeError, match="checked subprocess environment"):
         up(Client(env={}), spec, "spec.yaml", env_files=[source])
+
+
+@pytest.mark.parametrize("checkpoint", [True, False])
+def test_foreground_localrun_prepares_bare_bucket_with_env_file(tiny, monkeypatch, checkpoint):
+    hub, tokens = BillingHub(), []
+
+    def hf_api(token=None):
+        tokens.append(token)
+        return hub
+
+    monkeypatch.setattr("huggingface_hub.HfApi", hf_api)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    if checkpoint:
+        monkeypatch.delenv("FLOCK_STATE_URL")
+    source = tiny.root / "run.env"
+    source.write_text("HF_TOKEN=file-only-token\n")
+    path = tiny.root / tiny.spec()
+    path.write_text(path.read_text() + "bucket_id: runs\n")
+    result = CliRunner().invoke(localrun.app, [str(path), "--env", str(source),
+        "--until", "1s", "--grace", "0", "--skip-preflight"])
+    assert result.exit_code == 0, result.output
+    bundle = json.loads(next((tiny.root / ".flock").glob("*/run.json")).read_text())
+    assert bundle["spec"]["bucket_id"] == "launcher/runs" and bundle["spec"]["namespace"] == ""
+    assert hub.buckets == [("launcher/runs", True, True)] and hub.whoamis == 1
+    assert tokens and set(tokens) == {"file-only-token"}
+    checkpoint_upload = any("controller/tiny/state.db" in paths for _, paths in hub.uploads)
+    assert checkpoint_upload is checkpoint
+
+
+@pytest.mark.parametrize("bucket_id", ["runs", "ns/runs"])
+def test_local_launch_requires_bucket_credentials_even_when_checkpointing_is_off(
+        app, tmp_path, monkeypatch, bucket_id):
+    wire(monkeypatch, app)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setattr("huggingface_hub.get_token", lambda: None)
+    monkeypatch.setenv("FLOCK_STATE_URL", "")
+
+    class NoCredentials(BillingHub):
+        def whoami(self):
+            raise PermissionError("HF token required")
+
+        def create_bucket(self, *_a, **_k):
+            raise PermissionError("HF token required")
+
+    monkeypatch.setattr("huggingface_hub.HfApi", lambda **_: NoCredentials())
+    spec = SwarmSpec.model_validate({**make_spec().model_dump(), "compute": "local",
+                                     "namespace": "", "bucket_id": bucket_id})
+    path = write_spec(tmp_path / "spec.yaml", spec)
+    result = CliRunner().invoke(cli.app, ["launch", path, "--skip-preflight"])
+    assert result.exit_code == 1 and "HF token required" in result.output
+    assert not (tmp_path / ".flock").exists()
+
+
+def test_localrun_no_apply_refuses_unprepared_bucket_before_creating_state(tmp_path, monkeypatch):
+    monkeypatch.delenv("FLOCK_STATE_URL", raising=False)
+    spec = SwarmSpec.model_validate({**make_spec().model_dump(), "compute": "local",
+                                     "bucket_id": "runs"})
+    path = write_spec(tmp_path / "spec.yaml", spec)
+    data = tmp_path / "data"
+    result = CliRunner().invoke(localrun.app, [path, "--no-apply", "--skip-preflight",
+                                             "--data-dir", str(data)])
+    assert result.exit_code == 1 and "requires FLOCK_STATE_URL" in result.output
+    assert not data.exists()
 
 
 @pytest.mark.parametrize("bucket_id", ["hf://buckets/ns/runs", "ns/runs/prefix", "/runs",

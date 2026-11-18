@@ -11,7 +11,9 @@ prompts, events); only the backend that starts workers differs. `compute: local`
 the default for Harbor specs; see
 [Switching to HF Jobs](#switching-to-hf-jobs) for remote execution.
 
-No HF token, bucket or network is needed when the model endpoint is local.
+No HF token, bucket or network is needed when the model endpoint is local and no
+`bucket_id` or remote resource is configured. A configured bucket is resolved and created
+at launch on every backend, including local compute; it requires HF bucket write access.
 
 ## Quickstart
 
@@ -59,6 +61,9 @@ uv run flock stop hello --delete --yes # end the controller, write the bundle
 
 For tests and dry runs, `python -m flock.controller.localrun spec.yaml --prompt "..." --until idle`
 runs the same thing in the foreground and exits when done.
+Its launch path also prepares `bucket_id` before starting the controller. `--env` files
+supply credentials as well as spec variables. `--no-apply` is the background serving mode
+used internally by `flock launch`, which supplies its already prepared checkpoint URL.
 
 - `flock prompt --swarm <swarm> --type <type> "text"` sends a prompt to every agent of a type
   (optional; without it the agents wait for prompts).
@@ -145,9 +150,11 @@ Different:
    `TYPE`, `DEADLINE`, `DRAIN_WINDOW`, the type's `env`, its secrets). Job ids are `local-NNNN`.
    Exit 0 is `COMPLETED`, any other exit `ERROR` ("exit N"), a process past its lifetime is
    killed and reported as `Job timeout` (a planned restart, as on HF Jobs).
-2. **Ignored:** `image`, `flavor`, the network group, the wheel and bootstrap, `namespace` and
-   `bucket_id`. There is no bucket sync: agent workdirs live in `<run>/agents/` (shared by the
-   run's workers, so a restarted worker slot finds them on disk).
+2. **Local worker placement:** `image`, `flavor`, the network group, the wheel and bootstrap
+   do not select a local worker process's hardware. `namespace` still controls billing for
+   HF sandboxes, model Jobs and router requests. A configured `bucket_id` is prepared at
+   launch and can hold the controller checkpoint. Local agents' workdirs stay in
+   `<run>/agents/` (shared by the run's workers, so a restarted worker slot finds them on disk).
 3. **Secrets come from your shell.** The names a spec lists (`secrets:`, `api_key_env`) are read from the environment of `flock launch` and passed to the workers as
    env, as HF Jobs passes job secrets. Workers inherit your environment minus your own flock
    connection settings (`FLOCK_*`, except `FLOCK_PROMPTS_DIR`); the harness still gets only the allow-listed variables plus what the
@@ -157,8 +164,11 @@ Different:
    overrides it). The foreground run checks its stop conditions every 2 s (`FLOCK_LOCAL_REFRESH`).
 5. **The controller runs next to you.** 127.0.0.1 on a free port, a new random token per run, no
    status port, no jobs proxy auth. The controller state syncs to `FLOCK_STATE_URL`, by
-   default `<bucket>/controller/<swarm>` when the spec has a bucket and an HF token is found
-   (HF_TOKEN or the saved one; else off, said at start); `FLOCK_STATE_URL=` turns it off. Each `flock launch` is a new run
+   default `hf://buckets/<bucket_id>/controller/<swarm>` when the spec has a bucket.
+   A configured bucket requires `HF_TOKEN` (or a saved login) with create/write access;
+   missing credentials or access fail launch. `FLOCK_STATE_URL=` disables checkpointing
+   but still prepares any configured bucket. Omit `bucket_id` for a Hub-free local run.
+   Each `flock launch` is a new run
    directory: a run does not resume a previous one.
 6. **Workers die with the controller.** A worker exits when the controller process is gone
    (`FLOCK_LOCAL_PARENT_PID`), so a killed run leaves no orphan workers. `flock stop --delete` makes the
@@ -166,8 +176,9 @@ Different:
    interrupting its turns (a job worker keeps the default behaviour).
 7. **Logs are files.** `<run>/logs/<worker>.log` instead of `hf jobs logs`; `flock status`
    says so.
-8. **No sandbox.** Agents' `bash` runs as you, on your machine, starting in the agent's workdir
-   but not confined to it. Use a container or a throwaway user for untrusted tasks.
+8. **Task environments still apply.** Local workers run Harbor Trials using the spec's
+   `environment.backend`: Docker, Podman, or an HF Sandbox. Local worker placement does
+   not make an HF Sandbox run locally or remove its billing namespace.
 
 A worker process that exits is noticed on the next reconcile pass and relaunched after
 `compute.crash_backoff` (2 s locally; docs/live.md "Worker liveness").

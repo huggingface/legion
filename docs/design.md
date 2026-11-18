@@ -182,6 +182,10 @@ Each type sets `harness: harbor`, its `harbor:` block (written by the compile st
 `hf_jobs` model servers. Unset, Jobs and sandboxes use `HF_TOKEN`'s account. Router requests
 send `X-HF-Bill-To` only for an explicit namespace; otherwise the inference key's owner pays.
 The stored namespace stays empty when omitted. There are no per-inference billing overrides.
+In job mode, a spec's explicit namespace or HF_TOKEN's resolved account must match the
+controller job's namespace to join its network group. A manually org-deployed controller
+refuses a blank spec namespace if the accounts differ and asks for an explicit namespace.
+Matching-account runs keep the stored namespace empty and send no router bill-to header.
 
 `bucket_id` is `[namespace/]name`, with no URL or path prefix. `flock launch` qualifies a bare
 name using the explicit namespace, else `HF_TOKEN`'s account, and creates the bucket with
@@ -189,6 +193,9 @@ name using the explicit namespace, else `HF_TOKEN`'s account, and creates the bu
 qualified ID is stored and sent to workers (`BUCKET_ID`); controllers and workers never
 resolve it again. Flock still adds its checkpoint and per-agent prefixes internally. Init
 reports a missing bucket as one launch will create. See [billing and storage](billing.md).
+Bucket preparation also applies to local compute and the foreground `localrun` launch
+entry point. Disabling controller checkpointing does not skip an explicitly configured
+bucket's initialization or its credentials check.
 
 ### Inference
 

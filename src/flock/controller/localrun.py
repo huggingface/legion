@@ -37,6 +37,7 @@ import socket
 import sys
 import time
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -46,6 +47,7 @@ import httpx
 import typer
 
 from flock.buckets import bucket_url
+from flock.client import Client
 from flock.controller.api import create_app, swarm_status
 from flock.controller.health import SAMPLE_S, Health
 from flock.controller.local import LocalJobsClient
@@ -62,6 +64,7 @@ from flock.controller.state import DEFAULT_INTERVAL, state_sync_from_env
 from flock.controller.store import Store, agent_tokens
 from flock.current import CURRENT_FILE, clear_current, write_current
 from flock.models import DrainCommand, SwarmSpec, SwarmStatus, TokenUsage
+from flock.ops import SpecError, environment, prepare_bucket
 from flock.world.host import WorldHost
 
 log = logging.getLogger("flock.run")
@@ -90,6 +93,7 @@ class RunOptions:
     worker_command: list[str] | None = None  # tests
     tools: bytes | None = None  # the packed tools folder, uploaded before the PUT
     apply: bool = True  # False (`flock launch`): only serve; the CLI creates the swarm
+    env: Mapping[str, str] | None = None  # None: os.environ; the foreground CLI adds --env files
 
 
 @dataclass
@@ -525,6 +529,12 @@ async def run_local(opts: RunOptions) -> RunResult:
     spec = opts.spec
     if spec.compute.kind != "local":
         raise ValueError("a local run needs `compute: local` in the spec")
+    env = os.environ if opts.env is None else opts.env
+    if opts.apply:  # foreground/library launch; --no-apply consumes the parent's prepared state URL
+        await asyncio.to_thread(prepare_bucket, spec, env)
+    elif spec.bucket_id and "/" not in spec.bucket_id and env.get("FLOCK_STATE_URL") is None:
+        raise SpecError([("--no-apply with a bare bucket_id requires FLOCK_STATE_URL from flock "
+                          "launch; omit --no-apply for a foreground launch")])
     data_dir = Path(opts.data_dir).resolve()
     data_dir.mkdir(parents=True, exist_ok=True)
     run_dir = data_dir / run_name(spec.swarm, data_dir)
@@ -539,19 +549,19 @@ async def run_local(opts: RunOptions) -> RunResult:
     port = sock.getsockname()[1]
     url = f"http://{opts.host}:{port}"
     store = Store(run_dir / "controller")
-    jobs = LocalJobsClient(root=run_dir, **({"command": opts.worker_command}
+    jobs = LocalJobsClient(root=run_dir, base_env=dict(env), **({"command": opts.worker_command}
                                             if opts.worker_command else {}))
-    settings = Settings(public_url=url, token=token)
+    settings = Settings(public_url=url, token=token, secret_source=env)
     reconcile_task: list[asyncio.Task] = []
 
-    health = Health(store, token=token, jobs=jobs, run=run_dir.name)
-    health_every = float(os.environ.get("FLOCK_HEALTH_INTERVAL", SAMPLE_S))
-    state_vars, state_note = state_env(os.environ, spec)
+    health = Health(store, token=token, secrets=env, jobs=jobs, run=run_dir.name)
+    health_every = float(env.get("FLOCK_HEALTH_INTERVAL", SAMPLE_S))
+    state_vars, state_note = state_env(env, spec)
     state = state_sync_from_env(state_vars, run_dir / "controller")
 
     async def checkpoint() -> None:
         while True:
-            await asyncio.sleep(float(os.environ.get("FLOCK_STATE_SYNC_INTERVAL", DEFAULT_INTERVAL)))
+            await asyncio.sleep(float(env.get("FLOCK_STATE_SYNC_INTERVAL", DEFAULT_INTERVAL)))
             try:
                 await asyncio.to_thread(state.push, store)
             except Exception:
@@ -569,7 +579,7 @@ async def run_local(opts: RunOptions) -> RunResult:
     worlds = WorldHost(log_dir=run_dir / "logs")  # a spec's `world.command` (docs/world.md)
     app = create_app(store, token, background=background, compute="local",
                      stats=lambda: {"mode": "local", "public_url": url}, worlds=worlds,
-                     health=health)
+                     health=health, secret_source=env)
     server = _Server(app, sock)
     started = datetime.now(UTC)
     t0 = time.monotonic()
@@ -748,8 +758,14 @@ def main(
         _warn_unverified(models, "preflight skipped")
     opts = RunOptions(spec=spec, data_dir=Path(data_dir), until=seconds, until_idle=idle,
                       prompt=prompt_text, preflight=preflight, strict=strict, grace=grace,
-                      tools=bundle.data if bundle is not None else None, apply=apply)
-    result = asyncio.run(run_local(opts))
+                      tools=bundle.data if bundle is not None else None, apply=apply,
+                      env=environment(Client(), env_files))
+    try:
+        result = asyncio.run(run_local(opts))
+    except SpecError as e:
+        for line in e.lines:
+            typer.echo(line, err=True)
+        raise typer.Exit(1) from None
     raise typer.Exit(result.exit_code)
 
 

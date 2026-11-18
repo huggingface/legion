@@ -365,6 +365,19 @@ def is_swarm_name(target: str) -> bool:
         and not target.endswith((".yaml", ".yml"))
 
 
+def prepare_bucket(spec: SwarmSpec, env: Mapping[str, str]) -> None:
+    """Resolve and create a configured bucket before launch, on every compute backend.
+    The spec keeps only its qualified ID; the explicit billing namespace is unchanged."""
+    if not spec.bucket_id:
+        return
+    try:
+        hf = _hf_api(env)
+        spec.bucket_id = resolve_bucket_id(spec.bucket_id, spec.namespace, hf)
+        hf.create_bucket(spec.bucket_id, private=True, exist_ok=True)
+    except Exception as e:  # noqa: BLE001 - refuse before starting any jobs or local processes
+        raise SpecError([f"bucket {spec.bucket_id}: {type(e).__name__}: {e}"]) from None
+
+
 def launch(api: Client, spec: SwarmSpec, spec_file: str, *, env_files=(),
            source: dict[str, str] | None = None, types: list[str] | None = None, agents: list[str] | None = None,
            preflight: bool | None = None, strict: bool = False,
@@ -398,13 +411,10 @@ def launch(api: Client, spec: SwarmSpec, spec_file: str, *, env_files=(),
             if hold and api.answers():
                 raise SpecError([(f"--hold: a controller already serves this run: `flock stop "
                                  f"{spec.swarm} --release` first")], done)
-            if spec.bucket_id:
-                try:
-                    hf = _hf_api(environment(api, env_files))
-                    spec.bucket_id = resolve_bucket_id(spec.bucket_id, spec.namespace, hf)
-                    hf.create_bucket(spec.bucket_id, private=True, exist_ok=True)
-                except Exception as e:  # noqa: BLE001 - refuse before starting any jobs
-                    raise SpecError([f"bucket {spec.bucket_id}: {type(e).__name__}: {e}"], done) from None
+            try:
+                prepare_bucket(spec, environment(api, env_files))
+            except SpecError as e:
+                raise SpecError(e.lines, done) from None
             if spec.compute.kind == "local" or not api.answers():
                 try:
                     started = up(api, spec, spec_file, env_files, say=say, hold=hold)

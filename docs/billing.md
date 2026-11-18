@@ -52,3 +52,13 @@ Flock's own `controller/<swarm>/` and `<swarm>/<type>/<agent>/` folders are unch
 an optional bucket can still hold the local controller's checkpoint. For Slurm, launch writes
 the resolved ID to `hosts/bucket_id` before submitting the controller, so the batch script can
 construct its checkpoint URL without another account lookup.
+
+A configured bucket is always prepared, including local and foreground launches. It needs
+bucket create/write credentials even with `FLOCK_STATE_URL=` (checkpointing off). Leave
+`bucket_id` unset for a local run that needs no Hub storage or credentials. The foreground
+`python -m flock.controller.localrun` command uses the same bucket preparation as `flock launch`.
+
+A manually org-deployed job controller refuses a blank namespace when `HF_TOKEN` belongs
+to another account: set `namespace: my-org` explicitly so worker placement and billing use
+that org. Matching-account controllers accept an unset namespace and keep it empty in the
+stored spec and router headers. See [job deployment](deploy-job.md).
