@@ -119,6 +119,7 @@ and [loops and budgets](docs/loop.md). Use [HF Jobs](docs/deploy-job.md) or
 | [programbench](experiments/programbench/) | Agents reconstruct a CLI program, sharing findings and code through a board and HF repository. |
 | [pybot](experiments/pybot/) | Agents on HF Jobs build a Python chatbot through a shared repository world, with different roles and board channels. |
 | [s3-aggregation](experiments/s3-aggregation/spec.yaml) | Four agents in HF Sandboxes, each with its own task and private number, list the team's numbers. Private s³ task dataset; see [setup](docs/tasks.md#s3-aggregation). |
+| [s3-maze](experiments/s3-maze/spec.yaml) | Four agents on the HF cluster search their own copies of one maze for its exit, sharing a board; the first one out ends the run. Private s³ task dataset; see [setup](docs/tasks.md#s3-maze). |
 
 Each folder includes configuration and launch instructions.
 
