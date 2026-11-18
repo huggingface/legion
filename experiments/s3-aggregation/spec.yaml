@@ -11,7 +11,7 @@ inference:
 task:
   repo: https://huggingface.co/datasets/HuggingFaceSwarms/s3-aggregation
   selector: ${TEAM:-agg-p01-n04}-s*           # the team's N slots, sorted: one per agent
-  revision: 7059e246e73e4aa6b5fa2f282ce4a1578e2b49d2
+  revision: 0111d6ec92f5f2e1c83d984699ee05a05901185f
 agents:
   count: ${N:-4}                              # TEAM's size
 resources:
@@ -24,6 +24,7 @@ resources:
       max_len: 1000
       min_post_gap: 5s
       max_posts: 40
+      max_channels: 1                         # #general only: no new channels (DMs still work)
 environment:
   backend: hf-sandbox                         # flavor: cpu-basic (the default)
 workers:
