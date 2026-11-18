@@ -45,6 +45,7 @@ from typing import Any, TextIO
 import httpx
 import typer
 
+from flock.buckets import bucket_url
 from flock.controller.api import create_app, swarm_status
 from flock.controller.health import SAMPLE_S, Health
 from flock.controller.local import LocalJobsClient
@@ -116,14 +117,14 @@ def state_env(env, spec: SwarmSpec, token=None) -> tuple[dict[str, str], str | N
     bucket and an HF token is found (HF_TOKEN or the saved one, as HubBucketStore finds it);
     `FLOCK_STATE_URL=` is off. `token()` finds the token (tests)."""
     env = dict(env)
-    if env.get("FLOCK_STATE_URL") is not None or not spec.bucket:
+    if env.get("FLOCK_STATE_URL") is not None or not spec.bucket_id:
         return env, None
     if token is None:
         from huggingface_hub import get_token as token
     if not (env.get("HF_TOKEN") or token()):
         return env, ("checkpoint: off (no HF token for the bucket; set HF_TOKEN or "
                      "FLOCK_STATE_URL to checkpoint the controller state)")
-    env["FLOCK_STATE_URL"] = f"{spec.bucket.rstrip('/')}/controller/{spec.swarm}"
+    env["FLOCK_STATE_URL"] = f"{bucket_url(spec.bucket_id)}/controller/{spec.swarm}"
     return env, None
 
 

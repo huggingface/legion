@@ -41,7 +41,7 @@ def raw_spec(tools=None, **extra) -> dict:
     t = {**HB, "model": "m", "replicas": 1, "agents_per_worker": 2}
     if tools is not None:
         t["tools"] = tools
-    return {"swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/sh", "inference": FAKE_INFERENCE,
+    return {"swarm": "demo", "namespace": "ns", "bucket_id": "ns/sh", "inference": FAKE_INFERENCE,
             "types": {"dev": t}, **extra}
 
 

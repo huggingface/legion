@@ -147,9 +147,9 @@ def group_of(spec: SwarmSpec, ts: TypeSpec, label: str = "swarm") -> Group | Non
     if kind is None:
         return None
     block = getattr(r.inference, kind)
-    namespace = block.namespace or spec.namespace or None
+    namespace = spec.namespace or None
     what = [kind, r.model_id, r.inference.max_working, namespace,
-            block.model_dump(mode="json", exclude={"startup_timeout", "replicas", "namespace",
+            block.model_dump(mode="json", exclude={"startup_timeout", "replicas",
                                                    "timeout"})]
     key = hashlib.sha256(json.dumps(what, sort_keys=True).encode()).hexdigest()[:12]
     return Group(key=key, kind=kind, model=r.model_id, block=block,

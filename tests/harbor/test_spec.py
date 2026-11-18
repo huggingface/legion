@@ -206,7 +206,7 @@ def test_compile_gives_one_harbor_type_per_role(tmp_path):
                              sha256="f" * 64)
     swarm = compile_spec(spec, TASK, bundle)
 
-    assert (swarm.swarm, swarm.namespace, swarm.bucket, swarm.compute.kind) == (
+    assert (swarm.swarm, swarm.namespace, swarm.bucket_id, swarm.compute.kind) == (
         "lanes", "", "", "local",
     )
     blocks = swarm.inference_blocks()  # the run's, and the role's own
@@ -313,8 +313,8 @@ def test_only_the_blocks_the_roles_run_on_are_checked(tmp_path):
 @pytest.mark.parametrize(("edit", "error"), [
     (lambda d: None, "cannot reach"),  # hf-sandbox
     (lambda d: d.update(environment={"backend": "hf-sandbox"}, compute="hf-jobs",
-                        namespace="ns", bucket="hf://buckets/ns/b"), "cannot reach"),
-    (lambda d: d.update(environment={"backend": "podman"}, compute="slurm", bucket="hf://b/x"),
+                        namespace="ns", bucket_id="ns/b"), "cannot reach"),
+    (lambda d: d.update(environment={"backend": "podman"}, compute="slurm", bucket_id="ns/b"),
      "each worker's own node"),
 ])
 def test_servers_on_this_machine_need_agents_on_it(tmp_path, edit, error):
@@ -402,7 +402,7 @@ def test_workers_env_reaches_the_hf_jobs_workers(tmp_path, monkeypatch, store, s
     """A task's `[environment.env]` `${VAR}` is filled from the worker's own env (Harbor's
     resolve_env_vars): `workers.env` puts it there, in every type and every launched job."""
     data = load_spec_yaml(COMPILE)
-    data.update(compute="hf-jobs", namespace="ns", bucket="hf://buckets/ns/sh")
+    data.update(compute="hf-jobs", namespace="ns", bucket_id="ns/sh")
     data["workers"]["env"] = {"PYBOT_REPO": "${PYBOT_REPO}"}
     for name in ("team.md", "answers.md", "round.md"):
         (tmp_path / name).write_text("x")
@@ -459,7 +459,7 @@ def test_harbor_agents_get_flock_names_and_their_roles_reach_each_assign(
     from flock.controller.naming import HANDLE_RE
 
     data = load_spec_yaml(COMPILE)
-    data.update(compute="hf-jobs", namespace="ns", bucket="hf://buckets/ns/sh")
+    data.update(compute="hf-jobs", namespace="ns", bucket_id="ns/sh")
     for name in ("team.md", "answers.md", "round.md"):
         (tmp_path / name).write_text("x")
     (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))

@@ -328,24 +328,26 @@ def pi_models(fakes, n=0):
     return provider
 
 
-def endpoint_spec(inference, backend="docker", window=None):
+def endpoint_spec(inference, backend="docker", window=None, namespace=""):
     spec = Spec.load(EXAMPLES / "pi-hf.yaml", env={})
     spec.environment.backend, spec.inference = backend, Inference.model_validate(inference)
+    spec.namespace = namespace
     ts = compile_spec(spec, TASK).types["agent"]
     ts.resolved_model.context_window = window  # as the controller's apply pins it
     return ts
 
 
-async def test_pi_gets_the_router_provider_bill_to_and_context_window(fakes, tmp_path):
-    ts = endpoint_spec({"hf_router": {"provider": "deepinfra", "bill_to": "huggingface"}},
-                       window=262144)
+@pytest.mark.parametrize("namespace", ["", "huggingface"])
+async def test_pi_gets_the_router_provider_bill_to_and_context_window(fakes, tmp_path, namespace):
+    ts = endpoint_spec({"hf_router": {"provider": "deepinfra"}},
+                       window=262144, namespace=namespace)
     a = make_adapter(tmp_path / "work" / "agent-0000", "agent-0000", ts)
     _, events = await start(a)
     await a.send("go")
     await read(events, "turn_ended")
     provider = pi_models(fakes)
     assert provider["baseUrl"] == "https://router.huggingface.co/v1"
-    assert provider["headers"] == {"X-HF-Bill-To": "huggingface"}
+    assert provider.get("headers", {}) == ({"X-HF-Bill-To": namespace} if namespace else {})
     assert provider["models"] == [{"id": "moonshotai/Kimi-K2.5:deepinfra", "contextWindow": 262144}]
     assert "--model moonshotai/Kimi-K2.5:deepinfra" in fakes.pi[0]
     await a.close()

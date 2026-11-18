@@ -127,7 +127,7 @@ def experiment_spec(monkeypatch, pins, name, rev, env=None):
     """An experiments/ folder's spec (or an absolute folder's, or a spec file in one) as `flock
     launch` reads it, the task pin faked."""
     pins[rev] = "a" * 40
-    for key in ("RUN_NAME", "BUCKET"):
+    for key in ("RUN_NAME", "BUCKET_ID"):
         monkeypatch.delenv(key, raising=False)
     for key, value in (env or {}).items():
         monkeypatch.setenv(key, value)
@@ -152,7 +152,7 @@ def test_a_slurm_podman_spec_with_board_rules_compiles(monkeypatch, pins):
 
 
 def test_the_pybot_spec_compiles(monkeypatch, pins):
-    env = {"PYBOT_TASK_REVISION": "c" * 40, "BUCKET": "hf://buckets/ns/runs",
+    env = {"PYBOT_TASK_REVISION": "c" * 40, "BUCKET_ID": "ns/runs",
            "BOARD_URL": "https://board.example", "WORLD_URL": "https://world.example",
            "PYBOT_REPO": "ns/bot"}
     swarm = experiment_spec(monkeypatch, pins, "pybot", "c" * 40, env)
@@ -208,8 +208,7 @@ def test_a_local_run_drives_harbor_trials(tmp_path, monkeypatch, pins):
 
 
 def test_the_mini_swarm_spec_compiles(monkeypatch, pins):
-    for key in ("SANDBOX_NAMESPACE", "BOARD_SPACE"):
-        monkeypatch.delenv(key, raising=False)
+    monkeypatch.delenv("BOARD_SPACE", raising=False)
     swarm = experiment_spec(monkeypatch, pins, "mini-swarm",
                             "d0e1fee0f1036a80d5400d67f7fad9143668ba94")
     assert (swarm.swarm, swarm.compute.kind, list(swarm.types)) == ("mini-swarm-1", "local", ["agent"])

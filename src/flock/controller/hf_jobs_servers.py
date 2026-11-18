@@ -91,7 +91,7 @@ class HFJobsServers:
         return self._account
 
     def namespace(self, group: Group) -> str:
-        """Who runs and pays: the block's or spec's namespace, else the token's account.
+        """Who runs and pays: the spec's namespace, else the token's account.
         Written into the group, so status shows it."""
         if not group.namespace:
             group.namespace = self.account()

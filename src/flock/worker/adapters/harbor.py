@@ -280,7 +280,7 @@ class HarborAdapter:
         r = self.spec.resolved_model
         channel.base_url = base_url
         channel.context_window = r.context_window
-        channel.headers = r.inference.headers
+        channel.headers = r.headers
 
     async def _new_trial(self, restore: bool) -> None:
         """Create the agent's next Trial, run it in the background and wait until FlockPi

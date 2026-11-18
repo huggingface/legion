@@ -26,6 +26,7 @@ from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 
+from flock.buckets import bucket_url
 from flock.controller.comms import CommsError
 from flock.controller.comms import resolve as comms_resolve
 from flock.controller.health import Health
@@ -348,7 +349,7 @@ def swarm_status(store: Store, spec: SwarmSpec, now: float,
     return SwarmStatus(
         swarm=spec.swarm,
         namespace=spec.namespace,
-        bucket=spec.bucket,
+        bucket_id=spec.bucket_id,
         types=types,
         providers=providers,
         servers=servers.status(spec.swarm) if servers is not None else [],
@@ -572,7 +573,7 @@ def _status_page(store: Store, now: float, sampler: Health | None = None,
             f'<section class="swarm"><div class="head"><span class="kicker">swarm</span>'
             f"<h2>{e(spec.swarm)}</h2>{removing}</div>"
             f'<p class="sub">namespace <code>{e(spec.namespace)}</code> · bucket '
-            f"<code>{e(spec.bucket)}</code></p>{provs}"
+            f"<code>{e(spec.bucket_id)}</code></p>{provs}"
             f'<div class="stats">{tiles}</div>{table}{"".join(details)}</section>'
         )
     body = "".join(parts) or (
@@ -868,16 +869,16 @@ def create_app(
     def reused_bucket(spec: SwarmSpec) -> str | None:
         """Why a fresh `flock launch` must not create this swarm: its bucket already holds
         agents of that name (they would be restored silently). None: nothing there."""
-        if buckets is None or spec.compute.kind == "local" or not spec.bucket:
+        if buckets is None or spec.compute.kind == "local" or not spec.bucket_id:
             return None  # local agents live in the run dir, never in the bucket
         try:
-            b = buckets(spec.bucket)
+            b = buckets(bucket_url(spec.bucket_id))
             found = b.first(f"{spec.swarm}/")
         except Exception as e:  # noqa: BLE001 - cannot tell: refuse, never guess
-            return f"cannot check bucket {spec.bucket} for earlier agents: {type(e).__name__}: {e}"
+            return f"cannot check bucket {spec.bucket_id} for earlier agents: {type(e).__name__}: {e}"
         if not found:
             return None
-        return (f"bucket {spec.bucket} already holds agents of swarm {spec.swarm!r} "
+        return (f"bucket {spec.bucket_id} already holds agents of swarm {spec.swarm!r} "
                 f"({found}): a fresh launch would restore them. "
                 "That run's controller restores it on start (FLOCK_STATE_RESTORE); "
                 "else pick a new swarm name or bucket")
@@ -924,7 +925,7 @@ def create_app(
             raise HTTPException(400, "spec.swarm does not match the path")
         if create and (why := reused_bucket(spec)):
             raise HTTPException(409, why)
-        if namespace and spec.namespace != namespace:
+        if namespace and (spec.namespace or namespace) != namespace:
             raise HTTPException(
                 400,
                 f"this controller runs as a job in namespace {namespace!r} and its workers must "

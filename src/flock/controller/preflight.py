@@ -116,7 +116,7 @@ async def _probe_chat(client, r: ResolvedModel, key: str | None, result: Preflig
 async def _probe_chat_at(client, base: str, r: ResolvedModel, key: str | None,
                          result: PreflightResult, timeout: float) -> int:
     url = f"{base}/chat/completions"
-    headers = {**r.inference.headers, **({"Authorization": f"Bearer {key}"} if key else {})}
+    headers = {**r.headers, **({"Authorization": f"Bearer {key}"} if key else {})}
     body = chat_request(r)
     msg, tok1 = await _chat_turn(client, url, body, headers, timeout)
     calls = [c for c in msg.get("tool_calls") or [] if isinstance(c, dict)]

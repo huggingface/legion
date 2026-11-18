@@ -82,7 +82,7 @@ def make_spec(swarm: str = "demo", **types: dict) -> SwarmSpec:
         }
         full[name] = {**base, **overrides}
     return SwarmSpec.model_validate(
-        {"swarm": swarm, "namespace": "ns", "bucket": "hf://buckets/ns/sh",
+        {"swarm": swarm, "namespace": "ns", "bucket_id": "ns/sh",
          "inference": FAKE_INFERENCE, "types": full}
     )
 
@@ -158,6 +158,7 @@ def no_local_checkpoint(monkeypatch):
     does any test (or process it starts) get the machine's Hub token."""
     monkeypatch.setenv("FLOCK_STATE_URL", "")
     monkeypatch.setenv("HF_TOKEN", "fake-hub-token")
+    monkeypatch.setattr("huggingface_hub.HfApi.create_bucket", lambda *_a, **_k: None)
 
 
 @pytest.fixture

@@ -45,19 +45,23 @@ def local_spec(**kw) -> SwarmSpec:
 # --------------------------------------------------------------------------- spec
 
 
-def test_compute_defaults_to_hf_jobs_and_keeps_job_fields_required():
+def test_compute_defaults_to_hf_jobs_and_only_requires_a_bucket_id():
     spec = make_spec()
     assert spec.compute.kind == "hf-jobs"
     types = {"a": TYPE}
-    with pytest.raises(ValueError, match="namespace and bucket required for compute hf-jobs"):
+    with pytest.raises(ValueError, match="bucket_id is required for compute hf-jobs"):
         SwarmSpec.model_validate({"swarm": "s", "inference": FAKE, "types": types})
-    with pytest.raises(ValueError, match="bucket required"):
+    with pytest.raises(ValueError, match="bucket_id is required"):
         SwarmSpec.model_validate({"swarm": "s", "namespace": "n", "inference": FAKE, "types": types})
+    spec = SwarmSpec.model_validate({"swarm": "s", "bucket_id": "runs",
+                                     "inference": {"urls": ["https://fake.invalid/v1"]},
+                                     "types": types})
+    assert spec.namespace == "" and spec.bucket_id == "runs"
 
 
 def test_compute_local_short_and_long_form():
     short = local_spec()
-    assert short.compute.kind == "local" and short.namespace == "" and short.bucket == ""
+    assert short.compute.kind == "local" and short.namespace == "" and short.bucket_id == ""
     long = SwarmSpec.model_validate({"swarm": "s", "compute": {"kind": "local"},
                                      "inference": FAKE, "types": {"a": TYPE}})
     assert long.compute.kind == "local"
@@ -151,7 +155,7 @@ def test_local_jobs_env_contract_and_stages(tmp_path):
     base = {"PATH": os.environ["PATH"], "FLOCK_URL": "http://elsewhere", "HOME": "/h"}
     jobs = LocalJobsClient(root=tmp_path, command=_script(DUMP_ENV), base_env=base)
     env = {"FLOCK_URL": "http://127.0.0.1:1", "WORKER_ID": "s-w-w0000", "HEARTBEAT_INTERVAL": "1",
-           "BUCKET": "hf://buckets/me/b"}
+           "BUCKET_ID": "me/b"}
     jid = jobs.launch("s-w-w0000", local_spec().types["w"], env, {"FLOCK_TOKEN": "tok",
                       "FAKE_KEY": "k"}, {"swarm": "s"}, 60, namespace="")
     _wait(jobs, jid, "COMPLETED")
@@ -162,7 +166,7 @@ def test_local_jobs_env_contract_and_stages(tmp_path):
     assert seen["FLOCK_LOCAL_PARENT_PID"] == str(os.getpid())
     assert seen["HEARTBEAT_INTERVAL"] == "1"  # the type's env wins over the local default
     assert seen["HOME"] == "/h"
-    assert seen["BUCKET"] == ""  # no bucket sync locally, whatever the spec says
+    assert seen["BUCKET_ID"] == ""  # no bucket sync locally, whatever the spec says
     assert "hello from s-w-w0000" in "\n".join(jobs.logs_tail(jid, namespace=""))
     assert [j.job_id for j in jobs.list({"swarm": "s"}, namespace="")] == [jid]
     assert jobs.list({"swarm": "other"}, namespace="") == []
@@ -214,7 +218,7 @@ def test_reconcile_launches_local_processes_with_the_job_env(tmp_path):
         env = json.loads((tmp_path / "run" / f"{wid}.env.json").read_text())
         assert env["WORKER_ID"] == wid and env["SWARM"] == "loc" and env["TYPE"] == "w"
         assert env["FLOCK_URL"] == "http://127.0.0.1:5" and env["FLOCK_TOKEN"] == TOKEN
-        assert env["FAKE_KEY"] == "k" and env["BUCKET"] == "" and env["WORKER_INCARNATION"]
+        assert env["FAKE_KEY"] == "k" and env["BUCKET_ID"] == "" and env["WORKER_INCARNATION"]
     jobs.kill_all(grace=1)
     store.close()
 

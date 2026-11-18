@@ -37,6 +37,9 @@ from pathlib import Path
 from string import Template
 from typing import Any
 
+from huggingface_hub.utils import HfHubHTTPError
+
+from flock.buckets import bucket_url, resolve_bucket_id
 from flock.models import CommsSpec, SwarmSpec, board_url_default, load_spec_yaml, max_workers
 from flock.specrender import _RUNTIME, _VAR, read_env_file, substitute
 
@@ -370,7 +373,7 @@ def bucket_store(url: str, token: str):
 
 
 def check_bucket(spec: SwarmSpec, env: Mapping[str, str], rep: InitReport) -> Check:
-    if not spec.bucket:
+    if not spec.bucket_id:
         return Check("bucket", None, "not set (compute local keeps agents in the run dir)")
     token = env.get("HF_TOKEN")
     if not token:
@@ -378,20 +381,26 @@ def check_bucket(spec: SwarmSpec, env: Mapping[str, str], rep: InitReport) -> Ch
 
         token = get_token()
     if not token:
-        return Check("bucket", None, f"skipped: no HF token to check {spec.bucket} (set HF_TOKEN "
+        return Check("bucket", None, f"skipped: no HF token to check {spec.bucket_id} (set HF_TOKEN "
                                      "in run.env or `hf auth login`)")
+    bucket_id = spec.bucket_id
     try:
-        b = bucket_store(spec.bucket, token)
+        bucket_id = resolve_bucket_id(spec.bucket_id, spec.namespace, hub_api(token))
+        b = bucket_store(bucket_id, token)
         with tempfile.NamedTemporaryFile() as f:
             b.upload([(Path(f.name), PROBE)])
         b.delete([PROBE])
         found = b.first(f"{spec.swarm}/")
+    except HfHubHTTPError as e:
+        if e.response.status_code == 404 and "/" in bucket_id:
+            return Check("bucket", True, f"{bucket_id}: missing; will be created private by flock launch")
+        return Check("bucket", False, f"{spec.bucket_id}: not writable: {type(e).__name__}: {e}")
     except Exception as e:  # noqa: BLE001 - any Hub error is the check's answer
-        return Check("bucket", False, f"{spec.bucket}: not writable: {type(e).__name__}: {e}")
+        return Check("bucket", False, f"{spec.bucket_id}: not writable: {type(e).__name__}: {e}")
     if found:
-        rep.notes.append(f"bucket {spec.bucket} already holds data for swarm {spec.swarm} "
+        rep.notes.append(f"bucket {spec.bucket_id} already holds data for swarm {spec.swarm} "
                          f"({found}): `flock launch` refuses a fresh start (pick a new swarm name or bucket)")
-    return Check("bucket", True, f"{spec.bucket} writable")
+    return Check("bucket", True, f"{spec.bucket_id} writable")
 
 
 def check_tokens(data: Any, values: Mapping[str, str]) -> Check:
@@ -618,7 +627,8 @@ def provision_board(data: Any, run_dir: Path, env: Mapping[str, str],
     try:  # the comms block and swarm name as the spec reads them; url is what this makes
         raw = {k: v for k, v in data["comms"].items() if k != "url"}
         c = CommsSpec.model_validate({**substitute(raw, dict(env)), "url": "https://pending.invalid"})
-        swarm, bucket = substitute([data["swarm"], data.get("bucket") or ""], dict(env))
+        swarm, bucket, namespace = substitute(
+            [data["swarm"], data.get("bucket_id") or "", data.get("namespace") or ""], dict(env))
     except Exception as e:  # noqa: BLE001 - the spec check reports the rest
         return Check("board space", False, f"comms: {' '.join(str(e).split())}"), {}
     hf = env.get("HF_TOKEN")
@@ -636,6 +646,7 @@ def provision_board(data: Any, run_dir: Path, env: Mapping[str, str],
     master = board_env.get("BOARD_OPERATOR_TOKEN")
     try:
         api = hub_api(hf)
+        bucket = bucket_url(resolve_bucket_id(bucket, namespace, api)) if bucket else ""
         exists = api.repo_exists(space, repo_type="space")
         if master is None:
             if exists:
@@ -749,7 +760,7 @@ def dashboard_row(spec: SwarmSpec) -> dict[str, Any]:
         if c and c.board == "space" else public(board),
         "viewer": d.viewer, "viewer_public": d.viewer_public or public(d.viewer),
         # the viewer reads the controller's files from <bucket>/controller/<swarm>
-        "viewer_run": f"{spec.bucket.removeprefix('hf://buckets/').rstrip('/')}/{spec.swarm}",
+        "viewer_run": f"{spec.bucket_id}/{spec.swarm}",
         "dataset": d.dataset, "code_repo": d.code_repo, "spec_url": d.spec_url}
 
 
@@ -766,7 +777,12 @@ def register_dashboard(spec: SwarmSpec, env: Mapping[str, str]) -> Check:
         token = get_token()
     if not token:
         return Check("dashboard", False, f"needs HF_TOKEN to write to {d.registry}")
-    row = dashboard_row(spec)
+    try:
+        resolved = spec.model_copy(update={
+            "bucket_id": resolve_bucket_id(spec.bucket_id, spec.namespace, hub_api(token))})
+    except Exception as e:  # noqa: BLE001 - a Hub account lookup failure is the check's answer
+        return Check("dashboard", False, f"bucket_id: {type(e).__name__}: {e}")
+    row = dashboard_row(resolved)
     rel = f"runs/{row['id']}.json"
     # the overview sends its HF token to `board` and `viewer`: only Spaces of the registry's namespace
     ns, spaces = registry_spaces(d.registry)

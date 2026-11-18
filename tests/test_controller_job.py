@@ -92,7 +92,8 @@ def test_space_mode_launches_workers_without_a_group(tmp_path):
     b.store.close()
 
 
-async def test_job_mode_refuses_specs_in_another_namespace(tmp_path):
+@pytest.mark.parametrize("namespace", ["ns", ""])
+async def test_job_mode_refuses_specs_in_another_namespace(tmp_path, namespace):
     b = _built(tmp_path)
     transport = httpx.ASGITransport(app=b.app)
     headers = {"X-Flock-Token": TOKEN}
@@ -100,8 +101,11 @@ async def test_job_mode_refuses_specs_in_another_namespace(tmp_path):
         spec = make_spec().model_copy(update={"namespace": "other"})
         r = await c.put("/swarms/demo", json=spec.model_dump(mode="json"))
         assert r.status_code == 400 and "network group" in r.text
-        r = await c.put("/swarms/demo", json=make_spec().model_dump(mode="json"))
+        spec = make_spec().model_dump(mode="json")
+        spec["namespace"] = namespace
+        r = await c.put("/swarms/demo", json=spec)
         assert r.status_code == 200, r.text
+        assert b.store.get_swarm("demo")["spec"].namespace == namespace
     b.store.close()
 
 
