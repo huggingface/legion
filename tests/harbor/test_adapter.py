@@ -377,6 +377,32 @@ async def test_pi_reaches_this_machine_through_podman(fakes, tmp_path):
     await a.close()
 
 
+async def test_an_agent_keeps_its_server_across_trials_and_workers(fakes, tmp_path, monkeypatch):
+    """The server is picked from the swarm and the agent's name, so the agent's Trial on the
+    worker it is restored on after a restart calls the server of its first one (whose prefix
+    cache holds its context), the one its heartbeat names."""
+    from flock.worker.agents import AgentRuntime
+    from flock.worker.events import Outbox
+
+    monkeypatch.setenv("SWARM", "s3-maze-07")  # the workers' env
+    ts = endpoint_spec({"urls": [f"http://10.0.0.{i}:8000/v1" for i in range(1, 15)]})
+    old, new = (make_adapter(tmp_path / w / "agent-001", "agent-001", ts) for w in ("w1", "w2"))
+    sid, events = await start(old)
+    await old.send("go")
+    await read(events, "turn_ended")
+    await old.close()
+    shutil.copytree(old.home / "sessions", new.home / "sessions")  # the bucket restore
+    _, events = await start(new, sid)
+    await new.send("go on")
+    await read(events, "turn_ended")
+    await new.close()
+    first, second = (t.config.agent.base_url for t in fakes.trials)
+    assert first == second == pi_models(fakes, 1)["baseUrl"]
+    rt = AgentRuntime("agent-001", "agent", ts, swarm="s3-maze-07", work_root=tmp_path / "w2",
+                      adapter=new, outbox=Outbox(), secret_source={})
+    assert rt.heartbeat().endpoint == first.removeprefix("http://").removesuffix("/v1")
+
+
 async def test_prompts_during_a_turn_join_the_next_turn(fakes, tmp_path):
     a = adapter(tmp_path)
     _, events = await start(a)

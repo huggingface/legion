@@ -745,5 +745,5 @@ class AgentRuntime:
     def endpoint(self) -> str | None:
         """`host:port` of the model server the agent calls, as its inference block writes it."""
         r = self.spec.resolved_model
-        url = r.inference.endpoint_for(self.name) if r else None
+        url = r.inference.endpoint_for(self.swarm, self.name) if r else None
         return (urlsplit(url).netloc or url) if url else None

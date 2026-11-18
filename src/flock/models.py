@@ -336,11 +336,14 @@ class Inference(BaseModel):
         r = self.hf_router
         return f"{model}:{r.provider}" if r is not None and r.provider else model
 
-    def endpoint_for(self, agent: str) -> str:
-        """The server `agent` calls: rendezvous hashing over `endpoints`. Stable for a given list,
-        spreads agents roughly evenly, and a URL added or removed moves only the agents that
-        must move."""
-        return max(self.endpoints, key=lambda u: hashlib.sha256(f"{agent}\n{u}".encode()).digest())
+    def endpoint_for(self, run: str, agent: str) -> str:
+        """The server `agent` of `run` (a swarm's name, the upstream launcher's run id) calls:
+        rendezvous hashing of both over `endpoints`. Stable for a given list, so an agent keeps
+        its server (and the server its prefix cache) across Trials and restarts; spreads agents
+        roughly evenly, including one name in many runs (every run's `agent-001`); and a URL
+        added or removed moves only the agents that must move."""
+        return max(self.endpoints,
+                   key=lambda u: hashlib.sha256(f"{run}\n{agent}\n{u}".encode()).digest())
 
     def describe(self) -> str:
         """One line for status: `hf_router deepinfra`, the URLs, or `hf_jobs <flavor>` and the

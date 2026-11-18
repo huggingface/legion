@@ -183,13 +183,13 @@ Each type sets `harness: harbor`, its `harbor:` block (written by the compile st
 `types.<t>.model` is a Hub id (with `urls`, the name the servers serve) and one `inference` block
 (`Inference`) says where it runs: the HF router (`hf_router`, the default; flock sends
 `<model>:<provider>`), OpenAI-compatible servers you run (`urls`, each agent calling one by
-rendezvous hashing) or vLLM servers flock starts on HF Jobs (`hf_jobs`). The swarm's block serves
-every type that does not set its own. For `hf_jobs` the controller starts one group of jobs per
-model before preflight (`POST /swarms/{swarm}/servers`, `controller/servers.py`), waits until
-each answers, pins their URLs into the resolved block as `urls`, reattaches to them by label
-after a restart and cancels them when the run ends; from there on it is the `urls` path. One
-rule cleans up: a server job the applied spec does not use goes once the deadline in its
-`retire` label has passed. Validation
+rendezvous hashing on its swarm and name) or vLLM servers flock starts on HF Jobs (`hf_jobs`).
+The swarm's block serves every type that does not set its own. For `hf_jobs` the controller
+starts one group of jobs per model before preflight (`POST /swarms/{swarm}/servers`,
+`controller/servers.py`), waits until each answers, pins their URLs into the resolved block as
+`urls`, reattaches to them by label after a restart and cancels them when the run ends; from
+there on it is the `urls` path. One rule cleans up: a server job the applied spec does not use
+goes once the deadline in its `retire` label has passed. Validation
 pins each type's block and `[input, output, cached]` price into the spec
 (`types.<t>.resolved_model`, under the block's name: `inference` or `types.<t>.inference`), and
 the apply checks the model against each endpoint's `GET /models` and pins the context window it
