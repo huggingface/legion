@@ -11,6 +11,7 @@ compute:
   time: '2:00:00'
 model: Qwen/Qwen3.8-27B
 naming: consecutive-id                        # agent-001 .. agent-00N, all on the one tree
+team_file: team.md                            # the protocol hint; without it, the neutral sweep
 inference:
   hf_router:
     provider: deepinfra
@@ -27,8 +28,11 @@ success_check:
   command: python3 -I -S /app/success.py
 resources:
   message_board:                              # a local board on the team's one worker
-    channels: [general]
-    wake: [mention, thread]
+    channels:
+      - general
+    wake:
+      - mention
+      - thread
     rules:
       max_len: 1000
       min_post_gap: 5s

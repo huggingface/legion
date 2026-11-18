@@ -130,10 +130,12 @@ holds the tree, so it runs on docker or podman, not HF Sandboxes. The
 [example](../experiments/s3-maze/spec.yaml) runs one team (`TREE`, default `maze-t01`, and `N`,
 default 4) on the HF cluster: one Slurm worker on hopper-cpu in rootless podman, with a local
 board, and `stop_on_success` with the service's `success_check`, so the first agent out ends
-the run. It needs the dataset on the shared disk for its `registries.conf` (podman pulls Docker
-Hub images through `mirror.gcr.io`), `HF_TOKEN` with read access to it and the run's bucket,
-`HF_INFERENCE_TOKEN` for the agents, and the Git credential helper for a private task repo
-([Slurm](slurm.md), "Containers"):
+the run. The example includes a protocol hint in its team text (`team.md`, the spec's
+`team_file`), so each agent reads the board and claims a door before it goes through one; remove
+`team_file` for the neutral condition of the earlier sweep. It needs the dataset on the shared
+disk for its `registries.conf` (podman pulls Docker Hub images through `mirror.gcr.io`),
+`HF_TOKEN` with read access to it and the run's bucket, `HF_INFERENCE_TOKEN` for the agents, and
+the Git credential helper for a private task repo ([Slurm](slurm.md), "Containers"):
 
 ```sh
 DS=/fsx/$USER/s3-maze
