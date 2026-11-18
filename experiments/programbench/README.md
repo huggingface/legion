@@ -7,10 +7,10 @@ solution. A merged collaboration PR is not a successful benchmark submission.
 ## Setup
 
 - Install Flock (`uv sync`) and Docker with Compose.
-- Create a private HF dataset in `HuggingFaceSwarms` with an initial README commit on `main`.
-- Set `HF_REPO_ID` to its `HuggingFaceSwarms/<name>`, `HF_REPO_TOKEN` to a credential with
+- Create a private HF dataset in your personal account with an initial README commit on `main`.
+- Set `HF_REPO_ID` to its `<your-username>/<name>`, `HF_REPO_TOKEN` to a credential with
   write access to it, and `HF_INFERENCE_TOKEN` to a model credential with Inference Providers
-  permission on `HuggingFaceSwarms` (the spec's explicit billing namespace).
+  permission for your personal billing account. Keep those credentials separate.
 - Git must be installed in the task image. Configure HF Git authentication if
   your task dataset requires it.
 
@@ -22,7 +22,8 @@ uv run flock stop programbench-repo --delete --yes
 
 The example starts a local board and one worker with two agents. Both receive one
 start prompt and at most 60 model turns; the loop ends after that round. Inference
-is billed to `HuggingFaceSwarms` through the HF router. No pricing is supplied, so displayed
+uses the inference key's default billing account through the HF router, with no org bill-to
+header. No pricing is supplied, so displayed
 zero cost does not mean free inference. For multiple workers, use an existing shared board URL or a
 Space setup supported by the board resource; the configured repository is already
 shared across all workers.

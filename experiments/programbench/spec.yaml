@@ -1,5 +1,4 @@
 name: ${RUN_NAME:-programbench-repo}
-namespace: HuggingFaceSwarms
 compute: local
 model: Qwen/Qwen3.8-27B
 inference:

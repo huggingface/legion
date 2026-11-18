@@ -38,17 +38,15 @@ choose **Fine-grained** and create the following credentials for mini-swarm:
 
 | Variable | Permissions |
 | --- | --- |
-| `HF_TOKEN` | Manage Jobs, create/write the board's Space and storage bucket, and read the private task dataset in `HuggingFaceSwarms`. |
-| `HF_INFERENCE_TOKEN` | **Make calls to Inference Providers** on `HuggingFaceSwarms`, with no Jobs, Space, or bucket permissions. |
+| `HF_TOKEN` | Manage Jobs and create/write the board's Space and storage bucket in your personal account; separately, read the private `HuggingFaceSwarms/mini-swarm` task dataset. |
+| `HF_INFERENCE_TOKEN` | **Make calls to Inference Providers** using your personal billing account, with no Jobs, Space, or bucket-write permissions. |
 
-The examples set top-level `namespace: HuggingFaceSwarms` for Jobs, sandboxes and router
-billing. Examples that deploy board Spaces require `BOARD_SPACE`: choose a fresh qualified ID under
-`HuggingFaceSwarms` for each run, as below. Grant the inference key org-scoped Inference Providers calls
-(`inference.serverless.write`). For `hf_jobs` model servers it also needs org read access
-for the jobs proxy. You may omit `namespace` to use `HF_TOKEN`'s account for infrastructure
-and the inference key's default billing account for router calls. See
-[billing and storage](docs/billing.md). Then export the two different token values in the
-shell where you launch Flock:
+The examples omit `namespace`: infrastructure uses `HF_TOKEN`'s personal account and router
+requests use the inference key's default billing account, with no bill-to header. Examples
+that deploy board Spaces require a fresh per-run `BOARD_SPACE`; a bare name uses `HF_TOKEN`'s
+account. For `hf_jobs` model servers, the inference key also needs read access to that personal
+namespace for the jobs proxy. Org billing is [optional](docs/billing.md#optional-org-billing).
+Export the two separately scoped token values in the shell where you launch Flock:
 
 ```sh
 export HF_TOKEN="<token with Jobs, Space, and bucket permissions>"
@@ -61,9 +59,9 @@ The current HF Sandbox configuration rejects `HF_TOKEN` as the inference key;
 assigning the same token to both variables would defeat this separation. See the
 [token setup](experiments/mini-swarm/README.md#tokens) for details.
 
-For a one-token starting point, use the [local Docker quickstart](docs/local.md#quickstart).
-That example uses `HF_TOKEN` for inference only and does not deploy a Space board
-or HF Sandboxes.
+The [local Docker quickstart](docs/local.md#quickstart) needs no Jobs or Space permissions.
+It uses the inference credential for model calls; private Hub tasks additionally need
+read access through `HF_TOKEN`.
 
 ### Launch mini-swarm
 
@@ -74,7 +72,7 @@ Then launch and watch the run:
 
 ```sh
 export RUN_NAME="mini-swarm-$(uv run python -c 'import uuid; print(uuid.uuid4().hex[:12])')"
-export BOARD_SPACE="HuggingFaceSwarms/$RUN_NAME"
+export BOARD_SPACE="$RUN_NAME"
 uv run flock launch experiments/mini-swarm/spec.yaml
 uv run flock status "$RUN_NAME"
 ```

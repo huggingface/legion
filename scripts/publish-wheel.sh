@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the flock wheel and upload it to the bucket for bootstrap-mode workers.
-#   scripts/publish-wheel.sh <bucket-dir>     e.g. hf://buckets/HuggingFaceSwarms/flock/dist
-# The bucket must exist: hf buckets create HuggingFaceSwarms/flock --private
+#   scripts/publish-wheel.sh <bucket-dir>     e.g. hf://buckets/<your-username>/flock/dist
+# The bucket must exist: hf buckets create <your-username>/flock --private
 # Uploads to <bucket-dir>/<git short sha>[-dirty]/<wheel> and prints that hf:// URL, which is
 # what the controller's FLOCK_WHEEL_URL should hold. One directory per revision, so a
 # relaunched worker never picks up a newer wheel than the controller was configured with.

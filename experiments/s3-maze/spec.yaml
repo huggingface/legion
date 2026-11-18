@@ -1,8 +1,7 @@
 # s3-maze: N agents search their own copies of one tree of rooms for its exit, sharing a board,
 # and the first one out ends the run. On the HF cluster: docs/tasks.md#s3-maze
 name: ${RUN_NAME:-s3-maze}                    # a new name per run: a bucket keeps a swarm's name
-namespace: HuggingFaceSwarms
-bucket_id: ${BUCKET_ID}                       # [namespace/]name; a bare name uses HuggingFaceSwarms
+bucket_id: ${BUCKET_ID}                       # [namespace/]name; a bare name uses HF_TOKEN's account
 compute:
   kind: slurm
   partition: ${SLURM_PARTITION:-}             # the cluster profile's: hopper-cpu (podman 4.9)

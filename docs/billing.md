@@ -1,31 +1,43 @@
 # Billing and storage
 
 `namespace` is the optional account that pays for worker and controller Jobs, hf-sandbox
-sandboxes, vLLM servers started with `inference.hf_jobs`, and HF router requests. The runnable
-Flock examples explicitly select `HuggingFaceSwarms`. You can set it on any compute
+sandboxes, vLLM servers started with `inference.hf_jobs`, and HF router requests. Runnable
+examples omit it for personal-account defaults. You can set it on any compute
 backend, including Slurm: it still selects billing for HF sandboxes and inference.
 
-```yaml
-namespace: HuggingFaceSwarms
-bucket_id: flock-runs
-```
-
 With `namespace` omitted or empty, HF infrastructure uses `HF_TOKEN`'s account and HF router
-requests use the inference key's default billing account. Setting `namespace: HuggingFaceSwarms`
-selects the org for both; router requests include `X-HF-Bill-To: HuggingFaceSwarms`.
+requests use the inference key's default billing account, with no `X-HF-Bill-To` header.
 
-## Tokens for an organization
+## Personal accounts
 
 Use two separately scoped tokens when agents run on remote infrastructure:
 
 | Credential | Permissions |
 |---|---|
-| `HF_TOKEN` | Manage Jobs and create/write buckets in the billing org; read private task/model repositories used by the run. If deploying a board Space, create/write that Space and its storage too. |
-| The inference key (`HF_INFERENCE_TOKEN` in the examples) | Make Inference Providers calls on the billing org (`inference.serverless.write`) for router bill-to. For `hf_jobs` servers in the org, also read access to the org: the jobs proxy admits only tokens with that access. |
+| `HF_TOKEN` | Manage Jobs and create/write buckets in your personal account. If deploying a board Space, create/write that Space and its storage too. Separately grant read access to the private task/model repositories used by the run, including any required org-owned datasets. |
+| The inference key (`HF_INFERENCE_TOKEN` in the examples) | Make Inference Providers calls for your personal billing account. For `hf_jobs` servers, also read access to the job's personal namespace for the jobs proxy. No infrastructure write permissions are needed for router calls. |
 
 The inference key enters each agent's container. Keep the infrastructure token out of it.
-Org membership and token permissions both need to allow the selected resources. A bucket in
-another namespace additionally needs bucket write access there.
+Private task/model read access does not require billing Jobs or inference to the repository's
+org. A bucket in another namespace additionally needs bucket write access there.
+
+## Optional org billing
+
+To bill an organization instead, explicitly set its namespace:
+
+```yaml
+namespace: my-org
+bucket_id: flock-runs
+```
+
+This selects the org for HF infrastructure and router billing; router requests include
+`X-HF-Bill-To: my-org`. Grant `HF_TOKEN` the corresponding org Jobs/bucket/Space permissions,
+and the inference key org-scoped Inference Providers permission (`inference.serverless.write`).
+For `hf_jobs` servers, the inference key also needs org read access for the jobs proxy.
+Org membership and token permissions both need to allow the selected resources.
+
+Board placement is independent: a bare `BOARD_SPACE` always uses `HF_TOKEN`'s account.
+Choose `my-org/<unique-run-board>` explicitly if the board should live in the org too.
 
 Hugging Face documents router organization billing for Team and Enterprise organizations in
 its [Inference Providers billing guide](https://huggingface.co/docs/inference-providers/en/pricing#organization-billing).
@@ -34,7 +46,7 @@ plan. It makes billable inference requests.
 
 ## Bucket IDs
 
-Set `bucket_id` to a bare name (`flock-runs`) or a qualified ID (`HuggingFaceSwarms/flock-runs`), as
+Set `bucket_id` to a bare name (`flock-runs`) or a qualified ID (`your-username/flock-runs`), as
 in [huggingface_hub](https://huggingface.co/docs/huggingface_hub/guides/buckets).
 Bare names use the explicit namespace, else `HF_TOKEN`'s account. Qualified IDs select storage
 independently of billing. `hf://buckets/...` URLs and user-provided path prefixes are refused
@@ -57,7 +69,7 @@ bucket create/write credentials even with `FLOCK_STATE_URL=` (checkpointing off)
 `python -m flock.controller.localrun` command uses the same bucket preparation as `flock launch`.
 
 A manually org-deployed job controller refuses a blank namespace when `HF_TOKEN` belongs
-to another account. For a controller in `HuggingFaceSwarms`, set `namespace: HuggingFaceSwarms`
+to another account. For a controller in `my-org`, set `namespace: my-org`
 explicitly so worker placement and billing use that org. Matching-account controllers accept
 an unset namespace, keep it empty in the stored spec and send no router bill-to header.
 See [job deployment](deploy-job.md).

@@ -213,14 +213,14 @@ def test_the_mini_swarm_spec_compiles(monkeypatch, pins):
         read_spec(str(EXPERIMENTS / "mini-swarm" / "spec.yaml"))
     swarm = experiment_spec(monkeypatch, pins, "mini-swarm",
                             "d0e1fee0f1036a80d5400d67f7fad9143668ba94",
-                            {"BOARD_SPACE": "HuggingFaceSwarms/mini-swarm-test"})
+                            {"BOARD_SPACE": "mini-swarm-test"})
     assert (swarm.swarm, swarm.compute.kind, list(swarm.types)) == ("mini-swarm-1", "local", ["agent"])
-    assert swarm.namespace == "HuggingFaceSwarms"
+    assert swarm.namespace == ""
     ts = swarm.types["agent"]
     assert (ts.replicas, ts.agents_per_worker) == (3, 3)  # one worker: it deploys the board
     assert ts.harbor.resources == {"message_board": {
-        "space_id": "HuggingFaceSwarms/mini-swarm-test", "private": False}}
-    assert ts.resolved_model.headers == {"X-HF-Bill-To": "HuggingFaceSwarms"}
+        "space_id": "mini-swarm-test", "private": False}}
+    assert ts.resolved_model.headers == {}
     assert swarm.naming == "consecutive-id" and ts.harbor.names() == ["agent-001", "agent-002", "agent-003"]
     assert ts.harbor.config["tools"] == ["message_board.*"]
     assert ts.harbor.config["environment"] == {"backend": "hf-sandbox", "flavor": "cpu-basic"}
@@ -250,6 +250,7 @@ def test_the_escape_room_spec_compiles(monkeypatch, pins):
     assert swarm.naming == "words" and ts.harbor.config["environment"]["backend"] == "docker"
     assert ts.harbor.team.startswith("Solve the escape-room puzzle")
     assert ts.harbor.config["tools"] == ["message_board.*"] and ts.secrets == []
+    assert ts.resolved_model.inference.key_env == "HF_INFERENCE_TOKEN"
 
 
 def test_serve_takes_the_run_dirs_environment(tmp_path, monkeypatch, pins):
@@ -264,7 +265,7 @@ def test_serve_takes_the_run_dirs_environment(tmp_path, monkeypatch, pins):
     run = tmp_path / "run"
     run.mkdir()
     (run / "run.env").write_text("RUN_NAME=from-run-env\nHF_TOKEN=run-env-token\n"
-                                "BOARD_SPACE=HuggingFaceSwarms/from-run-env\n")
+                                "BOARD_SPACE=from-run-env\n")
     tokens = []
 
     def starter(env):

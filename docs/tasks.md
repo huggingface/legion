@@ -117,16 +117,18 @@ Jobs permission, and create/write access to the board's Space and storage bucket
 `TEAM=agg-p07-n08 N=8`). The dataset README covers the cluster, the board rules, the scaling
 sweep and the metrics.
 
-The example sets `namespace: HuggingFaceSwarms` for sandbox and router billing. Grant the
-tokens the [org permissions](billing.md#tokens-for-an-organization). `BOARD_SPACE` is required:
-choose a fresh qualified `HuggingFaceSwarms/<unique-run-board>` for each independent run.
+The example omits `namespace`: sandboxes use `HF_TOKEN`'s personal account and router calls
+use the inference key's default billing account with no bill-to header. `BOARD_SPACE` is
+required: choose a fresh bare name for each independent run; it resolves under `HF_TOKEN`'s
+account. Dataset read access to `HuggingFaceSwarms/s3-aggregation` is separate from personal
+Jobs, Space and bucket permissions. See [billing and storage](billing.md).
 The default local workers do not need a run bucket. For HF Jobs or Slurm workers, set
-`bucket_id: flock-runs`: launch qualifies it as `HuggingFaceSwarms/flock-runs` and creates
+`bucket_id: flock-runs`: launch qualifies it as `<your-username>/flock-runs` and creates
 the bucket private if missing. A qualified ID selects storage explicitly. Use
 `[namespace/]name`, without a bucket URL or path prefix.
 
 ```sh
-export BOARD_SPACE="HuggingFaceSwarms/s3-aggregation-$(uv run python -c 'import uuid; print(uuid.uuid4().hex[:12])')"
+export BOARD_SPACE="s3-aggregation-$(uv run python -c 'import uuid; print(uuid.uuid4().hex[:12])')"
 uv run flock launch experiments/s3-aggregation/spec.yaml
 ```
 
@@ -148,15 +150,16 @@ the run. The example includes a protocol hint in its team text (`team.md`, the s
 `team_file`), so each agent reads the board and claims a door before it goes through one; remove
 `team_file` for the neutral condition of the earlier sweep. It needs the dataset on the shared
 disk for its `registries.conf` (podman pulls Docker Hub images through `mirror.gcr.io`),
-`HF_TOKEN` with dataset read and bucket create/write access in `HuggingFaceSwarms`,
-`HF_INFERENCE_TOKEN` with Inference Providers permission on that org for the agents, and
+`HF_TOKEN` with read access to `HuggingFaceSwarms/s3-maze` and bucket create/write access in
+your personal account, a separate `HF_INFERENCE_TOKEN` with personal Inference Providers
+permission for the agents, and
 the Git credential helper for a private task repo ([Slurm](slurm.md), "Containers").
 
-The example sets `namespace: HuggingFaceSwarms` for router billing. Set `BUCKET_ID` to a
-bare name such as `flock-runs` (resolved to `HuggingFaceSwarms/flock-runs`) or a qualified
-`HuggingFaceSwarms/<name>`. Launch creates a missing bucket private and retains an existing
-bucket's visibility. See [billing and storage](billing.md) for token permissions and how
-omitting `namespace` instead uses the tokens' own accounts.
+The example omits `namespace`, so router calls use the inference key's default personal
+billing account with no org bill-to header. Set `BUCKET_ID` to a bare name such as
+`flock-runs` (resolved under `HF_TOKEN`'s account) or a qualified `<your-username>/<name>`.
+Launch creates a missing bucket private and retains an existing bucket's visibility.
+See [billing and storage](billing.md) for personal permissions and optional org billing.
 
 ```sh
 DS=/fsx/$USER/s3-maze
