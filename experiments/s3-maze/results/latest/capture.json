@@ -1,0 +1,54 @@
+{
+  "evaluated_flock_revision": "03ec1dd9be659bde3751d37e393d014cdd8e5061",
+  "evaluated_dataset_revision": "3b6c363d92626bd4d97a7ca89964fb850982d9ab",
+  "render_slurm_job": "432547",
+  "collaboration": {
+    "instructions": "Before you go through a door, read the board and post which door you are taking; pick one no teammate has claimed; post when a branch is a dead end.",
+    "max_channels": 1,
+    "channels": [
+      "general"
+    ],
+    "wake": [
+      "mention",
+      "thread"
+    ],
+    "agent_dms": false
+  },
+  "enable_thinking": false,
+  "raw_grid_to_display_model": {
+    "27b-hint": "Qwen3.5-27B",
+    "2b-hint": "Qwen3.5-2B"
+  },
+  "source_row_files_sha256": {
+    "27b-hint/rows.jsonl": "ac77e3255e39f02d2f302445541a1d5ce6f0e3da8ccadfd7bb01d40ac3a21bd5",
+    "2b-hint/rows.jsonl": "0b9a51a7b3df3fe1ac29bc370750af5d5753db8043668ef6357fb040d705dd37",
+    "27b-hint/rows-discarded.jsonl": "928b1194108bb121031e3f39acd47586c9272716e3a5c495730fba595ca4b90e",
+    "2b-hint/rows-discarded.jsonl": "4e8e29a48144f918b91ddbfbd28c4c6ecbb1caab033485a83f1aed8c3ed78894"
+  },
+  "discard_accounting": {
+    "27b-hint": {
+      "discard_records": 15,
+      "distinct_runs_in_discard_log": 15,
+      "repeated_discard_records": 0,
+      "eventually_accepted_runs": [],
+      "distinct_set_aside_runs": 15
+    },
+    "2b-hint": {
+      "discard_records": 251,
+      "distinct_runs_in_discard_log": 186,
+      "repeated_discard_records": 65,
+      "eventually_accepted_runs": [],
+      "distinct_set_aside_runs": 186
+    }
+  },
+  "output_source": "Harbor result.json agent_result.n_output_tokens; exact per-Trial/agent/team checks",
+  "missing_output_policy": "abort unless hashed pre-execution setup failure proves zero; never exclude teams",
+  "zero_output_policy": "include explicit zeros; abort only if a whole group's mean is zero",
+  "at": "2026-11-18T17:26:57.507333+01:00",
+  "audited_teams": 295,
+  "audited_trials": 1646,
+  "proven_pre_execution_zero_trials": 62,
+  "zero_output_teams": [],
+  "cohort_sha256": "7af43d5ded94bb6210ff2407a17789dbaf5a04575d990dbb869a90a26d984412",
+  "token_audit_sha256": "6ff147a264b18a5ed91d96a7964f84e4de9fb547b0c5963837a58ecb3396f190"
+}
