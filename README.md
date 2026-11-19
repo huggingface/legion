@@ -9,6 +9,10 @@ Run from a laptop, on Hugging Face Jobs, or through Slurm. Use Hugging Face
 Inference Providers or your own OpenAI-compatible model endpoint, and add tools
 as Python functions. Pi is currently the supported agent harness.
 
+![Flock coordinates Harbor agent trials, task environments, inference, and shared resources; the controller tracks state and health.](docs/architecture.svg)
+
+[Explore the architecture and API](docs/design.md).
+
 ## Installation
 
 You need Python 3.12+, [uv](https://docs.astral.sh/uv/), and Git:
