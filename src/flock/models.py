@@ -15,7 +15,7 @@ from typing import Any, Literal, NamedTuple
 from urllib.parse import urlsplit
 
 import yaml
-from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
+from pydantic import BaseModel, Field, JsonValue, field_validator, model_serializer, model_validator
 
 from flock.registry import COMPUTE, HARNESSES
 from flock.world.protocol import TOOL_NAME_RE as WORLD_TOOL_RE
@@ -251,6 +251,17 @@ class Inference(BaseModel):
     metrics: bool = False
     # Pi's `--thinking` level; None: Pi's default
     reasoning_effort: Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"] | None = None
+    # Provider-specific Chat Completions fields, shared by Pi and preflight.
+    extra_body: dict[str, JsonValue] = Field(default_factory=dict)
+
+    @field_validator("extra_body")
+    @classmethod
+    def _extra_body(cls, v: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        owned = {"model", "messages", "tools", "stream", "stream_options", "max_tokens",
+                 "max_completion_tokens"}
+        if reserved := owned.intersection(v):
+            raise ValueError(f"extra_body cannot override harness fields: {', '.join(sorted(reserved))}")
+        return v
 
     @field_validator("urls", mode="before")
     @classmethod

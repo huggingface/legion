@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 import pytest
 from harbor.trial.hooks import TrialEvent
 
-from flock.harbor.harnesses.pi import HF_CHAT_EXTENSION, PI_CONFIG_DIR, attach_pi_setup
+from flock.harbor.harnesses.pi import PI_CONFIG_DIR, attach_pi_setup, request_extension
 from flock.models import Inference
 
 
@@ -27,8 +27,8 @@ async def test_hf_reasoning_installs_extension_once():
     trial.agent.exec_as_agent.assert_awaited_once()
     args, kwargs = trial.agent.exec_as_agent.call_args
     assert args[0] is trial.agent_environment
-    assert f"{PI_CONFIG_DIR}/extensions/flock-hf.js" in args[1]
-    assert HF_CHAT_EXTENSION in args[1]
+    assert f"{PI_CONFIG_DIR}/extensions/flock-request.js" in args[1]
+    assert request_extension(Inference(reasoning_effort="low")) in args[1]
     assert kwargs["timeout_sec"] == 30
 
 

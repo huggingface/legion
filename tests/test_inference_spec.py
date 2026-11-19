@@ -8,6 +8,7 @@ from collections import Counter
 import pytest
 from pydantic import ValidationError
 
+from flock.controller.preflight import chat_request
 from flock.models import HF_ROUTER_URL, Inference, SwarmSpec, TypeSpec
 
 from .conftest import HB
@@ -89,9 +90,24 @@ def test_concurrent_runs_spread_their_same_named_agents():
     ({"max_working": 0}, "greater than or equal to 1"),
     ({"hf_router": {"provider": "deepinfra:fast"}}, "must be a name"),
     ({"base_url": "http://a/v1"}, "Extra inputs are not permitted"),
+    ({"extra_body": {"messages": []}}, "cannot override harness fields"),
+    ({"extra_body": {"max_tokens": 1}}, "cannot override harness fields"),
 ])
 def test_block_validation(inference, needle):
     assert needle in err({"a": {**HB, "model": "m"}}, inference)
+
+
+@pytest.mark.parametrize("extra_body", [
+    {"chat_template_kwargs": {"enable_thinking": False}},
+    {"reasoning": {"enabled": False}},
+])
+def test_provider_request_fields_survive_pinning_and_reach_preflight(extra_body):
+    s = spec({"a": {**HB, "model": "m"}}, {"reasoning_effort": "off", "extra_body": extra_body})
+    r = SwarmSpec.model_validate_json(s.model_dump_json()).types["a"].resolved_model
+    assert r.inference.extra_body == extra_body
+    body = chat_request(r)
+    assert all(body[key] == value for key, value in extra_body.items())
+    assert body["model"] == "m" and body["messages"] and body["tools"]
 
 
 def test_a_type_runs_on_its_own_block():

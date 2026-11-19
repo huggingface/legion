@@ -56,6 +56,7 @@ def chat_request(r: ResolvedModel) -> dict[str, Any]:
         "tool_choice": "auto",
         "temperature": 0,
         "max_tokens": MAX_OUTPUT_TOKENS,
+        **r.inference.extra_body,
     }
 
 

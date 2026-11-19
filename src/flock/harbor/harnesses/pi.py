@@ -1,4 +1,4 @@
-"""Compatibility setup for native Pi against Hugging Face's chat API."""
+"""Provider request setup for native Pi."""
 
 import json
 import shlex
@@ -6,27 +6,35 @@ from pathlib import Path
 
 from harbor.trial.hooks import TrialEvent
 
-# Harbor 0.25 writes models.json after AGENT_START and does not expose Pi's
-# supportsDeveloperRole setting. Use Pi's native extension hook instead.
+# Harbor 0.25 writes models.json after AGENT_START. Pi's request hook applies these settings
+# in both the worker's long-lived Trials and the direct Harbor launcher.
 PI_CONFIG_DIR = "/tmp/harbor-pi-agent"
-HF_CHAT_EXTENSION = """export default function (pi) {
+
+
+def request_extension(inference):
+    """The native Pi request hook, or None when no provider adjustment is needed."""
+    fix_roles = inference.hf_router is not None and inference.reasoning_effort not in (None, "off")
+    if not fix_roles and not inference.extra_body:
+        return None
+    return """export default function (pi) {
   pi.on("before_provider_request", (event) => {
-    const payload = event.payload;
-    if (!Array.isArray(payload?.messages)) return;
-    return {
-      ...payload,
-      messages: payload.messages.map((message) =>
+    const payload = { ...event.payload, ...__EXTRA_BODY__ };
+    if (__FIX_ROLES__ && Array.isArray(payload.messages)) {
+      payload.messages = payload.messages.map((message) =>
         message.role === "developer" ? { ...message, role: "system" } : message
-      ),
-    };
+      );
+    }
+    return payload;
   });
 }
-"""
+""".replace("__FIX_ROLES__", str(fix_roles).lower()).replace(
+        "__EXTRA_BODY__", json.dumps(inference.extra_body))
 
 
 def attach_pi_setup(trial, inference):
     """`inference`: the agent's block (flock.models.Inference)."""
-    if inference.hf_router is None or inference.reasoning_effort in (None, "off"):
+    extension = request_extension(inference)
+    if extension is None:
         return
 
     prepared = False
@@ -38,8 +46,8 @@ def attach_pi_setup(trial, inference):
         directory = f"{PI_CONFIG_DIR}/extensions"
         await trial.agent.exec_as_agent(
             trial.agent_environment,
-            f"mkdir -p {directory} && printf %s {shlex.quote(HF_CHAT_EXTENSION)} "
-            f"> {directory}/flock-hf.js",
+            f"mkdir -p {directory} && printf %s {shlex.quote(extension)} "
+            f"> {directory}/flock-request.js",
             timeout_sec=30,
         )
         prepared = True

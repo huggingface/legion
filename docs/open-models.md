@@ -369,7 +369,32 @@ tools and the resources; `FLOCK_TOKEN` and the workers' `HF_TOKEN` stay in the w
 
 `inference.reasoning_effort` is Pi's `--thinking` level. Whether a server honours it is up to
 the server; Qwen3 on vLLM turns thinking off through the chat template, not the effort, so set
-such defaults on the server (vLLM can set default chat-template arguments at startup).
+the request's chat-template arguments explicitly:
+
+```yaml
+inference:
+  urls: [http://localhost:8000/v1]
+  reasoning_effort: off
+  extra_body:
+    chat_template_kwargs:
+      enable_thinking: false
+```
+
+`extra_body` is passed to both Pi and the preflight requests. For HF/Together's hybrid models,
+use `extra_body.reasoning.enabled: false` instead of `chat_template_kwargs`:
+
+```yaml
+inference:
+  hf_router:
+    provider: together
+  reasoning_effort: off
+  extra_body:
+    reasoning:
+      enabled: false
+```
+
+vLLM can also set default chat-template arguments at startup. Check a real response when
+choosing a model/provider: request settings alone do not establish which mode it used.
 
 ## Cost
 

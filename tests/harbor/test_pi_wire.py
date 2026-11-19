@@ -8,16 +8,22 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from flock.harbor.harnesses.pi import HF_CHAT_EXTENSION
+from flock.harbor.harnesses.pi import request_extension
+from flock.models import Inference
 
 
 @pytest.mark.skipif(
     not os.environ.get("FLOCK_PI_CLI"), reason="native Pi not configured"
 )
 @pytest.mark.parametrize(
-    "extension, expected_role", [(False, "developer"), (True, "system")]
+    "extension, expected_role, thinking, extra_body", [
+        (False, "developer", "low", {}),
+        (True, "system", "low", {}),
+        (True, "system", "off", {"chat_template_kwargs": {"enable_thinking": False}}),
+        (True, "system", "off", {"reasoning": {"enabled": False}}),
+    ]
 )
-def test_native_pi_reasoning_request(tmp_path, extension, expected_role):
+def test_native_pi_reasoning_request(tmp_path, extension, expected_role, thinking, extra_body):
     requests = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -60,7 +66,7 @@ def test_native_pi_reasoning_request(tmp_path, extension, expected_role):
                             "baseUrl": f"http://127.0.0.1:{server.server_port}/v1",
                             "apiKey": "fake-key",
                             "api": "openai-completions",
-                            "models": [{"id": "test-model", "reasoning": True}],
+                            "models": [{"id": "test-model", "reasoning": thinking != "off"}],
                         }
                     }
                 }
@@ -69,7 +75,8 @@ def test_native_pi_reasoning_request(tmp_path, extension, expected_role):
         if extension:
             extensions = config / "extensions"
             extensions.mkdir()
-            (extensions / "flock-hf.js").write_text(HF_CHAT_EXTENSION)
+            (extensions / "flock-request.js").write_text(request_extension(
+                Inference(reasoning_effort=thinking, extra_body=extra_body)))
         result = subprocess.run(
             [
                 "node",
@@ -84,7 +91,7 @@ def test_native_pi_reasoning_request(tmp_path, extension, expected_role):
                 "--model",
                 "test-model",
                 "--thinking",
-                "low",
+                thinking,
                 "Reply OK.",
             ],
             cwd=tmp_path,
@@ -105,7 +112,9 @@ def test_native_pi_reasoning_request(tmp_path, extension, expected_role):
             "role": "user",
             "content": [{"type": "text", "text": "Reply OK."}],
         }
-        assert payload["reasoning_effort"] == "low"
+        if thinking == "low":
+            assert payload["reasoning_effort"] == "low"
+        assert all(payload[key] == value for key, value in extra_body.items())
         events = [
             json.loads(line)
             for line in result.stdout.splitlines()

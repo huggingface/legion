@@ -200,6 +200,10 @@ block's key goes into the type's job secrets, preflight probes each model with a
 type's workers (they hold the key, their Trials the endpoints and allowlist). How-to and
 fields: docs/open-models.md.
 
+`inference.extra_body` carries provider-specific Chat Completions fields into both Pi's
+request hook and the preflight requests. It cannot replace the harness's model,
+messages, tools, streaming settings or output-token limits.
+
 ### States
 
 | State | Meaning |
