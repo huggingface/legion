@@ -28,16 +28,8 @@ class ResolvedTask:
         }
 
 
-class ManyTasks(ValueError):
-    """The selector matched more than one task (pin_tasks may give them one to each agent)."""
-
-    def __init__(self, matched: int):
-        super().__init__(f"Task selector must match exactly one task; matched {matched}")
-        self.matched = matched
-
-
-async def _matches(settings: TaskSettings):
-    """(the pinned registry commit, the dataset, the matching tasks sorted by name)."""
+async def _dataset(settings: TaskSettings):
+    """(the pinned registry commit, the dataset, its tasks)."""
     repo = resolve_repo_source(settings.repo)
     repo.ref = settings.revision
     repo.resolved_sha = (
@@ -49,11 +41,15 @@ async def _matches(settings: TaskSettings):
     # Pin the repository before discovery; registry entries may pin another revision.
     commit = await client._get_resolved_sha()
     metadata = await client.get_dataset_metadata(settings.dataset or "")
-    matches = sorted(
-        (task for task in metadata.task_ids if fnmatchcase(task.get_name(), settings.selector)),
-        key=lambda task: task.get_name(),
-    )
-    return commit, settings.dataset or f"{metadata.name}@{metadata.version}", matches
+    return commit, settings.dataset or f"{metadata.name}@{metadata.version}", metadata.task_ids
+
+
+def _one(tasks, selector: str, hint: str = ""):
+    matches = [task for task in tasks if fnmatchcase(task.get_name(), selector)]
+    if len(matches) != 1:
+        raise ValueError(f"Task selector {selector!r} must match exactly one task; matched "
+                         f"{len(matches)}{hint if len(matches) > 1 else ''}")
+    return matches[0]
 
 
 async def _pin(task, commit: str, dataset: str) -> ResolvedTask:
@@ -72,36 +68,32 @@ async def _pin(task, commit: str, dataset: str) -> ResolvedTask:
 
 
 async def resolve_task(settings: TaskSettings) -> ResolvedTask:
-    commit, dataset, matches = await _matches(settings)
-    if len(matches) > 1:
-        raise ManyTasks(len(matches))
-    if len(matches) != 1:
-        raise ValueError(
-            f"Task selector must match exactly one task; matched {len(matches)}"
-        )
-    return await _pin(matches[0], commit, dataset)
-
-
-async def resolve_tasks(settings: TaskSettings) -> list[ResolvedTask]:
-    """Every task the selector matches, sorted by name, each pinned."""
-    commit, dataset, matches = await _matches(settings)
-    return [await _pin(task, commit, dataset) for task in matches]
+    """A string selector's one task, for every agent."""
+    if not isinstance(settings.selector, str):
+        raise ValueError("a list of selectors (one task per agent) needs `flock launch`")
+    commit, dataset, tasks = await _dataset(settings)
+    hint = " (one task per agent: list one selector per agent)"
+    return await _pin(_one(tasks, settings.selector, hint), commit, dataset)
 
 
 async def pin_tasks(settings: TaskSettings, names: list[str]) -> dict:
-    """The task manifest a spec runs: its one task's, or, when the selector matches one task per
-    agent (`names`: `naming: consecutive-id` and one type, in order), the first's with `tasks`,
-    each agent's own: agent k runs the k-th match by name, and no other agent gets it."""
-    try:
+    """The task manifest a spec runs: a string selector's one task, or, for a list, the first's
+    with `tasks`, each agent's own by position: names[k] (`naming: consecutive-id` and one type,
+    else empty) runs the task the k-th entry matches."""
+    if isinstance(settings.selector, str):
         return (await resolve_task(settings)).manifest()
-    except ManyTasks as e:
-        if e.matched != len(names):
-            raise ValueError(f"{e}: one task per agent needs naming: consecutive-id, one type "
-                             f"and agents.count: {e.matched}") from None
-    tasks = await resolve_tasks(settings)
-    manifest = tasks[0].manifest()
+    if len(settings.selector) != len(names):
+        raise ValueError(f"a list of {len(settings.selector)} selectors gives one task per agent: "
+                         f"it needs naming: consecutive-id, no roles and agents.count: "
+                         f"{len(settings.selector)}")
+    commit, dataset, tasks = await _dataset(settings)
+    picked = [_one(tasks, selector) for selector in settings.selector]
+    if len({task.get_name() for task in picked}) < len(picked):
+        raise ValueError("two selectors match the same task: each agent needs its own")
+    pinned = [await _pin(task, commit, dataset) for task in picked]
+    manifest = pinned[0].manifest()
     manifest["tasks"] = {name: task.manifest()["task"]
-                         for name, task in zip(names, tasks, strict=True)}
+                         for name, task in zip(names, pinned, strict=True)}
     return manifest
 
 

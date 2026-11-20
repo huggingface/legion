@@ -117,7 +117,7 @@ def harbor_spec(path: Path, env_files=()) -> SwarmSpec:
 
     env = {**os.environ, **{k: v for f in env_files for k, v in read_env_file(f).items()}}
     spec = Spec.load(path, env)
-    # a selector may match one task per agent: consecutive names, one type (sources.pin_tasks)
+    # a list selector gives one task per agent: consecutive names, one type (sources.pin_tasks)
     one_type = spec.naming == "consecutive-id" and not spec.agents.roles
     names = list(spec.agents.roster()) if one_type else []
     try:

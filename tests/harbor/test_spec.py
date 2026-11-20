@@ -558,7 +558,7 @@ def test_one_task_per_agent_refuses_a_resize_in_a_run(tmp_path):
     def swarm(count):
         (tmp_path / "spec.yaml").write_text(
             "name: crew\nmodel: m\nnaming: consecutive-id\ntask:\n"
-            "  repo: https://huggingface.co/datasets/a/b\n  selector: team-s*\n"
+            "  repo: https://huggingface.co/datasets/a/b\n  selector: [team-s01, team-s02]\n"
             f"agents:\n  count: {count}\n")
         tasks = {f"agent-{k:03d}": {**TASK["task"], "path": f"tasks/team-s{k:02d}"}
                  for k in range(1, count + 1)}

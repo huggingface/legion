@@ -233,9 +233,9 @@ async def test_a_trials_grading_and_the_exports_outlive_the_worker(world, tmp_pa
 
 
 async def test_one_task_per_agent_gives_each_trial_only_its_own(world, tmp_path, monkeypatch):
-    """A selector matching agents.count tasks with naming: consecutive-id (sources.pin_tasks):
-    sorted by name, agent k runs the k-th, the worker downloads them at once, and each agent's
-    Trial gets only its own task. A count that doesn't match is refused."""
+    """A list selector with naming: consecutive-id (sources.pin_tasks): agent k runs the task
+    the k-th entry matches, in the list's order, the worker downloads them at once, and each
+    agent's Trial gets only its own task. A list that isn't one entry per agent is refused."""
     from harbor.models.registry import DatasetMetadata
     from harbor.models.task.id import GitTaskId
 
@@ -255,12 +255,12 @@ async def test_one_task_per_agent_gives_each_trial_only_its_own(world, tmp_path,
 
     monkeypatch.setattr(sources.GitRepoRegistryClient, "get_dataset_metadata", metadata)
     monkeypatch.setattr(sources, "download_tasks", download_tasks)
-    text = SPEC.replace("MOUNT", "false").replace("regex-log", "team-*")
+    text = SPEC.replace("MOUNT", "false").replace("regex-log", "[team-s02, 'team-s0[3]', team-s01]")
     (tmp_path / "spec.yaml").write_text(text.replace(
         "agents: {count: 20}", "naming: consecutive-id\nagents:\n  count: 3").replace(
         "workers: {agents_per_worker: 20}", "workers:\n  agents_per_worker: 3"))
     spec = Spec.load(tmp_path / "spec.yaml", env={})
-    with pytest.raises(ValueError, match="one task per agent needs"):
+    with pytest.raises(ValueError, match="no roles and agents.count: 3"):
         await sources.pin_tasks(spec.task, ["agent-001", "agent-002"])
     task = await sources.pin_tasks(spec.task, list(spec.agents.roster()))
     bundle = build_tool_bundle(spec.tools_dir, spec.tools, tmp_path / "launcher-tools.tar.gz")
@@ -268,11 +268,11 @@ async def test_one_task_per_agent_gives_each_trial_only_its_own(world, tmp_path,
     host = HarborHost(tmp_path / "work" / "_harbor" / "_worker")
     adapters = [make_adapter(tmp_path / "work" / n, n, ts, host=host) for n in ts.harbor.names()]
     await asyncio.gather(*(a.start(a.workdir, None, a.spec) for a in adapters))
-    assert downloads == [["team-s01", "team-s02", "team-s03"]]
+    assert downloads == [["team-s02", "team-s03", "team-s01"]]
     assert len(world.trials) == 3 and [a.agent for a in adapters] == [
         "agent-001", "agent-002", "agent-003"]
-    for a in adapters:  # agent-00k: the k-th task, and no other
-        assert a.trial.config.task.path.name == f"team-s{a.agent[-2:]}"
+    for a, slot in zip(adapters, ("02", "03", "01"), strict=True):  # the k-th entry's, only
+        assert a.trial.config.task.path.name == f"team-s{slot}"
     await asyncio.gather(*(a.close() for a in adapters))
     await host.close()
 
