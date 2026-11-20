@@ -21,10 +21,14 @@ class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
+Selector = Annotated[str, Field(min_length=1)]
+
+
 class TaskSettings(Settings):
     repo: str
     dataset: str | None = None
-    selector: str = Field(min_length=1)
+    # one task for every agent, or a list: one per agent by position (sources.pin_tasks)
+    selector: Selector | Annotated[list[Selector], Field(min_length=1)]
     revision: str = Field(default="main", min_length=1)
 
     @field_validator("repo")

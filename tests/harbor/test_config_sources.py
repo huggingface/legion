@@ -83,7 +83,42 @@ async def test_selector_must_match_once(monkeypatch, count, dataset):
         )
 
     monkeypatch.setattr(sources.GitRepoRegistryClient, "get_dataset_metadata", metadata)
-    with pytest.raises(ValueError, match="exactly one"):
+    with pytest.raises(ValueError, match="exactly one") as e:
+        await resolve_task(task)
+    assert ("list one selector per agent" in str(e.value)) == (count > 1)
+
+
+async def test_a_list_selector_gives_each_agent_its_own_task_by_position(monkeypatch):
+    """A string glob matching one task is every agent's; a list gives names[k] the task its
+    k-th entry matches, in the list's order: one entry per agent, each matching one task."""
+    from flock.harbor import sources
+
+    task = Config.load(EXAMPLES / "pi-hf.yaml").task
+
+    async def metadata(self, name):
+        return DatasetMetadata(name=name, task_ids=[
+            GitTaskId(git_url=task.repo, git_commit_id="a" * 40, path=Path(f"tasks/team-s{k}"))
+            for k in (1, 2, 10)])
+
+    monkeypatch.setattr(sources.GitRepoRegistryClient, "get_dataset_metadata", metadata)
+    names = ["agent-001", "agent-002", "agent-003"]
+    task.selector = "team-s1?"
+    assert "tasks" not in await sources.pin_tasks(task, names)
+    task.selector = ["team-s10", "team-s1", "team-s2*"]
+    pinned = await sources.pin_tasks(task, names)
+    assert {n: Path(t["path"]).name for n, t in pinned["tasks"].items()} == {
+        "agent-001": "team-s10", "agent-002": "team-s1", "agent-003": "team-s2"}
+    for selector, agents, error in [
+        (["team-s1", "team-s2"], names, "agents.count: 2"),  # one entry per agent
+        (["team-s1", "team-s2", "team-s10"], [], "naming: consecutive-id"),  # words or roles
+        (["team-s1", "team-s2", "team-s3"], names, "'team-s3' must match exactly one"),
+        (["team-s1", "team-s2", "team-s*"], names, "'team-s\\*' must match exactly one"),
+        (["team-s1", "team-s2", "team-s2"], names, "each agent needs its own"),
+    ]:
+        task.selector = selector
+        with pytest.raises(ValueError, match=error):
+            await sources.pin_tasks(task, agents)
+    with pytest.raises(ValueError, match="one task per agent"):
         await resolve_task(task)
 
 

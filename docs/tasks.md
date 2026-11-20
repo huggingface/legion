@@ -70,14 +70,28 @@ task:
 
 Without `dataset`, Harbor discovers tasks in the repository. For a Harbor registry,
 set `dataset: name@version`; registry entries may point to their own task commits.
-`selector` matches task names and must select exactly one task. Pin `revision` to
-a commit to make the selection reproducible.
+`selector` matches task names, by exact name or glob, and must select exactly one
+task: every agent runs it. Pin `revision` to a commit to make the selection reproducible.
 
-To give each agent its own task, e.g. private information per agent, use a glob that
-matches exactly `agents.count` tasks, with `naming: consecutive-id` and no roles. The
-matches are sorted by name and `agent-00k` runs the k-th, so zero-pad any numbers in
-the names. The team stays one type on one worker and board. Each agent's Trial gets
-only its own task (instruction, files and tests).
+To give each agent its own task, make `selector` a list with one entry per agent. Each
+entry must match exactly one task, and the first agent (`agent-001`) runs the first
+entry's, `agent-002` the second's, and so on, in the list's order. This needs
+`naming: consecutive-id`, `agents.count` equal to the list's length, and no roles. Use it
+for private information per agent, or to run a few tasks of a multi-task dataset side by
+side, one agent each:
+
+```yaml
+naming: consecutive-id
+agents:
+  count: 2
+task:
+  repo: https://huggingface.co/datasets/your-org/your-tasks
+  revision: <published-commit-sha>
+  selector: [task-a, task-b]  # agent-001 runs task-a, agent-002 task-b
+```
+
+The team stays one type on one worker and board, and can't be resized in a run. Each
+agent's Trial gets only its own task (instruction, files and tests).
 
 For a private dataset, the process resolving and downloading the task needs Git
 credentials with read access. Configure your existing HF login for Git, for
@@ -110,11 +124,12 @@ adapts the information-aggregation task of [s³](https://arxiv.org/abs/2611.0861
 agents holds a private number, and the team must list them all in ascending order. A team has
 one task per slot, `agg-pPP-nNN-sKK`, whose instruction states that slot's number, and the
 [example](../experiments/s3-aggregation/spec.yaml) gives each agent its own: its selector
-`<team>-s*` matches the team's N tasks (see above). It runs one team on HF Sandboxes, with the
-board on a public Space chosen for that run. `HF_TOKEN` needs dataset read access,
-Jobs permission, and create/write access to the board's Space and storage bucket.
-`HF_INFERENCE_TOKEN` is the agents' inference key. `TEAM` and `N` pick another team (e.g.
-`TEAM=agg-p07-n08 N=8`). The dataset README covers the cluster, the board rules, the scaling
+lists the team's N slots, `<team>-s01` to `<team>-sNN` (see above). It runs one team on HF
+Sandboxes, with the board on a public Space chosen for that run. `HF_TOKEN` needs dataset read
+access, Jobs permission, and create/write access to the board's Space and storage bucket.
+`HF_INFERENCE_TOKEN` is the agents' inference key. `TEAM` picks another team of four (e.g.
+`TEAM=agg-p07-n04`); for another size, set `N` and list that many slots. The dataset README
+covers the cluster, the board rules, the scaling
 sweep and the metrics.
 
 The example omits `namespace`: sandboxes use `HF_TOKEN`'s personal account and router calls

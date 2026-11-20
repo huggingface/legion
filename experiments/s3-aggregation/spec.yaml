@@ -9,10 +9,14 @@ inference:
   api_key_env: HF_INFERENCE_TOKEN             # inference only: never the workers' HF_TOKEN
 task:
   repo: https://huggingface.co/datasets/HuggingFaceSwarms/s3-aggregation
-  selector: ${TEAM:-agg-p01-n04}-s*           # the team's N slots, sorted: one per agent
+  selector:                                   # the team's N slots: agent-00K runs the K-th
+    - ${TEAM:-agg-p01-n04}-s01
+    - ${TEAM:-agg-p01-n04}-s02
+    - ${TEAM:-agg-p01-n04}-s03
+    - ${TEAM:-agg-p01-n04}-s04
   revision: 37ffff15d9ae9bb56b3843ca196a1e4a35155fae
 agents:
-  count: ${N:-4}                              # TEAM's size
+  count: ${N:-4}                              # TEAM's size: one selector per agent
 resources:
   message_board:
     space_id: ${BOARD_SPACE}                 # required: unique bare name in HF_TOKEN's account, or namespace/name
