@@ -91,7 +91,10 @@ or commit them in the spec.
 - `environment.backend: hf-sandbox` needs a prebuilt public `docker_image` in the
   task configuration. Local mounts and multi-container Compose tasks are not
   supported. Use a Space or existing HTTP board rather than a local socket board.
-- HF Jobs workers use HF Sandboxes. Slurm workers use Podman or HF Sandboxes.
+- `environment.backend: e2b` runs each Trial in an [E2B](https://e2b.dev/) sandbox.
+  Export `E2B_API_KEY` where the workers run. As on hf-sandbox, there are no mounts
+  or local networks: use a Space or existing HTTP board.
+- HF Jobs workers use HF Sandboxes or E2B. Slurm workers use Podman or HF Sandboxes.
   `compute` chooses where workers run; `environment.backend` chooses where their
   task environments run.
 

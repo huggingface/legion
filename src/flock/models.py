@@ -1292,10 +1292,10 @@ class SwarmSpec(BaseModel):
             r, backend = ts.resolved_model, ts.harbor and ts.harbor.config.get("environment", {})
             backend = (backend or {}).get("backend")
             for url in (r.inference.urls or []) if r else []:
-                if (kind == "hf-jobs" or backend == "hf-sandbox") and private_url(url):
+                if (kind == "hf-jobs" or backend in ("hf-sandbox", "e2b")) and private_url(url):
                     raise ValueError(
                         f"{r.provider_name}.urls: {url} is this machine or a private network, "
-                        "which HF Sandboxes and HF Jobs workers cannot reach: serve the model at "
+                        "which sandboxes and HF Jobs workers cannot reach: serve the model at "
                         "a public URL")
                 if kind == "slurm" and loopback_url(url):
                     raise ValueError(

@@ -124,6 +124,7 @@ def test_a_type_runs_on_its_own_block():
 @pytest.mark.parametrize(("compute", "backend", "url", "needle"), [
     ("hf-jobs", "hf-sandbox", "http://localhost:8000/v1", "cannot reach"),
     ("local", "hf-sandbox", "http://10.53.0.7:8000/v1", "cannot reach"),
+    ("local", "e2b", "http://10.53.0.7:8000/v1", "cannot reach"),
     ("slurm", "podman", "http://127.0.0.1:8000/v1", "each worker's own node"),
 ])
 def test_agents_must_reach_the_servers(compute, backend, url, needle):

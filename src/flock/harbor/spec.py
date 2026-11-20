@@ -39,6 +39,8 @@ from flock.models import (
 from flock.world.protocol import ADMIN_TOKEN_ENV
 
 from .config import (
+    E2B_SETUP_S,
+    SANDBOXES,
     AgentSettings,
     Config,
     EnvironmentSettings,
@@ -146,7 +148,7 @@ class Agents(AgentSettings):
 
 
 class SpecLimits(Limits):
-    trial_hours: float = Field(default=23, gt=0)  # a new Trial after this; hf-sandbox caps at 24 h
+    trial_hours: float = Field(default=23, gt=0)  # a new Trial after this; sandboxes cap at 24 h
     budget_usd: float | None = Field(default=None, ge=0)  # the whole run
     alive: int | None = Field(default=None, ge=0, strict=True)  # agents not removed
     spawned_total: int | None = Field(default=None, ge=0, strict=True)
@@ -227,21 +229,23 @@ class Spec(Config):
             raise ValueError(
                 f"loop final.reserve_usd ({reserve:g}) is more than limits.budget_usd"
             )
-        for name, role in self.roles().items() if backend == "hf-sandbox" else ():
+        for name, role in self.roles().items() if backend in SANDBOXES else ():
             turn = ((role.workers and role.workers.turn_timeout) or self.workers.turn_timeout
                     or TypeSpec.model_fields["turn_timeout"].default)
-            if limits.trial_hours * 3600 + parse_duration(turn).total_seconds() >= 86400:
+            setup = E2B_SETUP_S if backend == "e2b" else 0  # in an e2b sandbox's lifetime
+            if limits.trial_hours * 3600 + parse_duration(turn).total_seconds() + setup >= 86400:
                 raise ValueError(
-                    f"hf-sandbox caps a sandbox at 24 h: limits.trial_hours plus {name}'s "
-                    f"turn_timeout ({turn}, a Trial's last turn) must stay below it"
+                    f"{backend} caps a sandbox at 24 h: limits.trial_hours plus {name}'s "
+                    f"turn_timeout ({turn}, a Trial's last turn)"
+                    f"{' and 10 min of setup' if setup else ''} must stay below it"
                 )
         if self.naming == "consecutive-id" and (
                 named := [n for n, r in self.roles().items() if r.name_prefix]):
             raise ValueError(f"agents.roles.{named[0]}.name_prefix needs naming: words "
                              "(consecutive-id names are agent-001, ...)")
-        if backend == "hf-sandbox" and "spawn" in self.resources:
+        if backend in SANDBOXES and "spawn" in self.resources:
             raise ValueError("resources.spawn needs a mount: use backend docker or podman")
-        if backend == "hf-sandbox" and (self.resources.get("message_board") or {}).get("rules"):
+        if backend in SANDBOXES and (self.resources.get("message_board") or {}).get("rules"):
             # no mounts, no rule proxy: the board runs its rules unenforced and warns
             self.resources["message_board"].setdefault("transport", "http")
         budgets = limits.budget_usd is not None or any(
@@ -253,10 +257,15 @@ class Spec(Config):
         for name, role in self.roles().items():
             if budgets and role.model not in (None, self.model) and role.pricing is None:
                 raise ValueError(f"agents.roles.{name} has its own model: budgets need its pricing")
-        if self.compute.kind == "hf-jobs" and backend != "hf-sandbox":
-            raise ValueError("compute hf-jobs cannot run containers: use backend hf-sandbox")
+        if self.compute.kind == "hf-jobs" and backend not in SANDBOXES:
+            raise ValueError("compute hf-jobs cannot run containers: use backend hf-sandbox or e2b")
         if self.compute.kind == "slurm" and backend == "docker":
             raise ValueError("compute slurm runs rootless: use backend podman or hf-sandbox")
+        if self.compute.kind == "slurm" and backend == "e2b":
+            # shortcut: the E2B client reads E2B_API_KEY from os.environ only, and a Slurm worker
+            # has it in FLOCK_WORKER_SECRETS_FILE; pass api_key from secret_env() to lift this
+            raise ValueError("compute slurm keeps E2B_API_KEY out of the worker's environment, "
+                             "where the E2B client reads it: use backend podman or hf-sandbox")
         return self
 
     @classmethod
@@ -311,7 +320,7 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
     )
     # the inference key goes into every agent's container: never the token a remote worker
     # syncs the bucket and starts sandboxes with
-    remote = spec.environment.backend == "hf-sandbox" or spec.compute.kind in ("slurm", "hf-jobs")
+    remote = spec.environment.backend in SANDBOXES or spec.compute.kind in ("slurm", "hf-jobs")
     # the blocks the roles run on: a role's own, else the run's (unused when every role has one)
     blocks = dict((f"agents.roles.{n}.inference", r.inference) if r.inference
                   else ("inference", spec.inference) for n, r in roles.items())
@@ -344,8 +353,12 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
                              "admin secret, never a worker's: name the world's agent secret "
                              "(its FLOCK_WORLD_TOKEN)")
     # besides the inference key (the provider's): what the workers read on their own host
-    secrets = resource_secrets(spec) + (["HF_TOKEN"] if spec.environment.backend == "hf-sandbox"
-                                        else [])  # sandboxes start with the worker's HF token
+    # sandboxes start with the worker's HF token (hf-sandbox) or E2B key (e2b); an HF Jobs
+    # worker needs the HF token for its bucket either way
+    backend = spec.environment.backend
+    secrets = resource_secrets(spec) + (
+        ["HF_TOKEN"] if backend == "hf-sandbox" or spec.compute.kind == "hf-jobs" else []) + (
+        ["E2B_API_KEY"] if backend == "e2b" else [])
     secrets = list(dict.fromkeys(secrets))  # a Space board's HF_TOKEN may be the sandboxes' too
     def lifetime(inference: Inference | None) -> Inference | None:
         """An `hf_jobs` block's `timeout` filled in: the job outlives the run by a margin."""

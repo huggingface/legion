@@ -57,6 +57,9 @@ def test_config_defaults_and_hf_sandbox_board(tmp_path, monkeypatch):
     data["environment"] = {"backend": "docker", "flavor": "cpu-basic"}
     with pytest.raises(ValidationError, match="only valid with hf-sandbox"):
         Config.model_validate(data)
+    data["environment"] = {"backend": "e2b"}  # also a remote VM
+    with pytest.raises(ValidationError, match="e2b can't reach a local board"):
+        Config.model_validate({**data, "resources": {"message_board": None}})
 
 
 @pytest.mark.parametrize("count", [0, 2])

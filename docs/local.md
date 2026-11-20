@@ -184,8 +184,8 @@ Different:
 7. **Logs are files.** `<run>/logs/<worker>.log` instead of `hf jobs logs`; `flock status`
    says so.
 8. **Task environments still apply.** Local workers run Harbor Trials using the spec's
-   `environment.backend`: Docker, Podman, or an HF Sandbox. Local worker placement does
-   not make an HF Sandbox run locally or remove its billing namespace.
+   `environment.backend`: Docker, Podman, an HF Sandbox, or E2B. Local worker placement
+   does not make an HF Sandbox run locally or remove its billing namespace.
 
 A worker process that exits is noticed on the next reconcile pass and relaunched after
 `compute.crash_backoff` (2 s locally; docs/live.md "Worker liveness").

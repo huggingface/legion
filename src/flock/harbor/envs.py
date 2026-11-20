@@ -2,13 +2,14 @@
 it for every Trial: `ENVIRONMENTS`)."""
 
 import asyncio
+import collections
 import contextvars
 import hashlib
 import re
 import shlex
 import uuid
 
-from harbor.environments import hf_sandbox
+from harbor.environments import e2b, hf_sandbox
 from harbor.environments.docker.docker import DockerEnvironment
 from harbor.environments.podman import PodmanEnvironment
 from harbor.environments.tar_transfer import pack_dir_to_bytes
@@ -129,5 +130,22 @@ class HFSandbox(hf_sandbox.HFSandboxEnvironment):
                                f"{result.stderr or result.stdout}")
 
 
+_E2B_BUILDS = collections.defaultdict(asyncio.Lock)  # template -> lock, in this worker
+
+
+class E2B(e2b.E2BEnvironment):
+    """Harbor 0.25.0's E2B, whose Trials of one task build its template once. Each Trial that
+    finds no template builds it, and E2B cancels a build when another of the same template
+    starts ("build was cancelled"); a sandbox started before the build ends gets a 404."""
+    async def start(self, force_build: bool) -> None:
+        # shortcut: one worker's Trials wait for each other; workers that start one new task's
+        # Trials at once still race (prebuild the template, or lock on E2B, if that matters)
+        async with _E2B_BUILDS[self._template_name]:
+            if force_build or not await self._does_template_exist():
+                await self._create_template()
+        await super().start(force_build=False)
+
+
 ENVIRONMENTS = {"docker": "flock.harbor.envs:Docker", "podman": "flock.harbor.envs:Podman",
-                "hf-sandbox": "flock.harbor.envs:HFSandbox"}  # backend -> import_path
+                "hf-sandbox": "flock.harbor.envs:HFSandbox",
+                "e2b": "flock.harbor.envs:E2B"}  # backend -> import_path

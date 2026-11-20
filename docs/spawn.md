@@ -278,7 +278,7 @@ limits:
   `spawn.status`, so a child reports to its parent (`spawn.status` names it) with `spawn.prompt`.
 - **Children** are Harbor agents of the child role, placed and started by the controller as
   above, one Trial each.
-- **Backends:** docker and podman. `hf-sandbox` has no mounts: `resources.spawn` is refused there.
+- **Backends:** docker and podman. `hf-sandbox` and `e2b` have no mounts: `resources.spawn` is refused there.
 
 ## Not yet
 

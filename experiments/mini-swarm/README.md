@@ -71,6 +71,8 @@ board newly created for this run. Leave pre-existing and shared boards in place.
 with the agents in rootless podman and a local board: docs/open-models.md has the recipes.
 Its model endpoint's billing is independent of the HF namespace.
 
+Other places the agents can run (Docker, Podman, E2B): [../README.md](../README.md#where-agents-run).
+
 ## On a vLLM server flock starts: `hf-jobs.yaml`
 
 The same swarm with the same model, served by vLLM on one HF Jobs `h200` instead of the HF

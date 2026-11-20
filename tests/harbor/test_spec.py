@@ -599,3 +599,22 @@ async def test_the_controller_refuses_a_naming_change_in_a_running_swarm(tmp_pat
     words = swarm.model_copy(update={"naming": "words"})
     r = await client.put("/swarms/crew", json=words.model_dump(mode="json"))
     assert r.status_code == 400 and "names never change in a run" in r.text, r.text
+
+
+def test_e2b_workers_get_the_e2b_key_not_the_hub_token(tmp_path):
+    data = load_spec_yaml(COMPILE)
+    data["environment"] = {"backend": "e2b"}
+    for name in ("team.md", "answers.md", "round.md"):
+        (tmp_path / name).write_text("x")
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    swarm = compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
+    assert swarm.types["answers"].secrets == ["MSGBOARD_OPERATOR_TOKEN", "E2B_API_KEY"]
+    data.update(compute="hf-jobs", namespace="ns", bucket_id="ns/b")  # its bucket
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    swarm = compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
+    assert swarm.types["answers"].secrets == [
+        "MSGBOARD_OPERATOR_TOKEN", "HF_TOKEN", "E2B_API_KEY"]
+    data.update(compute="slurm", bucket_id="ns/b")
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    with pytest.raises(ValueError, match="compute slurm keeps E2B_API_KEY"):
+        Spec.load(tmp_path / "spec.yaml", env={})

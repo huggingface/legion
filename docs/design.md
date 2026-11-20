@@ -58,7 +58,7 @@ agent's workdir and Pi sessions to the bucket, and drains `drain_window` before 
 ### Agent
 
 A name, a workdir and a Pi session, on whichever worker holds it. Its Trial (an environment on
-docker, podman or hf-sandbox: `flock.worker.adapters.harbor`) starts on the first prompt and
+docker, podman, hf-sandbox or e2b: `flock.worker.adapters.harbor`) starts on the first prompt and
 stays up; each prompt is one Pi turn in it, and prompts that arrive during a turn join the next
 one. A Trial that fails is reported and the next prompt starts a new one on the same session.
 
@@ -181,6 +181,7 @@ Each type sets `harness: harbor`, its `harbor:` block (written by the compile st
 `namespace` is the optional billing account for worker/controller Jobs, hf-sandbox and
 `hf_jobs` model servers. Unset, Jobs and sandboxes use `HF_TOKEN`'s account. Router requests
 send `X-HF-Bill-To` only for an explicit namespace; otherwise the inference key's owner pays.
+E2B sandboxes are billed to `E2B_API_KEY`'s account, not `namespace`.
 The stored namespace stays empty when omitted. There are no per-inference billing overrides.
 In job mode, a spec's explicit namespace or HF_TOKEN's resolved account must match the
 controller job's namespace to join its network group. A manually org-deployed controller
