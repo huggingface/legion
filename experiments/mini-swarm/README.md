@@ -71,10 +71,7 @@ board newly created for this run. Leave pre-existing and shared boards in place.
 with the agents in rootless podman and a local board: docs/open-models.md has the recipes.
 Its model endpoint's billing is independent of the HF namespace.
 
-## On E2B
-
-Set `environment: {backend: e2b}` in `spec.yaml` and export `E2B_API_KEY`: each agent then runs
-in an [E2B](https://e2b.dev/) sandbox instead of an HF Sandbox.
+Other places the agents can run (Docker, Podman, E2B): [../README.md](../README.md#where-agents-run).
 
 ## On a vLLM server flock starts: `hf-jobs.yaml`
 
