@@ -74,6 +74,7 @@ class HarborHost:
         self.resources: Any = None  # flock.harbor Resources, started; None until prepared
         self.bundle: Any = None  # the vendored ToolBundle; None: the run has no tools
         self.task_path: Path | None = None  # the pinned task, downloaded for every agent here
+        self.task_paths: dict[str, Path] = {}  # or one task per agent (sources.pin_tasks)
         self._prepared: asyncio.Task | None = None
 
     async def prepare(self, spec: TypeSpec) -> None:
@@ -109,7 +110,13 @@ class HarborHost:
                 raise RuntimeError(f"the tools built here ({bundle.sha256[:12]}) are not the "
                                    f"run's ({h.tools_sha256[:12]}): {config.tools_dir} differs")
             self.bundle = bundle
-        if self.task_path is None:
+        if per_agent := h.task.get("tasks"):  # each Trial gets only its own (adapters/harbor.py)
+            if not self.task_paths:
+                tasks = [sources.ResolvedTask(GitTaskId.model_validate(t), h.task["registry_commit"],
+                                              h.task["dataset"]) for t in per_agent.values()]
+                paths = await sources.download_tasks(tasks, self.root / "sources")
+                self.task_paths = dict(zip(per_agent, paths, strict=True))
+        elif self.task_path is None:
             task = sources.ResolvedTask(GitTaskId.model_validate(h.task["task"]),
                                         h.task["registry_commit"], h.task["dataset"])
             self.task_path = await sources.download_task(task, self.root / "sources")

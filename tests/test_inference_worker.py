@@ -22,7 +22,7 @@ WORKER_ENV = {
 
 
 def typespec(**types) -> dict[str, TypeSpec]:
-    return SwarmSpec.model_validate({"swarm": "s", "namespace": "n", "bucket": "b",
+    return SwarmSpec.model_validate({"swarm": "s", "namespace": "n", "bucket_id": "b",
                                      "types": types}).types
 
 
@@ -105,7 +105,7 @@ def test_heartbeat_carries_the_model_server(tmp_path):
     ts = typespec(w={**HB, "model": "Qwen/Q", "inference": GPU})["w"]
     rt = AgentRuntime("w-0001", "w", ts, swarm="s", work_root=tmp_path / "agents",
                       adapter=ScriptedAdapter(tmp_path / "home"), outbox=Outbox(), secret_source={})
-    picked = ts.resolved_model.inference.endpoint_for("w-0001")  # the server its Trial calls
+    picked = ts.resolved_model.inference.endpoint_for("s", "w-0001")  # the server its Trial calls
     assert rt.heartbeat().endpoint == picked.removeprefix("http://").removesuffix("/v1")
     native = AgentRuntime("w-0002", "w", TypeSpec(**HB, model="gpt-5.5-codex"),
                           swarm="s", work_root=tmp_path / "a2", adapter=ScriptedAdapter(tmp_path / "h2"),

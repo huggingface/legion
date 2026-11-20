@@ -11,9 +11,11 @@ to work with the board.
 - Docker with Compose on the machine that runs flock (`compute: local`, `backend: docker`;
   the rooms are multi-container, so HF Sandboxes cannot run them).
 - `HF_TOKEN` with read access to the private dataset
-  `HuggingFaceSwarms/AgentEscapeBench` and Inference Providers access. It is also the
-  inference key, so it reaches every agent's container. Git must be able to clone the dataset
-  with it, e.g. `hf auth login --add-to-git-credential`.
+  `HuggingFaceSwarms/AgentEscapeBench`. Git must be able to clone it, e.g.
+  `hf auth login --add-to-git-credential`.
+- A separate `HF_INFERENCE_TOKEN` with Inference Providers permission for your personal
+  billing account. It enters the agents' containers. The spec omits `namespace`, so router
+  requests use that key's default billing account without an org bill-to header.
 
 **Cost**: inference only (the containers run locally). The model is Qwen3.8-27B on deepinfra
 ($0.2 / $2.5 per 1M input / output tokens); each agent has 200 model turns and the task's

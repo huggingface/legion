@@ -155,7 +155,7 @@ class LocalJobsClient:
         # secrets arrive as env, as on a job; the type's env can override the local defaults.
         # The spec's bucket is for hf-jobs: locally agent state stays on disk under `root`, so
         # a spec keeps its namespace and bucket and `compute:` is the only line that changes.
-        return {**base, **LOCAL_ENV_DEFAULTS, **local, **env, **secrets, "BUCKET": ""}
+        return {**base, **LOCAL_ENV_DEFAULTS, **local, **env, **secrets, "BUCKET_ID": ""}
 
     def launch(self, worker_id: str, spec: TypeSpec, env: dict[str, str],
                secrets: dict[str, str], labels: dict[str, str], timeout: float, *,

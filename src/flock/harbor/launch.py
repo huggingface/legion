@@ -73,11 +73,13 @@ def agent_url(url, backend):
 
 
 def build_trial_config(
-    config, resolved, run_dir, name, agent_instructions, api_key, inference=None
+    config, resolved, run_dir, name, agent_instructions, api_key, inference=None, run=None
 ):
-    """`inference`: the agent's endpoints (default: the config's); the agent `name` calls one
-    of its URLs, and its container may reach all of them."""
+    """`inference`: the agent's endpoints (default: the config's); the agent `name` of `run`
+    (default: the run dir's name, the run id) calls one of its URLs
+    (`Inference.endpoint_for`), and its container may reach all of them."""
     inference = inference or config.inference
+    run = run_dir.name if run is None else run
     backend = config.environment.backend
     key_name = inference.key_env or NO_KEY_ENV
     agent_kwargs = {"version": PI_VERSION, "max_turns": config.limits.agent_max_turns}
@@ -100,7 +102,7 @@ def build_trial_config(
             # the id as the servers take it (`<model>:<provider>` on the router), unparsed
             model_name=inference.request_model(config.model),
             skip_model_parsing=True,
-            base_url=agent_url(inference.endpoint_for(name), backend),
+            base_url=agent_url(inference.endpoint_for(run, name), backend),
             model_api_key_name=key_name,
             model_api_format="openai_chat_completions",
             env={
@@ -318,7 +320,8 @@ async def _run_experiment(config: Config):
                     bundle.manifest,
                     instructions,
                     role_instructions.get(record["role"], ""),
-                    run_id=run_id,
+                    # The run ID only matters to agents sharing resources like the message board
+                    run_id=run_id if config.resources else None,
                 )
                 instructions_file = inputs / f"{name}-instructions.md"
                 instructions_file.write_text(agent_instructions, encoding="utf-8")

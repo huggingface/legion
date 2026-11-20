@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 
 import pytest
 from pydantic import ValidationError
 
+from flock.harbor.spec import Spec
 from flock.models import HF_ROUTER_URL, Inference, SwarmSpec, TypeSpec
 
 from .conftest import HB
@@ -16,7 +18,7 @@ URLS = {"urls": ["http://vllm-a.example:8000/v1", "http://vllm-b.example:8000/v1
 
 def spec(types: dict, inference: dict | None = None, **extra) -> SwarmSpec:
     return SwarmSpec.model_validate({
-        "swarm": "s", "namespace": "ns", "bucket": "hf://buckets/ns/b",
+        "swarm": "s", "namespace": "ns", "bucket_id": "ns/b",
         **({"inference": inference} if inference is not None else {}), "types": types, **extra})
 
 
@@ -34,15 +36,33 @@ def test_the_hf_router_is_the_default():
     assert r.pricing == [0, 0, 0]
 
 
+@pytest.mark.parametrize("namespace", [" ", "my org", "org\n", "org\r\nX-HF-Bill-To: other",
+                                       "org/other", "ümlaut", "_org"])
+def test_both_spec_forms_reject_malformed_namespace(namespace):
+    with pytest.raises(ValidationError, match="namespace must be"):
+        spec({"a": {**HB, "model": "Qwen/Qwen3.8-27B"}}, namespace=namespace)
+    with pytest.raises(ValidationError, match="namespace must be"):
+        Spec.model_validate({"name": "demo", "namespace": namespace, "model": "Qwen/Qwen3.8-27B",
+                             "task": {"repo": "https://huggingface.co/datasets/ns/tasks",
+                                      "selector": "task"}})
+
+
+@pytest.mark.parametrize("namespace", ["", "my-org", "HuggingFaceSwarms", "org.test_1"])
+def test_valid_namespace_names_preserve_explicit_router_billing(namespace):
+    s = spec({"a": {**HB, "model": "Qwen/Qwen3.8-27B"}}, namespace=namespace)
+    assert s.namespace == namespace
+    assert s.types["a"].resolved_model.headers == ({"X-HF-Bill-To": namespace} if namespace else {})
+
+
 @pytest.mark.parametrize(("provider", "sent", "policy"), [
     ("deepinfra", "Qwen/Qwen3.8-27B:deepinfra", False), ("cheapest", "Qwen/Qwen3.8-27B:cheapest", True)])
 def test_a_router_provider_or_policy_is_added_to_the_model(provider, sent, policy):
     s = spec({"a": {**HB, "model": "Qwen/Qwen3.8-27B", "pricing": [1, 2, 0.5]}},
-             {"hf_router": {"provider": provider, "bill_to": "huggingface"}})
+             {"hf_router": {"provider": provider}}, namespace="huggingface")
     r = s.types["a"].resolved_model
     assert r.request_model == sent and r.inference.hf_router.policy is policy
     assert r.model_id == "Qwen/Qwen3.8-27B" and r.pricing == [1, 2, 0.5]  # priced as the Hub id
-    assert r.inference.headers == {"X-HF-Bill-To": "huggingface"}
+    assert r.headers == {"X-HF-Bill-To": "huggingface"}
 
 
 @pytest.mark.parametrize("model", ["huggingface/Qwen/Qwen3.8-27B", "Qwen/Qwen3.8-27B:deepinfra"])
@@ -54,17 +74,27 @@ def test_the_router_takes_a_plain_hub_id(model):
 def test_servers_you_run_take_any_name_and_no_key():
     r = spec({"a": {**HB, "model": "qwen3.5:2b"}}, URLS).types["a"].resolved_model
     assert r.request_model == "qwen3.5:2b" and r.inference.key_env is None
-    assert r.inference.endpoints == URLS["urls"] and r.inference.headers == {}
+    assert r.inference.endpoints == URLS["urls"] and r.headers == {}
 
 
 def test_agents_spread_over_several_urls():
     one = Inference(urls=["http://a:8000/v1", "http://b:8000/v1", "http://c:8000/v1"])
     agents = [f"agent-{i:03d}" for i in range(60)]
-    picked = {a: one.endpoint_for(a) for a in agents}
+    picked = {a: one.endpoint_for("s", a) for a in agents}
     assert set(picked.values()) == set(one.urls)  # every server gets agents
-    assert all(one.endpoint_for(a) == u for a, u in picked.items())  # stable
+    assert all(one.endpoint_for("s", a) == u for a, u in picked.items())  # stable
     fewer = Inference(urls=one.urls[:2])  # a server removed: only its agents move
-    assert all(fewer.endpoint_for(a) == u for a, u in picked.items() if u in fewer.urls)
+    assert all(fewer.endpoint_for("s", a) == u for a, u in picked.items() if u in fewer.urls)
+
+
+def test_concurrent_runs_spread_their_same_named_agents():
+    """A sweep: 40 `consecutive-id` teams of 4 on 14 shared servers. Every team's agent-001
+    used to land on one server (40 agents there, 80 on another, 11 servers idle)."""
+    servers = Inference(urls=[f"http://gpu-{i:02d}:8000/v1" for i in range(14)])
+    runs = [f"s3-maze-{t:02d}" for t in range(40)]
+    load = Counter(servers.endpoint_for(r, f"agent-{n:03d}") for r in runs for n in range(1, 5))
+    assert len(load) == 14 and max(load.values()) <= 2 * 160 / 14  # a share is 11.4
+    assert len({servers.endpoint_for(r, "agent-001") for r in runs}) >= 10
 
 
 @pytest.mark.parametrize(("inference", "needle"), [

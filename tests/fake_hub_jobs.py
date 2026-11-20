@@ -37,7 +37,7 @@ class FakeHubJobs:
             for name, gpu in HARDWARE.items()]
 
     def run_job(self, *, image, command, env=None, secrets=None, flavor=None, timeout=None,
-                labels=None, expose=None, namespace=None) -> JobInfo:
+                labels=None, expose=None, namespace=None, network_group=None) -> JobInfo:
         if self.runs_left is not None:
             if self.runs_left <= 0:
                 raise RuntimeError("402: jobs quota exceeded (fake)")
@@ -45,7 +45,8 @@ class FakeHubJobs:
         job_id = f"{len(self.jobs) + 1:024x}"
         self.runs.append({"id": job_id, "image": image, "command": command, "env": env,
                           "secrets": secrets, "flavor": flavor, "timeout": timeout,
-                          "labels": labels, "expose": expose, "namespace": namespace})
+                          "labels": labels, "expose": expose, "namespace": namespace,
+                          "network_group": network_group})
         self.jobs[job_id] = {
             "id": job_id, "createdAt": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"), "dockerImage": image,
             "command": command, "flavor": flavor, "labels": labels,

@@ -297,5 +297,5 @@ def test_local_runs_checkpoint_to_the_bucket_by_default():
     assert "FLOCK_STATE_URL" not in env and note.startswith("checkpoint: off (no HF token")
     assert state_env({"FLOCK_STATE_URL": ""}, spec_, saved)[0]["FLOCK_STATE_URL"] == ""  # off
     assert state_env({"FLOCK_STATE_URL": "hf://x/y"}, spec_, none)[0]["FLOCK_STATE_URL"] == "hf://x/y"
-    nob = make_spec().model_copy(update={"bucket": ""})
+    nob = make_spec().model_copy(update={"bucket_id": ""})
     assert state_env({}, nob, saved) == ({}, None)

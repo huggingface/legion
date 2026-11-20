@@ -1,0 +1,20 @@
+name: ci-gemini
+harness: pi
+model: openai/gemini-3.8-flash
+inference:
+  base_url: http://model-compat:8003/v1
+  api_key_env: GEMINI_API_KEY
+  api_format: openai_chat_completions
+  reasoning_effort: low
+task:
+  repo: https://huggingface.co/datasets/HuggingFaceSwarms/collaborative-intelligence-benchmark
+  revision: 61bfd4fe1749264c291751e6dc02540398eb3e4d
+  selector: ci-sharing-h2-r-choosing-the-safe-field-station-solo-s0
+agents:
+  count: 1
+environment:
+  backend: docker
+limits:
+  run_timeout_seconds: 3600
+  agent_max_turns: 256
+  agent_timeout_seconds: null

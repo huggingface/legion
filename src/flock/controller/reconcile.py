@@ -296,7 +296,7 @@ def inference_rev(ts: TypeSpec | None) -> str | None:
     r = ts.resolved_model if ts is not None else None
     if r is None:
         return None
-    held = [r.inference.held().model_dump(mode="json"), r.model_id, r.context_window]
+    held = [r.inference.held().model_dump(mode="json"), r.model_id, r.context_window, r.headers]
     return hashlib.sha256(json.dumps(held, sort_keys=True).encode()).hexdigest()[:16]
 
 
@@ -834,7 +834,7 @@ def _launch(p: _Pass, spec: SwarmSpec, type_name: str, ts: TypeSpec, w: Row) -> 
         "TYPE": type_name,
         "DEADLINE": _iso(deadline),
         "DRAIN_WINDOW": ts.drain_window,  # known before the first assign arrives
-        "BUCKET": spec.bucket,
+        "BUCKET_ID": spec.bucket_id,
         # the inference block it holds, re-adopted with the job by a restored controller
         **({"INFERENCE_REV": rev} if (rev := inference_rev(ts)) else {}),
     }

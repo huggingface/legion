@@ -31,7 +31,7 @@ def pspec(inference=None, **types) -> SwarmSpec:
                    "agents_per_worker": 2, "secrets": ["HF_TOKEN"]},
         "local": {**HB, "model": "Qwen/Small", "inference": GPU1, "replicas": 1},
     }
-    return SwarmSpec.model_validate({"swarm": "p", "namespace": "ns", "bucket": "hf://buckets/ns/b",
+    return SwarmSpec.model_validate({"swarm": "p", "namespace": "ns", "bucket_id": "ns/b",
                                      "inference": inference or ROUTER, "types": types})
 
 
@@ -142,6 +142,21 @@ async def test_a_changed_block_restarts_its_types_workers(client, store, jobs, s
     assert second["worker_id"] == wid and second["job_id"] != first["job_id"]
     assert second["secrets"]["NEW_KEY"] == "n" and "VLLM_API_KEY" not in second["secrets"]
     assert second["spec"].resolved_model.inference.urls == ["http://qwen-job-2:8000/v1"]
+
+
+async def test_removing_namespace_clears_bill_to_and_restarts_workers(client, store, jobs, tick):
+    spec = pspec(ROUTER, h={**HB, "model": "Qwen/Qwen3.8-27B", "replicas": 1})
+    assert (await put(client, spec)).status_code == 200
+    tick()
+    [first] = jobs.launches
+    assert first["spec"].resolved_model.headers == {"X-HF-Bill-To": "ns"}
+    body = spec.model_dump(mode="json")
+    body["namespace"] = ""
+    assert (await client.put("/swarms/p", json=body)).status_code == 200
+    tick()
+    assert drains(store, first["worker_id"]) == 1
+    stored = store.get_swarm("p")["spec"]
+    assert stored.namespace == "" and stored.types["h"].resolved_model.headers == {}
 
 
 def test_a_launch_that_raced_an_update_restarts(app, store, clock, settings):
@@ -581,15 +596,17 @@ def test_api_for_every_harness_is_chat_completions():
     assert [api_for(h) for h in Harness] == ["chat_completions"] * len(Harness)
 
 
-async def test_preflight_sends_the_router_provider_and_bill_to_as_pi_does(preflight_client):
+@pytest.mark.parametrize("namespace", ["", "huggingface"])
+async def test_preflight_sends_the_router_provider_and_bill_to_as_pi_does(preflight_client, namespace):
     fake, seen = fake_provider()
-    spec = pspec({"hf_router": {"provider": "novita", "bill_to": "huggingface"}},
+    spec = pspec({"hf_router": {"provider": "novita"}},
                  h={**HB, "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017"})
+    spec = SwarmSpec.model_validate({**spec.model_dump(mode="json"), "namespace": namespace})
     async with await preflight_client(fake, SECRETS) as c:
         rep = (await c.post("/swarms/p/preflight", json=spec.model_dump(mode="json"))).json()
     assert len(rep["results"]) == 1 and rep["ok"]
     assert {(x["model"], x["bill_to"]) for x in seen} == {
-        ("deepseek-ai/DeepSeek-V4.1-Flash-1017:novita", "huggingface")}
+        ("deepseek-ai/DeepSeek-V4.1-Flash-1017:novita", namespace or None)}
 
 
 async def test_preflight_needs_a_tool_call_from_every_server(preflight_client):

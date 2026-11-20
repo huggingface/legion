@@ -12,7 +12,7 @@ that dataset, then configure:
 ```yaml
 resources:
   hf_repo:
-    repo_id: your-org/team-code
+    repo_id: your-username/team-code
     token_env: HF_REPO_TOKEN
 tools: [hf_repo.*]
 ```

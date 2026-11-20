@@ -273,16 +273,14 @@ class HarborAdapter:
             self.agent, roster, {"tools": h.tools.get("tools", {})}, h.team, h.role_text,
             run_id=os.environ.get("SWARM"))  # as the upstream launcher: the run (swarm) a board spans
 
-    def _endpoint(self, channel: Any) -> None:
-        """The type spec's endpoint into a new Trial's channel, for Pi's models.json. A changed
-        block restarts the type's workers (controller), so a Trial keeps its endpoint."""
-        from flock.harbor.launch import agent_url
-
+    def _endpoint(self, channel: Any, base_url: str) -> None:
+        """The Trial's endpoint (`base_url`, as build_trial_config picked it) into its channel,
+        for Pi's models.json. A changed block restarts the type's workers (controller), so a
+        Trial keeps its endpoint."""
         r = self.spec.resolved_model
-        backend = (self.spec.harbor.config.get("environment") or {}).get("backend", "docker")
-        channel.base_url = agent_url(r.inference.endpoint_for(self.agent), backend)
+        channel.base_url = base_url
         channel.context_window = r.context_window
-        channel.headers = r.inference.headers
+        channel.headers = r.headers
 
     async def _new_trial(self, restore: bool) -> None:
         """Create the agent's next Trial, run it in the background and wait until FlockPi
@@ -313,20 +311,26 @@ class HarborAdapter:
         if h.tools.get("tools") and self.bundle is None:
             raise RuntimeError(f"the tool bundle {h.tools_sha256} is not on this worker")
         config = Spec.model_validate(h.config)
-        task = ResolvedTask(GitTaskId.model_validate(h.task["task"]), h.task["registry_commit"],
-                            h.task["dataset"], getattr(self.host, "task_path", None))
+        if (per_agent := h.task.get("tasks")) and self.agent not in per_agent:
+            raise RuntimeError(f"{self.agent} has no task: the spec gives one to each of "
+                               f"{', '.join(per_agent)}")
+        own = per_agent[self.agent] if per_agent else h.task["task"]  # only this agent's task
+        path = (getattr(self.host, "task_paths", {}).get(self.agent) if per_agent
+                else getattr(self.host, "task_path", None))
+        task = ResolvedTask(GitTaskId.model_validate(own), h.task["registry_commit"],
+                            h.task["dataset"], path)
         trial_seconds = config.limits.trial_hours * 3600
         self.attempt += 1
         inference = self.spec.resolved_model.inference  # the type spec's, not the config's
+        swarm = os.environ.get("SWARM")  # the worker's run: with the agent's name, its server
         with exposed():  # the inference key from os.environ; a Slurm worker has a file
             tc = launch.build_trial_config(config, task, self.root, self.agent,
                                            self._instructions(), inference_key(inference),
-                                           inference=inference)
+                                           inference=inference, run=swarm or "")
         # Harbor's compose project is `<trial_name>__env` and its start runs `compose down` on
         # it: the swarm (the worker's SWARM) keeps another run's <agent>-t1 on this host
         # alive; a worker relaunched in this run reuses, and so cleans up, its own names.
         # shortcut: two runs of one swarm name on one host still share names; add a run id then
-        swarm = os.environ.get("SWARM")
         tc.trial_name = f"{swarm + '-' if swarm else ''}{self.agent}-t{self.attempt}"
         tc.agent.name, tc.agent.import_path = None, "flock.harbor.agent:FlockPi"
         # FlockPi serves turns for trial_hours; its last turn may take a turn_timeout more
@@ -382,7 +386,7 @@ class HarborAdapter:
             channel = Channel(emit=self._emit, prompts=self._prompts, home=self.home,
                               model=self.spec.harness_model, trial_seconds=trial_seconds,
                               max_turns=config.limits.agent_max_turns, restore=restore)
-            self._endpoint(channel)
+            self._endpoint(channel, tc.agent.base_url)
             trial.agent.channel = channel
             self.trial = trial
             self._run = run = asyncio.create_task(trial.run(), name=tc.trial_name)

@@ -48,7 +48,7 @@ def sim_spec(max_working: int, per_worker: int = 25, agents: int = 1000) -> Swar
                              "max_working": max_working}}
         for name, (prov, n) in shape.items()
     }
-    return SwarmSpec.model_validate({"swarm": "px", "namespace": "ns", "bucket": "hf://buckets/ns/b",
+    return SwarmSpec.model_validate({"swarm": "px", "namespace": "ns", "bucket_id": "ns/b",
                                      "types": types})
 
 

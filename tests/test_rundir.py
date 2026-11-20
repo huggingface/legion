@@ -22,7 +22,7 @@ runner = CliRunner()
 SPEC = {
     "swarm": "${SWARM:-demo}",
     "namespace": "ns",
-    "bucket": "hf://buckets/ns/sh",
+    "bucket_id": "ns/sh",
     "world": {"url": "http://${WORLD_HOST}:7860", "token_env": "PYBOT_WORLD_TOKEN"},
     "inference": FAKE_INFERENCE,
     "types": {"researcher": {

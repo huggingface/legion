@@ -21,11 +21,13 @@ from typing import Annotated, Literal
 from harbor.utils.env import is_sensitive_env_key
 from pydantic import AfterValidator, BeforeValidator, Field, field_validator, model_validator
 
+from flock.buckets import BucketId
 from flock.models import (
     ComputeSpec,
     DashboardSpec,
     Inference,
     LoopSpec,
+    Namespace,
     SpawnRule,
     SwarmSpec,
     TypeSpec,
@@ -162,8 +164,8 @@ class Spec(Config):
     workers: Workers = Field(default_factory=Workers)
     # Where flock's workers run (docs/local.md); an upstream config runs here, on its engine.
     compute: ComputeSpec = Field(default_factory=lambda: ComputeSpec(kind="local"))
-    namespace: str = ""  # bills the HF Jobs workers and the hf-sandbox sandboxes (unset: the token's)
-    bucket: str = ""
+    namespace: Namespace = ""  # bills Jobs, sandboxes and router calls (unset: each token's account)
+    bucket_id: BucketId = ""
     dashboard: DashboardSpec | None = None
     spawn: dict[str, SpawnRule] = Field(default_factory=dict)
     # agent names: flock's random `<adjective>-<noun>` (words), or the upstream roster() names
@@ -421,7 +423,7 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
     swarm = SwarmSpec.model_validate({
         "swarm": spec.name,
         "namespace": spec.namespace,
-        "bucket": spec.bucket,
+        "bucket_id": spec.bucket_id,
         "inference": lifetime(spec.inference),
         "types": types,
         "dashboard": spec.dashboard,

@@ -25,7 +25,7 @@ def spec(spawn=None, limits=None, types=None) -> SwarmSpec:
         "analyst": {"replicas": 0, "workers": {"initial": 1, "max_extra": 3}},
         "helper": {"replicas": 0, "workers": {"initial": 0, "max_extra": 2}},
     }
-    body = {"swarm": "s", "namespace": "ns", "bucket": "hf://buckets/ns/b", "inference": FAKE_INFERENCE,
+    body = {"swarm": "s", "namespace": "ns", "bucket_id": "ns/b", "inference": FAKE_INFERENCE,
             "types": {k: {**base, **v} for k, v in types.items()}}
     if spawn is not None:
         body["spawn"] = spawn

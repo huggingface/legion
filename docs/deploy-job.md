@@ -33,21 +33,28 @@ group, so worker traffic never crosses an edge or a proxy.
   the same as in any mode.
 - **Namespace.** A network group spans one namespace (and resource group). A job-mode
   controller refuses (`400`) a spec whose `namespace` differs from its own `FLOCK_NAMESPACE`.
+  An unset spec namespace resolves to `HF_TOKEN`'s account for this check. If a controller
+  was manually deployed with `--namespace my-org` and that differs from the token account,
+  set `namespace: my-org` in the spec; a blank namespace is refused before any worker
+  launches. This keeps worker placement and run billing consistent. When the accounts
+  match, the stored namespace stays empty and router calls have no bill-to header.
 - **Model jobs** (vLLM on GPUs) are not in the group. A group started by an A100 job
   refused CPU members, and other GPU pools are untested. Workers reach models through the
   proxy (`--expose`, `auth: bearer` with an HF token).
 
 ## Deploy
 
+Replace `<your-username>` with the personal Hub account that owns `HF_TOKEN`.
+
 ```sh
 export HF_TOKEN=... FLOCK_TOKEN=$(openssl rand -hex 24)
-uv run hf buckets create <you>/flock --private  # once, for wheels and state
-W=$(uv run scripts/publish-wheel.sh hf://buckets/<you>/flock/dist)
+uv run hf buckets create "<your-username>/flock" --private  # once, for wheels and state
+W=$(uv run scripts/publish-wheel.sh "hf://buckets/<your-username>/flock/dist")
 scripts/deploy-job.sh "$W" --group my-run [--flavor cpu-upgrade] [--timeout 48h] \
     [--secret OPENAI_API_KEY ...] [--dry-run]
 # controller job: 6ad7...   API: https://6ad7...--7860.hf.jobs   status: https://6ad7...--7861.hf.jobs
 export FLOCK_URL=https://6ad7...--7860.hf.jobs
-uv run flock launch spec.yaml          # spec.namespace must be the job's namespace
+uv run flock launch spec.yaml          # omit namespace to use HF_TOKEN's personal account
 ```
 
 `flock launch` does this itself when no controller answers and `FLOCK_WHEEL_URL` is set: the

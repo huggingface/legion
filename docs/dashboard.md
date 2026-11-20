@@ -7,12 +7,12 @@ viewer reads.
 
 ```yaml
 dashboard:
-  registry: hf://buckets/<ns>/runs   # one registry bucket per task family
+  registry: hf://buckets/<your-username>/runs   # one registry bucket per task family
   id: my-run                          # the row's id; default: the swarm name
   name: My run                        # default: the swarm name
   title: My run
   setup: Leads spawn managers, managers spawn workers.
-  viewer: https://<ns>-<viewer>.hf.space   # required (only named, never called)
+  viewer: https://<your-username>-<viewer>.hf.space   # required (only named, never called)
   # optional, written as given: viewer_public, dataset, code_repo, spec_url
 ```
 
@@ -24,6 +24,6 @@ board and the viewer, `viewer_run` `<bucket ns>/<bucket>/<swarm>`, `created_at` 
 from the first write; kept on re-runs). No token or invite goes in it. A failed write fails
 init, and so does a `board_id` another run's row in the registry already uses.
 
-Refused: `dashboard` with `compute: local` or without `bucket` (spec check); in init, a `board`
+Refused: `dashboard` with `compute: local` or without `bucket_id` (spec check); in init, a `board`
 or `viewer` that is not a Space of the registry bucket's namespace (`https://<ns>-<name>.hf.space`:
 the overview sends its HF token there and drops other rows) and a bucket outside that namespace.

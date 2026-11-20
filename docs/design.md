@@ -80,7 +80,7 @@ worker and CLI read nothing else, and `tests/test_registry.py` checks every entr
 - **Compute backend**: write `src/flock/controller/<name>.py` with a `JobsClient`
   (`controller/jobs.py`) and a `<name>_jobs_client(env, dep, data_dir)` function, and add a
   `COMPUTE` entry (`compute.kind` / `FLOCK_COMPUTE` name -> that function). Every kind but
-  `local` needs `bucket` and `world.url` in the spec.
+  `local` needs `bucket_id` and `world.url` in the spec.
 - **Server starter** (inference servers flock starts itself, like `hf_jobs`): add the block as a
   field of `Inference`, write `src/flock/controller/<name>.py` with a `Starter`
   (`controller/servers.py`: start or reattach, list, check readiness, logs, cancel, set a
@@ -171,25 +171,44 @@ more on SIGTERM, and a new controller restores them before it opens the store
 
 ### Spec
 
-A swarm spec (`SwarmSpec`) names the swarm, its compute, namespace and bucket, its `inference:`
+A swarm spec (`SwarmSpec`) names the swarm, its compute, optional billing `namespace` and `bucket_id`, its `inference:`
 block and its `types:`; `flock launch` writes it from a Harbor spec (README, docs/local.md).
 Each type sets `harness: harbor`, its `harbor:` block (written by the compile step), its model
 (and optionally its own `inference` and its `pricing`), `replicas`, packing (`agents_per_worker` 50, `max_working_per_worker` 20), lifetime, `workdir`,
 `worker` knobs, `loop`, `spawn` and `resume_prompt`. The blocks inside the spec are `extra: forbid`
 (an unknown key is refused); `SwarmSpec` and `TypeSpec` themselves drop unknown keys.
 
+`namespace` is the optional billing account for worker/controller Jobs, hf-sandbox and
+`hf_jobs` model servers. Unset, Jobs and sandboxes use `HF_TOKEN`'s account. Router requests
+send `X-HF-Bill-To` only for an explicit namespace; otherwise the inference key's owner pays.
+The stored namespace stays empty when omitted. There are no per-inference billing overrides.
+In job mode, a spec's explicit namespace or HF_TOKEN's resolved account must match the
+controller job's namespace to join its network group. A manually org-deployed controller
+refuses a blank spec namespace if the accounts differ and asks for an explicit namespace.
+Matching-account runs keep the stored namespace empty and send no router bill-to header.
+
+`bucket_id` is `[namespace/]name`, with no URL or path prefix. `flock launch` qualifies a bare
+name using the explicit namespace, else `HF_TOKEN`'s account, and creates the bucket with
+`private=True, exist_ok=True` before starting jobs. Existing visibility is retained. Only the
+qualified ID is stored and sent to workers (`BUCKET_ID`); controllers and workers never
+resolve it again. Flock still adds its checkpoint and per-agent prefixes internally. Init
+reports a missing bucket as one launch will create. See [billing and storage](billing.md).
+Bucket preparation also applies to local compute and the foreground `localrun` launch
+entry point. Disabling controller checkpointing does not skip an explicitly configured
+bucket's initialization or its credentials check.
+
 ### Inference
 
 `types.<t>.model` is a Hub id (with `urls`, the name the servers serve) and one `inference` block
 (`Inference`) says where it runs: the HF router (`hf_router`, the default; flock sends
 `<model>:<provider>`), OpenAI-compatible servers you run (`urls`, each agent calling one by
-rendezvous hashing) or vLLM servers flock starts on HF Jobs (`hf_jobs`). The swarm's block serves
-every type that does not set its own. For `hf_jobs` the controller starts one group of jobs per
-model before preflight (`POST /swarms/{swarm}/servers`, `controller/servers.py`), waits until
-each answers, pins their URLs into the resolved block as `urls`, reattaches to them by label
-after a restart and cancels them when the run ends; from there on it is the `urls` path. One
-rule cleans up: a server job the applied spec does not use goes once the deadline in its
-`retire` label has passed. Validation
+rendezvous hashing on its swarm and name) or vLLM servers flock starts on HF Jobs (`hf_jobs`).
+The swarm's block serves every type that does not set its own. For `hf_jobs` the controller
+starts one group of jobs per model before preflight (`POST /swarms/{swarm}/servers`,
+`controller/servers.py`), waits until each answers, pins their URLs into the resolved block as
+`urls`, reattaches to them by label after a restart and cancels them when the run ends; from
+there on it is the `urls` path. One rule cleans up: a server job the applied spec does not use
+goes once the deadline in its `retire` label has passed. Validation
 pins each type's block and `[input, output, cached]` price into the spec
 (`types.<t>.resolved_model`, under the block's name: `inference` or `types.<t>.inference`), and
 the apply checks the model against each endpoint's `GET /models` and pins the context window it

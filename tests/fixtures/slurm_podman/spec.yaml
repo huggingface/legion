@@ -2,7 +2,7 @@
 # a loop and a Trial rollover (trial_hours): compiled by tests/harbor/test_cli_launch.py.
 name: slurm-podman
 namespace: ns
-bucket: hf://buckets/ns/runs
+bucket_id: ns/runs
 compute:
   kind: slurm
   cpus: 4

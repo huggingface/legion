@@ -1,4 +1,4 @@
-"""Bucket sync: per agent, `<BUCKET>/<swarm>/<type>/<agent>/` holds
+"""Bucket sync: per agent, `<bucket_id>/<swarm>/<type>/<agent>/` holds
 
     workdir/<path relative to the workdir>        (if persist_workdir; the deltas with a base)
     workdir.base.tar, workdir.base.json           (only with the type's workdir.base, below)

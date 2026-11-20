@@ -11,12 +11,20 @@ import ipaddress
 import re
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
-from typing import Any, Literal, NamedTuple
+from typing import Annotated, Any, Literal, NamedTuple
 from urllib.parse import urlsplit
 
 import yaml
-from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
+from flock.buckets import BucketId
 from flock.registry import COMPUTE, HARNESSES
 from flock.world.protocol import TOOL_NAME_RE as WORLD_TOOL_RE
 from flock.world.protocol import WorldManifest
@@ -131,6 +139,16 @@ NO_KEY_ENV, NO_KEY = "FLOCK_INFERENCE_KEY", "none"
 _ROUTER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
+def namespace_name(value: str) -> str:
+    """A namespace is also an HTTP header value: allow empty, otherwise one ASCII name."""
+    if value and not _ROUTER_NAME_RE.fullmatch(value):
+        raise ValueError("namespace must be empty or an account name, e.g. my-org")
+    return value
+
+
+Namespace = Annotated[str, AfterValidator(namespace_name)]
+
+
 class HFRouter(BaseModel):
     """`inference.hf_router`: the HF router, sent `<model>:<provider>`."""
 
@@ -139,9 +157,8 @@ class HFRouter(BaseModel):
     # A provider (`deepinfra`), or a selection policy: `fastest` (the router's default),
     # `cheapest` or `preferred` (your order in the Hub settings). None: the router's default.
     provider: str | None = None
-    bill_to: str | None = None  # an org the router bills instead of the key's owner (X-HF-Bill-To)
 
-    @field_validator("provider", "bill_to")
+    @field_validator("provider")
     @classmethod
     def _name(cls, v: str | None) -> str | None:
         if v is not None and not _ROUTER_NAME_RE.match(v):
@@ -193,7 +210,6 @@ class HFJobs(BaseModel):
     startup_timeout: str = "20m"  # how long flock waits for every replica to answer
     replicas: int = Field(default=1, ge=1)  # each agent calls one (rendezvous hashing)
     image: str = DEFAULT_VLLM_IMAGE
-    namespace: str | None = None  # who pays; None: the spec's namespace, else the token's account
 
     @field_validator("timeout", "startup_timeout")
     @classmethod
@@ -324,30 +340,26 @@ class Inference(BaseModel):
         """The block as a spec writes it: without the started servers' `urls`."""
         return self.model_copy(update={"urls": None}) if self.hf_jobs is not None else self
 
-    @property
-    def headers(self) -> dict[str, str]:
-        """Request headers besides the key: the router's bill-to org."""
-        r = self.hf_router
-        return {"X-HF-Bill-To": r.bill_to} if r is not None and r.bill_to else {}
-
     def request_model(self, model: str) -> str:
         """What the servers are sent as `model`: `<model>:<provider>` for the router with a
         provider or policy set, else `model`."""
         r = self.hf_router
         return f"{model}:{r.provider}" if r is not None and r.provider else model
 
-    def endpoint_for(self, agent: str) -> str:
-        """The server `agent` calls: rendezvous hashing over `endpoints`. Stable for a given list,
-        spreads agents roughly evenly, and a URL added or removed moves only the agents that
-        must move."""
-        return max(self.endpoints, key=lambda u: hashlib.sha256(f"{agent}\n{u}".encode()).digest())
+    def endpoint_for(self, run: str, agent: str) -> str:
+        """The server `agent` of `run` (a swarm's name, the upstream launcher's run id) calls:
+        rendezvous hashing of both over `endpoints`. Stable for a given list, so an agent keeps
+        its server (and the server its prefix cache) across Trials and restarts; spreads agents
+        roughly evenly, including one name in many runs (every run's `agent-001`); and a URL
+        added or removed moves only the agents that must move."""
+        return max(self.endpoints,
+                   key=lambda u: hashlib.sha256(f"{run}\n{agent}\n{u}".encode()).digest())
 
     def describe(self) -> str:
         """One line for status: `hf_router deepinfra`, the URLs, or `hf_jobs <flavor>` and the
         started servers' URLs."""
         if self.hf_router is not None:
-            return f"hf_router {self.hf_router.provider or 'fastest'}" + (
-                f", billed to {self.hf_router.bill_to}" if self.hf_router.bill_to else "")
+            return f"hf_router {self.hf_router.provider or 'fastest'}"
         if self.hf_jobs is not None:
             return f"hf_jobs {self.hf_jobs.flavor}" + (
                 f", urls {', '.join(self.endpoints)}" if self.urls else ", not started")
@@ -382,6 +394,9 @@ class ResolvedModel(BaseModel):
     # The block; with `hf_jobs`, plus the started servers' `urls`, pinned by the controller
     # once they answer (controller/servers.py) and kept while the block and model are the same
     inference: Inference
+    # Derived only from the spec's explicit namespace. Never from HF_TOKEN's whoami:
+    # the inference key can belong to someone else. Sent by preflight and Pi alike.
+    headers: dict[str, str] = Field(default_factory=dict)
     model_id: str  # the type's `model`: what flock prices the usage under
     reasoning: Reasoning | None = None
     pricing: list[float]  # [input, output, cached] USD per 1M tokens, pinned
@@ -1136,10 +1151,10 @@ class ComputeSpec(BaseModel):
 
 class SwarmSpec(BaseModel):
     swarm: str
-    # HF namespace jobs are launched under, and the bucket agents sync to (e.g.
-    # hf://buckets/<namespace>/<bucket>). Required for compute hf-jobs; optional for compute local.
-    namespace: str = ""
-    bucket: str = ""
+    # Billing account for Jobs, sandboxes and router calls. Empty: each token's account;
+    # stays empty in the stored spec, so the router never gets an inferred bill-to.
+    namespace: Namespace = ""
+    bucket_id: BucketId = ""
     # Where the types' models run (design.md 'Inference'), unless a type sets its own
     inference: Inference = Field(default_factory=Inference)
     stop_on_success: bool = False
@@ -1217,8 +1232,8 @@ class SwarmSpec(BaseModel):
                                  "(command or url)")
             if ts.world is False and listed:
                 raise ValueError(f"types.{name}: world: false but tools lists {', '.join(listed)}")
-        if self.dashboard is not None and (self.compute.kind == "local" or not self.bucket):
-            raise ValueError("dashboard: needs the run's state in a bucket (`bucket:`, compute "
+        if self.dashboard is not None and (self.compute.kind == "local" or not self.bucket_id):
+            raise ValueError("dashboard: needs the run's state in a bucket (`bucket_id:`, compute "
                              "hf-jobs or slurm); compute: local keeps it on this machine")
         c = self.comms
         if c is not None and c.protocols_text and len(c.protocols_text) != len(c.protocols):
@@ -1256,14 +1271,9 @@ class SwarmSpec(BaseModel):
                 raise ValueError(f"types.{name}.env.HEARTBEAT_INTERVAL ({hb:g}s): two heartbeats "
                                  f"({2 * hb:g}s) exceed worker_unknown_after ({unknown:g}s); "
                                  f"raise worker_unknown_after or lower the interval")
-        if kind == "hf-jobs":
-            missing = [f for f in ("namespace", "bucket") if not getattr(self, f)]
-            if missing:
-                raise ValueError(f"{' and '.join(missing)} required for compute hf-jobs "
-                                 "(or set `compute: local`, docs/local.md)")
-        elif kind != "local" and not self.bucket:
+        if kind != "local" and not self.bucket_id:
             # agent state goes to an HF bucket on every remote backend, never to a shared disk
-            raise ValueError(f"bucket is required for compute {kind}")
+            raise ValueError(f"bucket_id is required for compute {kind}")
         if kind != "local" and self.world is not None and self.world.url is None:
             raise ValueError(f"world.url is required for compute {kind}: run the world as a "
                              "Job, Space or cluster job and give its url (starting it from "
@@ -1331,6 +1341,8 @@ def resolve_model(spec: SwarmSpec, type_spec: TypeSpec, *, type_name: str = "?")
     return ResolvedModel(
         provider_name=f"types.{type_name}.inference" if type_spec.inference else "inference",
         inference=inference,
+        headers={"X-HF-Bill-To": spec.namespace}
+        if inference.hf_router is not None and spec.namespace else {},
         model_id=model,
         reasoning=type_spec.reasoning,
         pricing=list(type_spec.pricing or ZERO_PRICING),
@@ -2112,7 +2124,7 @@ class ServerStatus(BaseModel):
 class SwarmStatus(BaseModel):
     swarm: str
     namespace: str
-    bucket: str
+    bucket_id: str
     types: dict[str, TypeStatus]
     providers: dict[str, ProviderStatus] = Field(default_factory=dict)
     servers: list[ServerStatus] = Field(default_factory=list)  # hf_jobs servers flock started

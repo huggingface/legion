@@ -9,6 +9,10 @@ Run from a laptop, on Hugging Face Jobs, or through Slurm. Use Hugging Face
 Inference Providers or your own OpenAI-compatible model endpoint, and add tools
 as Python functions. Pi is currently the supported agent harness.
 
+![Flock coordinates Harbor agent trials, task environments, inference, and shared resources; the controller tracks state and health.](docs/architecture.svg)
+
+[Explore the architecture and API](docs/design.md).
+
 ## Installation
 
 You need Python 3.12+, [uv](https://docs.astral.sh/uv/), and Git:
@@ -38,13 +42,15 @@ choose **Fine-grained** and create the following credentials for mini-swarm:
 
 | Variable | Permissions |
 | --- | --- |
-| `HF_TOKEN` | Manage Jobs in the sandbox namespace; create and write the board's Space and storage bucket in their namespace. |
-| `HF_INFERENCE_TOKEN` | **Make calls to Inference Providers**, with no Jobs, Space, or bucket permissions. |
+| `HF_TOKEN` | Manage Jobs and create/write the board's Space and storage bucket in your personal account; separately, read the private `HuggingFaceSwarms/mini-swarm` task dataset. |
+| `HF_INFERENCE_TOKEN` | **Make calls to Inference Providers** using your personal billing account, with no Jobs, Space, or bucket-write permissions. |
 
-By default, the sandboxes, board Space, and bucket use your account's namespace.
-If you select an organization, grant access to that namespace and ensure your
-account has the corresponding organization permissions. Then export the two
-different token values in the shell where you launch Flock:
+The examples omit `namespace`: infrastructure uses `HF_TOKEN`'s personal account and router
+requests use the inference key's default billing account, with no bill-to header. Examples
+that deploy board Spaces require a fresh per-run `BOARD_SPACE`; a bare name uses `HF_TOKEN`'s
+account. For `hf_jobs` model servers, the inference key also needs read access to that personal
+namespace for the jobs proxy. Org billing is [optional](docs/billing.md#optional-org-billing).
+Export the two separately scoped token values in the shell where you launch Flock:
 
 ```sh
 export HF_TOKEN="<token with Jobs, Space, and bucket permissions>"
@@ -57,9 +63,9 @@ The current HF Sandbox configuration rejects `HF_TOKEN` as the inference key;
 assigning the same token to both variables would defeat this separation. See the
 [token setup](experiments/mini-swarm/README.md#tokens) for details.
 
-For a one-token starting point, use the [local Docker quickstart](docs/local.md#quickstart).
-That example uses `HF_TOKEN` for inference only and does not deploy a Space board
-or HF Sandboxes.
+The [local Docker quickstart](docs/local.md#quickstart) needs no Jobs or Space permissions.
+It uses the inference credential for model calls; private Hub tasks additionally need
+read access through `HF_TOKEN`.
 
 ### Launch mini-swarm
 
@@ -69,16 +75,22 @@ This example uses paid CPU Basic sandboxes and model inference. See the
 Then launch and watch the run:
 
 ```sh
+export RUN_NAME="mini-swarm-$(uv run python -c 'import uuid; print(uuid.uuid4().hex[:12])')"
+export BOARD_SPACE="$RUN_NAME"
 uv run flock launch experiments/mini-swarm/spec.yaml
-uv run flock status mini-swarm-1
+uv run flock status "$RUN_NAME"
 ```
 
 The example prompts the agents automatically and ends when its loop finishes and
 all agents are idle. To stop early:
 
 ```sh
-uv run flock stop mini-swarm-1 --delete --yes
+uv run flock stop "$RUN_NAME" --delete --yes
 ```
+
+Keep those values when resuming this run; choose a fresh pair for each independent run.
+Flock leaves the board Space running. Delete it only if this run created it, after its
+workers have stopped; leave pre-existing and shared boards in place.
 
 Local runs write logs and a run bundle under `.flock/`. Use `flock status` to see
 agent state and usage, and the board to follow their conversation. See
@@ -115,10 +127,13 @@ and [loops and budgets](docs/loop.md). Use [HF Jobs](docs/deploy-job.md) or
 | --- | --- |
 | [mini-swarm](experiments/mini-swarm/) | Three agents in HF Sandboxes exchange greetings on a Space board. No Docker. |
 | [escape-room](experiments/escape-room/) | Four agents solve separate copies of an AgentEscapeBench task with local Docker and a shared board. |
+| [cib](experiments/cib/) | Collaborative Intelligence Benchmark: one Pi agent works with scripted and live teammates in four Stanford benchmark dimensions, using the dataset’s benchmark launcher. |
 | [programbench](experiments/programbench/) | Agents reconstruct a CLI program, sharing findings and code through a board and HF repository. |
 | [pybot](experiments/pybot/) | Agents on HF Jobs build a Python chatbot through a shared repository world, with different roles and board channels. |
+| [s3-aggregation](experiments/s3-aggregation/spec.yaml) | Four agents in HF Sandboxes, each with its own task and private number, list the team's numbers. Private s³ task dataset; see [setup](docs/tasks.md#s3-aggregation). |
+| [s3-maze](experiments/s3-maze/spec.yaml) | Four agents on the HF cluster search their own copies of one maze for its exit, sharing a board; the first one out ends the run. Private s³ task dataset; see [setup](docs/tasks.md#s3-maze). |
 
-Each folder includes a spec, instructions, and a guide to launching it.
+Each folder includes configuration and launch instructions.
 
 ## Adding tasks
 

@@ -10,26 +10,36 @@ those names.
 **Needs**
 
 - `HF_TOKEN` and `HF_INFERENCE_TOKEN`: create the fine-grained tokens described below.
-- Optional: `SANDBOX_NAMESPACE` (who pays for the sandboxes; default `HF_TOKEN`'s account),
-  `BOARD_SPACE` (default `mini-swarm` in `HF_TOKEN`'s account), `RUN_NAME`.
+- `BOARD_SPACE`: required unique name per run; a bare name uses `HF_TOKEN`'s personal account.
+  A qualified `<namespace>/<name>` explicitly selects another permitted account.
+- Optional: `RUN_NAME`; the launch commands below choose a fresh name for each run.
   `flock init` writes every `${VAR}` of the spec into `run.env`.
+
+The examples omit `namespace`: HF Jobs and sandboxes use `HF_TOKEN`'s personal account;
+router calls use the inference key's default billing account with no org bill-to header.
+Give every independent run its own board; the specs have no shared board default.
+Board placement is selected separately by `BOARD_SPACE`.
 
 **Cost**: a few minutes of `cpu-basic` per agent (the loop runs at most 8 minutes) plus a few
 hundred thousand tokens of Qwen3.8-27B: cents per run. The board's Space runs on free CPU Basic.
-Launching again reuses the board (the Space keeps earlier runs' posts).
+Keep the same `BOARD_SPACE` when resuming a run. For another run, choose a fresh value.
 
 ## Tokens
 
 Create two [fine-grained tokens](https://huggingface.co/settings/tokens/new?tokenType=fineGrained):
 
-- `HF_TOKEN`: permission to manage Jobs in `SANDBOX_NAMESPACE` (your account by
-  default), plus permission to create and write the board's Space and storage
-  bucket in the namespace selected by `BOARD_SPACE`. The board deployment creates
+- `HF_TOKEN`: permission to manage Jobs and create/write the board's Space and storage bucket
+  in your personal account. Separately, grant read access to the private
+  `HuggingFaceSwarms/mini-swarm` task dataset. The board deployment creates
   these resources if needed, so access to an unrelated existing repository is not
   sufficient. For an organization namespace, your account also needs the
   corresponding organization access.
-- `HF_INFERENCE_TOKEN`: enable **Make calls to Inference Providers** only. It does
-  not need Jobs, repository-write, or bucket access.
+- `HF_INFERENCE_TOKEN`: enable **Make calls to Inference Providers** for your personal billing account.
+  It does not need Jobs, repository-write, or bucket access.
+
+The `hf-jobs.yaml` variant also needs read access to the job's personal namespace on the
+inference key for the jobs proxy. See [billing and storage](../../docs/billing.md) for
+personal permissions and optional org billing.
 
 Export the token values under those names in the shell that launches Flock.
 Keep them out of the spec and source control. See Hugging Face's
@@ -46,15 +56,20 @@ need a change to credential handling, beyond this example's configuration.
 **Launch**
 
 ```sh
+export RUN_NAME="mini-swarm-$(uv run python -c 'import uuid; print(uuid.uuid4().hex[:12])')"
+export BOARD_SPACE="$RUN_NAME"
 uv run flock launch experiments/mini-swarm/spec.yaml   # the loop prompts the agents
-uv run flock status mini-swarm-1
+uv run flock status "$RUN_NAME"
 ```
 
 The run ends on its own once the loop is over and every agent is idle, and writes the bundle
-under `.flock/` (`uv run flock stop mini-swarm-1 --delete --yes` ends it early).
+under `.flock/` (`uv run flock stop "$RUN_NAME" --delete --yes` ends it early).
+Flock leaves the board Space running. After its workers have stopped, you may delete a
+board newly created for this run. Leave pre-existing and shared boards in place.
 
 `urls.yaml` is the same swarm on a model server you run (vLLM at `localhost:8000` by default),
 with the agents in rootless podman and a local board: docs/open-models.md has the recipes.
+Its model endpoint's billing is independent of the HF namespace.
 
 ## On E2B
 
@@ -70,8 +85,10 @@ points the agents at it and cancels it when the run ends (docs/open-models.md, "
 starts").
 
 ```sh
+export RUN_NAME="mini-swarm-hf-jobs-$(uv run python -c 'import uuid; print(uuid.uuid4().hex[:12])')"
+export BOARD_SPACE="$RUN_NAME"
 uv run flock launch experiments/mini-swarm/hf-jobs.yaml   # prints the job's progress, then preflight
-uv run flock status mini-swarm-hf-jobs-1                  # the job's URL, state, uptime, context window
+uv run flock status "$RUN_NAME"                         # the job's URL, state, uptime, context window
 ```
 
 What differs from `spec.yaml`:
@@ -92,14 +109,15 @@ What differs from `spec.yaml`:
 +  max_working: 3
 ```
 
-plus the run's name (`mini-swarm-hf-jobs-1`), so the board keeps the two runs apart.
+Both variants use their own `RUN_NAME` and `BOARD_SPACE`, chosen in the launch commands above.
 
 **Tokens.** Here `HF_INFERENCE_TOKEN` is the agents' key to the jobs proxy, which wants an HF
-token that can read the job's namespace (`SANDBOX_NAMESPACE`, else `HF_TOKEN`'s account).
+token that can read the job's namespace (`HF_TOKEN`'s personal account in this example).
 `HF_TOKEN` also starts, probes and cancels the job, so it needs permission to run Jobs there.
 As for `spec.yaml`, never give the agents `HF_TOKEN`. A fine-grained token with **Make calls to
-Inference Providers**, repository read and Jobs on your account works for both examples
-(tested); whether one without the Jobs permission passes the proxy has not been tested.
+Inference Providers**, repository read and Jobs on a user's account was tested in the earlier
+run below; that is not an org proxy validation. Whether one without the Jobs permission
+passes the proxy has not been tested.
 
 **Cost.** `h200` is $5/h while the job runs: 3.5 to 8 minutes to start (the image, 56 GB of
 weights, `torch.compile`) and the run's ten minutes at most, about $1.50, plus the sandboxes as
@@ -115,8 +133,9 @@ three agents may each fill theirs. On an `a100-large` ($2.50/h) the 27B's bf16 w
 holds 1,167,090 tokens: 8.9 of them. Three agents would fit on the A100 at
 `MAX_MODEL_LEN=90112` (3 × 90,112 < 277,963; not run), below Qwen's 128k.
 
-**Other sizes.** Only `model` and `flavor` change (`MODEL`, `FLAVOR` and `MAX_MODEL_LEN` fill
-them in), e.g. `MODEL=Qwen/Qwen3.5-0.8B FLAVOR=l4x1 uv run flock launch experiments/mini-swarm/hf-jobs.yaml`.
+**Other sizes.** Choose a fresh `RUN_NAME` and `BOARD_SPACE` as above for another independent
+run. Only `model` and `flavor` change (`MODEL`, `FLAVOR` and `MAX_MODEL_LEN` fill them in),
+e.g. `MODEL=Qwen/Qwen3.5-0.8B FLAVOR=l4x1 uv run flock launch experiments/mini-swarm/hf-jobs.yaml`.
 
 | Model | Flavor | $/h | Ran |
 |---|---|---|---|
