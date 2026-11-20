@@ -609,12 +609,12 @@ def test_e2b_workers_get_the_e2b_key_not_the_hub_token(tmp_path):
     (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
     swarm = compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
     assert swarm.types["answers"].secrets == ["MSGBOARD_OPERATOR_TOKEN", "E2B_API_KEY"]
-    data.update(compute="hf-jobs", namespace="ns", bucket="hf://buckets/ns/b")  # its bucket
+    data.update(compute="hf-jobs", namespace="ns", bucket_id="ns/b")  # its bucket
     (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
     swarm = compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
     assert swarm.types["answers"].secrets == [
         "MSGBOARD_OPERATOR_TOKEN", "HF_TOKEN", "E2B_API_KEY"]
-    data.update(compute="slurm", bucket="hf://b/x")
+    data.update(compute="slurm", bucket_id="ns/b")
     (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
     with pytest.raises(ValueError, match="compute slurm keeps E2B_API_KEY"):
         Spec.load(tmp_path / "spec.yaml", env={})

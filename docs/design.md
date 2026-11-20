@@ -181,6 +181,7 @@ Each type sets `harness: harbor`, its `harbor:` block (written by the compile st
 `namespace` is the optional billing account for worker/controller Jobs, hf-sandbox and
 `hf_jobs` model servers. Unset, Jobs and sandboxes use `HF_TOKEN`'s account. Router requests
 send `X-HF-Bill-To` only for an explicit namespace; otherwise the inference key's owner pays.
+E2B sandboxes are billed to `E2B_API_KEY`'s account, not `namespace`.
 The stored namespace stays empty when omitted. There are no per-inference billing overrides.
 In job mode, a spec's explicit namespace or HF_TOKEN's resolved account must match the
 controller job's namespace to join its network group. A manually org-deployed controller

@@ -4,6 +4,7 @@
 sandboxes, vLLM servers started with `inference.hf_jobs`, and HF router requests. Runnable
 examples omit it for personal-account defaults. You can set it on any compute
 backend, including Slurm: it still selects billing for HF sandboxes and inference.
+E2B sandboxes are billed to `E2B_API_KEY`'s account, not `namespace`.
 
 With `namespace` omitted or empty, HF infrastructure uses `HF_TOKEN`'s account and HF router
 requests use the inference key's default billing account, with no `X-HF-Bill-To` header.
