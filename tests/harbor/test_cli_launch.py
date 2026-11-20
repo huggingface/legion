@@ -127,7 +127,7 @@ def experiment_spec(monkeypatch, pins, name, rev, env=None):
     """An experiments/ folder's spec (or an absolute folder's, or a spec file in one) as `flock
     launch` reads it, the task pin faked."""
     pins[rev] = "a" * 40
-    for key in ("RUN_NAME", "BUCKET"):
+    for key in ("RUN_NAME", "BUCKET_ID"):
         monkeypatch.delenv(key, raising=False)
     for key, value in (env or {}).items():
         monkeypatch.setenv(key, value)
@@ -152,7 +152,7 @@ def test_a_slurm_podman_spec_with_board_rules_compiles(monkeypatch, pins):
 
 
 def test_the_pybot_spec_compiles(monkeypatch, pins):
-    env = {"PYBOT_TASK_REVISION": "c" * 40, "BUCKET": "hf://buckets/ns/runs",
+    env = {"PYBOT_TASK_REVISION": "c" * 40, "BUCKET_ID": "ns/runs",
            "BOARD_URL": "https://board.example", "WORLD_URL": "https://world.example",
            "PYBOT_REPO": "ns/bot"}
     swarm = experiment_spec(monkeypatch, pins, "pybot", "c" * 40, env)
@@ -208,14 +208,19 @@ def test_a_local_run_drives_harbor_trials(tmp_path, monkeypatch, pins):
 
 
 def test_the_mini_swarm_spec_compiles(monkeypatch, pins):
-    for key in ("SANDBOX_NAMESPACE", "BOARD_SPACE"):
-        monkeypatch.delenv(key, raising=False)
+    monkeypatch.delenv("BOARD_SPACE", raising=False)
+    with pytest.raises(SpecError, match="BOARD_SPACE"):
+        read_spec(str(EXPERIMENTS / "mini-swarm" / "spec.yaml"))
     swarm = experiment_spec(monkeypatch, pins, "mini-swarm",
-                            "d0e1fee0f1036a80d5400d67f7fad9143668ba94")
+                            "d0e1fee0f1036a80d5400d67f7fad9143668ba94",
+                            {"BOARD_SPACE": "mini-swarm-test"})
     assert (swarm.swarm, swarm.compute.kind, list(swarm.types)) == ("mini-swarm-1", "local", ["agent"])
+    assert swarm.namespace == ""
     ts = swarm.types["agent"]
     assert (ts.replicas, ts.agents_per_worker) == (3, 3)  # one worker: it deploys the board
-    assert ts.harbor.resources == {"message_board": {"space_id": "mini-swarm", "private": False}}
+    assert ts.harbor.resources == {"message_board": {
+        "space_id": "mini-swarm-test", "private": False}}
+    assert ts.resolved_model.headers == {}
     assert swarm.naming == "consecutive-id" and ts.harbor.names() == ["agent-001", "agent-002", "agent-003"]
     assert ts.harbor.config["tools"] == ["message_board.*"]
     assert ts.harbor.config["environment"] == {"backend": "hf-sandbox", "flavor": "cpu-basic"}
@@ -245,6 +250,7 @@ def test_the_escape_room_spec_compiles(monkeypatch, pins):
     assert swarm.naming == "words" and ts.harbor.config["environment"]["backend"] == "docker"
     assert ts.harbor.team.startswith("Solve the escape-room puzzle")
     assert ts.harbor.config["tools"] == ["message_board.*"] and ts.secrets == []
+    assert ts.resolved_model.inference.key_env == "HF_INFERENCE_TOKEN"
 
 
 def test_serve_takes_the_run_dirs_environment(tmp_path, monkeypatch, pins):
@@ -258,7 +264,8 @@ def test_serve_takes_the_run_dirs_environment(tmp_path, monkeypatch, pins):
     monkeypatch.delenv("RUN_NAME", raising=False)
     run = tmp_path / "run"
     run.mkdir()
-    (run / "run.env").write_text("RUN_NAME=from-run-env\nHF_TOKEN=run-env-token\n")
+    (run / "run.env").write_text("RUN_NAME=from-run-env\nHF_TOKEN=run-env-token\n"
+                                "BOARD_SPACE=from-run-env\n")
     tokens = []
 
     def starter(env):

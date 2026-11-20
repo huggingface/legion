@@ -62,7 +62,7 @@ async def test_moved_world_is_republished_without_a_relaunch(tmp_path, store, cl
         monkeypatch.setenv("FLOCK_WORLD_HOST_FILE", str(host_file))
         monkeypatch.setenv("WORLD_TOKEN", SECRET)
         spec = SwarmSpec.model_validate({
-            "swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/sh",
+            "swarm": "demo", "namespace": "ns", "bucket_id": "ns/sh",
             "world": {"url": TEMPLATE, "token_env": "WORLD_TOKEN"},
             "inference": FAKE_INFERENCE,
             "types": {"researcher": {**HB, "model": "m",

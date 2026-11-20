@@ -21,6 +21,8 @@ uv run --locked --with '../cib-harbor/adapter[hub]' collab-intel-harbor-run \
 ```
 
 This benchmark uses the dataset's launcher with Flock's native Harbor runner.
+Its native config has no Flock `namespace` field: model billing is configured at the
+benchmark's Gemini gateway, independently of HF Jobs and Inference Providers.
 Keep one evaluated agent; the task supplies its teammates. The benchmark launcher configures
 its model gateway and preserves Stanford's solo eligibility rule and score aggregation.
 

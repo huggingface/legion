@@ -47,7 +47,7 @@ def raw(**types) -> dict:
                            "agents_per_worker": 2},
             "calc": {**HB, "model": "m", "replicas": 2, "agents_per_worker": 2,
                      "tools": ["add"]}}
-    return {"swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/sh",
+    return {"swarm": "demo", "namespace": "ns", "bucket_id": "ns/sh",
             "inference": GPU, "types": {**base, **types}}
 
 
@@ -219,7 +219,7 @@ def _experiment(root: Path, *, replicas: int = 2, prompt: str = "You are a resea
          **type_extra}
     f = root / "spec.yaml"
     f.write_text(yaml.safe_dump({"swarm": "demo", "namespace": "ns",
-                                 "bucket": "hf://buckets/ns/sh", "types": {"researcher": t},
+                                 "bucket_id": "ns/sh", "types": {"researcher": t},
                                  "inference": GPU}))
     return f
 

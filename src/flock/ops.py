@@ -27,6 +27,7 @@ from urllib.parse import urlsplit
 import yaml
 from pydantic import ValidationError
 
+from flock.buckets import resolve_bucket_id
 from flock.client import Client, ClientError, local_run
 from flock.models import SwarmSpec, loop_refusals, parse_duration
 from flock.specrender import render, source_of
@@ -316,7 +317,7 @@ def probe_targets(spec: SwarmSpec) -> set[tuple]:
     """What preflight probes per type: its model on its block, sent as `request_model` to its
     endpoints, with the block's key and headers. An update probes again when this changes."""
     return {(r.qualified, r.request_model, tuple(r.inference.endpoints), r.inference.key_env,
-             tuple(sorted(r.inference.headers.items())))
+             tuple(sorted(r.headers.items())))
             for ts in spec.types.values() if (r := ts.resolved_model) is not None}
 
 
@@ -364,6 +365,19 @@ def is_swarm_name(target: str) -> bool:
         and not target.endswith((".yaml", ".yml"))
 
 
+def prepare_bucket(spec: SwarmSpec, env: Mapping[str, str]) -> None:
+    """Resolve and create a configured bucket before launch, on every compute backend.
+    The spec keeps only its qualified ID; the explicit billing namespace is unchanged."""
+    if not spec.bucket_id:
+        return
+    try:
+        hf = _hf_api(env)
+        spec.bucket_id = resolve_bucket_id(spec.bucket_id, spec.namespace, hf)
+        hf.create_bucket(spec.bucket_id, private=True, exist_ok=True)
+    except Exception as e:  # noqa: BLE001 - refuse before starting any jobs or local processes
+        raise SpecError([f"bucket {spec.bucket_id}: {type(e).__name__}: {e}"]) from None
+
+
 def launch(api: Client, spec: SwarmSpec, spec_file: str, *, env_files=(),
            source: dict[str, str] | None = None, types: list[str] | None = None, agents: list[str] | None = None,
            preflight: bool | None = None, strict: bool = False,
@@ -397,6 +411,10 @@ def launch(api: Client, spec: SwarmSpec, spec_file: str, *, env_files=(),
             if hold and api.answers():
                 raise SpecError([(f"--hold: a controller already serves this run: `flock stop "
                                  f"{spec.swarm} --release` first")], done)
+            try:
+                prepare_bucket(spec, environment(api, env_files))
+            except SpecError as e:
+                raise SpecError(e.lines, done) from None
             if spec.compute.kind == "local" or not api.answers():
                 try:
                     started = up(api, spec, spec_file, env_files, say=say, hold=hold)
@@ -473,7 +491,8 @@ def _launch(api, spec, spec_file, bundle, done, source, types, agents, preflight
     return done
 
 
-def update(api: Client, spec: SwarmSpec, spec_file: str, *, sources: dict[str, str] | None = None,
+def update(api: Client, spec: SwarmSpec, spec_file: str, *, env_files=(),
+           sources: dict[str, str] | None = None,
            preflight: bool | None = None, strict: bool = False, replicas: str = "keep",
            check: bool = False, source: dict[str, str] | None = None,
            say: Callable[[str], None] = lambda _: None) -> dict[str, Any]:
@@ -488,7 +507,9 @@ def update(api: Client, spec: SwarmSpec, spec_file: str, *, sources: dict[str, s
     `sources` (from `read_spec`) names the origins for `check`; `source` replaces the
     `X-Flock-Source` header (--ref). Without `check`, `hf_jobs` servers the spec needs and that
     do not run yet (a changed block or model) are started and waited for first (`say` gets the
-    progress); the controller cancels the ones no applied spec uses (controller/servers.py)."""
+    progress); the controller cancels the ones no applied spec uses (controller/servers.py).
+    `env_files` is the complete list used by `read_spec`, as for `launch`: it also supplies
+    HF_TOKEN for resolving a bare bucket ID."""
     from flock.live import diff_specs, keep_replicas, world_tool_changes
 
     if replicas not in ("keep", "spec"):
@@ -502,6 +523,12 @@ def update(api: Client, spec: SwarmSpec, spec_file: str, *, sources: dict[str, s
         raise SpecError([(f"no swarm {spec.swarm!r} is running on this controller: start it "
                           "with `flock launch`") if e.status == 404
                          else f"error {e.status}: {e.detail}"]) from None
+    if spec.bucket_id and "/" not in spec.bucket_id:
+        try:
+            spec.bucket_id = resolve_bucket_id(
+                spec.bucket_id, spec.namespace, _hf_api(environment(api, env_files)))
+        except Exception as e:  # noqa: BLE001 - report a Hub lookup failure
+            raise SpecError([f"bucket {spec.bucket_id}: {type(e).__name__}: {e}"]) from None
     if has_servers(spec) and not check:
         try:
             start_servers(api, spec, say, cancel=False)  # the running ones serve on
@@ -634,6 +661,10 @@ def start_local(spec: SwarmSpec, spec_file: str, env_files=(),
             raise SpecError([(f"a local run of {run.get('swarm')} is up in this directory: "
                               f"`flock stop {run.get('swarm')} --release` first")])
         return None
+    # Local startup loads the controller only on this path; keep ordinary CLI imports small.
+    from flock.controller.localrun import state_env
+
+    env, _ = state_env(env, spec)  # the controller's source YAML can still have a bare bucket_id
     LOCAL_DIR.mkdir(exist_ok=True)
     cmd = [sys.executable, "-m", "flock.controller.localrun", spec_file, "--no-apply",
            "--data-dir", str(LOCAL_DIR), *(a for f in env_files for a in ("--env", f))]
@@ -749,9 +780,9 @@ def up(api: Client, spec: SwarmSpec, spec_file: str, env_files=(), *,
     "url"}. SpecError when it cannot start them or they do not come up. `hold` (Slurm): the
     controller job restores every swarm held (<run dir>/controller.hold; refused when that job
     is already queued: it would start without it)."""
-    if spec.compute.kind == "local":
-        return start_local(spec, spec_file, env_files, api.env)
     vals = environment(api, env_files)
+    if spec.compute.kind == "local":
+        return start_local(spec, spec_file, env_files, vals)
     if spec.compute.kind == "slurm":
         return _up_slurm(api, spec, vals, say, hold)
     return _up_hf(api, spec, vals, say)
@@ -764,6 +795,8 @@ def _up_slurm(api: Client, spec: SwarmSpec, vals: Mapping[str, str], say, hold=F
     if d is None:
         raise SpecError(["no controller answers and no run directory to start one from",
                          "`flock init RUN_DIR --from FOLDER`, then `flock --run RUN_DIR launch ...`"])
+    # The batch script reads this instead of resolving the source YAML again.
+    (d / "hosts" / "bucket_id").write_text(spec.bucket_id + "\n")
     roles = [*(["world"] if spec.world and spec.world.command else []), "controller"]
     jobs = {r: _job_name(r, d) for r in roles}
     if hold:  # controller.sbatch reads it at start and removes it once held

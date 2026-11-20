@@ -111,14 +111,29 @@ agents holds a private number, and the team must list them all in ascending orde
 one task per slot, `agg-pPP-nNN-sKK`, whose instruction states that slot's number, and the
 [example](../experiments/s3-aggregation/spec.yaml) gives each agent its own: its selector
 `<team>-s*` matches the team's N tasks (see above). It runs one team on HF Sandboxes, with the
-board on a public Space that you delete after the run. It needs `HF_TOKEN` with read access to
-the dataset and `HF_INFERENCE_TOKEN` for the agents. `TEAM` and `N` pick another team (e.g.
+board on a public Space chosen for that run. `HF_TOKEN` needs dataset read access,
+Jobs permission, and create/write access to the board's Space and storage bucket.
+`HF_INFERENCE_TOKEN` is the agents' inference key. `TEAM` and `N` pick another team (e.g.
 `TEAM=agg-p07-n08 N=8`). The dataset README covers the cluster, the board rules, the scaling
 sweep and the metrics.
 
+The example omits `namespace`: sandboxes use `HF_TOKEN`'s personal account and router calls
+use the inference key's default billing account with no bill-to header. `BOARD_SPACE` is
+required: choose a fresh bare name for each independent run; it resolves under `HF_TOKEN`'s
+account. Dataset read access to `HuggingFaceSwarms/s3-aggregation` is separate from personal
+Jobs, Space and bucket permissions. See [billing and storage](billing.md).
+The default local workers do not need a run bucket. For HF Jobs or Slurm workers, set
+`bucket_id: flock-runs`: launch qualifies it as `<your-username>/flock-runs` and creates
+the bucket private if missing. A qualified ID selects storage explicitly. Use
+`[namespace/]name`, without a bucket URL or path prefix.
+
 ```sh
+export BOARD_SPACE="s3-aggregation-$(uv run python -c 'import uuid; print(uuid.uuid4().hex[:12])')"
 uv run flock launch experiments/s3-aggregation/spec.yaml
 ```
+
+Retain that value when resuming the same run. After all its workers have stopped, you may
+delete a board newly created for this run; leave pre-existing and shared boards in place.
 
 ## s3-maze
 
@@ -135,15 +150,23 @@ the run. The example includes a protocol hint in its team text (`team.md`, the s
 `team_file`), so each agent reads the board and claims a door before it goes through one; remove
 `team_file` for the neutral condition of the earlier sweep. It needs the dataset on the shared
 disk for its `registries.conf` (podman pulls Docker Hub images through `mirror.gcr.io`),
-`HF_TOKEN` with read access to it and the run's bucket, `HF_INFERENCE_TOKEN` for the agents, and
-the Git credential helper for a private task repo ([Slurm](slurm.md), "Containers"):
+`HF_TOKEN` with read access to `HuggingFaceSwarms/s3-maze` and bucket create/write access in
+your personal account, a separate `HF_INFERENCE_TOKEN` with personal Inference Providers
+permission for the agents, and
+the Git credential helper for a private task repo ([Slurm](slurm.md), "Containers").
+
+The example omits `namespace`, so router calls use the inference key's default personal
+billing account with no org bill-to header. Set `BUCKET_ID` to a bare name such as
+`flock-runs` (resolved under `HF_TOKEN`'s account) or a qualified `<your-username>/<name>`.
+Launch creates a missing bucket private and retains an existing bucket's visibility.
+See [billing and storage](billing.md) for personal permissions and optional org billing.
 
 ```sh
 DS=/fsx/$USER/s3-maze
 hf download HuggingFaceSwarms/s3-maze --repo-type dataset --revision 3b6c363d92626bd4d97a7ca89964fb850982d9ab --local-dir $DS
 printf 'SLURM_PARTITION=hopper-cpu\nSLURM_MAX_MEM_PER_CPU_MB=2000\nVENV=%s\nCONTAINERS_REGISTRIES_CONF=%s\n' \
   "$PWD/.venv" "$DS/flock/registries.conf" > cluster.env
-# secrets.env (mode 600): HF_TOKEN, HF_INFERENCE_TOKEN, NAMESPACE, BUCKET
+# secrets.env (mode 600): HF_TOKEN, HF_INFERENCE_TOKEN, BUCKET_ID
 uv run flock init $PWD/runs/maze-t01-n04 --from experiments/s3-maze --profile cluster.env --secrets secrets.env
 echo RUN_NAME=maze-t01-n04 >> runs/maze-t01-n04/run.env
 export FLOCK_RUN_DIR=$PWD/runs/maze-t01-n04

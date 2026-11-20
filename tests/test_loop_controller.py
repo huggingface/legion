@@ -179,7 +179,7 @@ async def test_turn_end_under_max_working_runs_on_the_controller(store, clock, t
         sim = Sim(store, clock, tick, c)
         sim.loops = app.state.loops
         spec = SwarmSpec.model_validate({
-            "swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/sh",
+            "swarm": "demo", "namespace": "ns", "bucket_id": "ns/sh",
             "inference": CAP, "types": {"researcher": {
                 "replicas": 2, "agents_per_worker": 2, **HB, "model": "m",
                 "loop": {"prompt": "go", "while": {"max_rounds": 2}}}}})
@@ -488,7 +488,7 @@ async def test_type_budget_usd_stops_the_loop(sim):
 def provider_spec(loop: dict, max_working: int | None = None) -> dict:
     inference = {"urls": ["http://unused/v1"], "api_key_env": "K",
                  **({"max_working": max_working} if max_working else {})}
-    return {"swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/sh", "inference": inference,
+    return {"swarm": "demo", "namespace": "ns", "bucket_id": "ns/sh", "inference": inference,
             "types": {"researcher": {**HB, "model": "m", "replicas": 2,
                                      "agents_per_worker": 2, "loop": loop}}}
 

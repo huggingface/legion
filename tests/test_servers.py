@@ -79,9 +79,11 @@ def spec(inference=None, **types) -> dict:
         "inference": inference or {"hf_jobs": HF_JOBS, "max_working": 3}}).model_dump(mode="json")
 
 
-def test_launch_wait_pin_reattach_and_cancel(controller, hub, proxy, store, clock):
+@pytest.mark.parametrize("namespace", ["", "org"])
+def test_launch_wait_pin_reattach_and_cancel(controller, hub, proxy, store, clock, namespace):
     app, c = controller()
     body = spec()
+    body["namespace"] = namespace
     r = c.put("/swarms/s", json=body)
     assert r.status_code == 400 and "hf_jobs servers are not started" in r.text
     [row] = c.post("/swarms/s/servers", json=body).json()
@@ -93,11 +95,12 @@ def test_launch_wait_pin_reattach_and_cancel(controller, hub, proxy, store, cloc
         "--reasoning-parser", "qwen3", "--tensor-parallel-size", "1", "--max-num-seqs", "3",
         "--max-model-len", "131072"]
     assert (run["image"], run["flavor"], run["expose"], run["timeout"], run["namespace"]) == (
-        DEFAULT_VLLM_IMAGE, "a100-large", [8000], 7200, "me")  # namespace: the token's account
+        DEFAULT_VLLM_IMAGE, "a100-large", [8000], 7200, namespace or "me")
     deadline = int(clock().timestamp()) + 20 * 60 + 300  # startup_timeout, then the apply's
     assert run["labels"] == {"swarm": "s", "inference": row["group"], "replica": "0",
                              "retire": str(deadline)}
-    assert (row["state"], row["stage"], row["namespace"]) == ("starting", "SCHEDULING", "me")
+    assert (row["state"], row["stage"], row["namespace"]) == (
+        "starting", "SCHEDULING", namespace or "me")
 
     servers = app.state.servers
     hub.set_stage(job, "RUNNING")

@@ -3,7 +3,7 @@
 - GET /api/buckets/...: every bucket is empty (`[]`); `hub.asked` lists these requests.
 - POST /api/jobs/<ns>: the job runs on this machine as `python -m flock.worker.main` (what
   flock's worker image ends in, `exec flock-worker`) with the job's environment and secrets,
-  minus BUCKET (the agents' state stays on this disk), its /work and HOME under `root/<job id>`.
+  minus BUCKET_ID (the agents' state stays on this disk), its /work and HOME under `root/<job id>`.
   `hub.jobs[id]` keeps the job spec as huggingface_hub sent it.
 - GET /api/jobs/<ns>/<id>: RUNNING, then COMPLETED (exit 0), ERROR (another exit) or CANCELED.
 - POST /api/jobs/<ns>/<id>/cancel: a running job's processes get SIGTERM; CANCELED.
@@ -41,7 +41,7 @@ class Hub:
         env = {**{k: os.environ[k] for k in ("PATH", "PYTHONPATH") if k in os.environ},
                **spec.get("environment", {}), **spec.get("secrets", {}),
                "WORK_ROOT": str(d / "work" / "agents"), "HOME": str(d / "home")}
-        env.pop("BUCKET", None)
+        env.pop("BUCKET_ID", None)
         d.mkdir(parents=True)
         with (d / "log").open("wb") as log:
             self.procs[job] = subprocess.Popen(
@@ -83,6 +83,8 @@ def handler(hub: Hub) -> type[BaseHTTPRequestHandler]:
             if parts[:2] == ["api", "buckets"]:
                 hub.asked.append(self.path)
                 self._json([])
+            elif parts == ["api", "whoami-v2"]:
+                self._json({"name": "ns", "type": "user"})
             elif parts[:2] == ["api", "jobs"] and len(parts) == 4 and parts[3] in hub.jobs:
                 self._json(hub.info(parts[3]))
             elif parts[:2] == ["api", "jobs"] and len(parts) == 3:
@@ -96,7 +98,9 @@ def handler(hub: Hub) -> type[BaseHTTPRequestHandler]:
             parts = urlsplit(self.path).path.strip("/").split("/")
             size = int(self.headers.get("content-length") or 0)
             body = json.loads(self.rfile.read(size) or b"{}")
-            if parts[:2] == ["api", "jobs"] and len(parts) == 3:
+            if parts[:2] == ["api", "buckets"] and len(parts) == 4:
+                self._json({"url": f"https://huggingface.co/buckets/{parts[2]}/{parts[3]}"})
+            elif parts[:2] == ["api", "jobs"] and len(parts) == 3:
                 self._json(hub.run(parts[2], body))
             elif parts[:2] == ["api", "jobs"] and parts[4:] == ["cancel"] and parts[3] in hub.jobs:
                 hub.cancel(parts[3])

@@ -277,7 +277,7 @@ def spec_with(tmp_path, tools=None, tools_dir=None, **extra) -> tuple[SwarmSpec,
     t = {**HB, "model": "m"}
     if tools is not None:
         t["tools"] = tools
-    raw = {"swarm": "s", "namespace": "ns", "bucket": "b", "inference": FAKE_INFERENCE,
+    raw = {"swarm": "s", "namespace": "ns", "bucket_id": "b", "inference": FAKE_INFERENCE,
            "types": {"dev": t}, **extra}
     if tools_dir is not None:
         raw["tools_dir"] = tools_dir
@@ -307,7 +307,7 @@ def test_prepare_selection_and_defaults(tmp_path):
 
 
 def test_spec_fields_are_optional_and_checked():
-    base = {"swarm": "s", "namespace": "ns", "bucket": "b", "inference": FAKE_INFERENCE,
+    base = {"swarm": "s", "namespace": "ns", "bucket_id": "b", "inference": FAKE_INFERENCE,
             "types": {"dev": {**HB, "model": "m"}}}
     s = SwarmSpec.model_validate(base)
     assert s.tools_dir is None and s.tools_version is None and s.types["dev"].tools is None

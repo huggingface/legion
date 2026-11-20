@@ -5,6 +5,7 @@ model: Qwen/Qwen3.8-27B
 inference:
   hf_router:
     provider: deepinfra
+  api_key_env: HF_INFERENCE_TOKEN
   reasoning_effort: low
 task:
   repo: https://huggingface.co/datasets/HuggingFaceSwarms/AgentEscapeBench

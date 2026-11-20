@@ -154,7 +154,7 @@ class WorkerConfig:
             swarm=env["SWARM"],
             type=env["TYPE"],
             deadline=parse_iso(env["DEADLINE"]),
-            bucket=env.get("BUCKET") or None,
+            bucket=env.get("BUCKET_ID") or None,
             work_root=Path(env.get("WORK_ROOT", "/work/agents")),
             sync_interval=float(env.get("SYNC_INTERVAL", 180)),
             flush_interval=float(env.get("FLUSH_INTERVAL", 3.0)),

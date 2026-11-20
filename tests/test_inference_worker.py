@@ -22,7 +22,7 @@ WORKER_ENV = {
 
 
 def typespec(**types) -> dict[str, TypeSpec]:
-    return SwarmSpec.model_validate({"swarm": "s", "namespace": "n", "bucket": "b",
+    return SwarmSpec.model_validate({"swarm": "s", "namespace": "n", "bucket_id": "b",
                                      "types": types}).types
 
 

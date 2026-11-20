@@ -76,10 +76,10 @@ command -v sbatch >/dev/null && command -v squeue >/dev/null && command -v sacct
 "$VENV/bin/python" -c 'import flock.controller.slurm' 2>/dev/null \
   || die "venv has no slurm backend (import flock.controller.slurm failed); update the venv"
 if [ -z "${FLOCK_STATE_URL:-}" ]; then   # run.env may set it; else <the spec's bucket>/controller/<run>
-  BUCKET=$("$VENV/bin/python" -I -c 'import sys; from flock.specrender import render; print(render(sys.argv[1]).get("bucket") or "")' "$SPEC") \
-    || die "cannot read the bucket from $SPEC (run \`flock init $RUN_DIR\`)"
-  [ -n "$BUCKET" ] || die "$SPEC has no bucket: the controller's state has nowhere to go"
-  FLOCK_STATE_URL=${BUCKET%/}/controller/$RUN
+  BUCKET_ID=$(cat "$RUN_DIR/hosts/bucket_id") \
+    || die "cannot read the resolved bucket_id (run \`flock launch $SPEC\`)"
+  [ -n "$BUCKET_ID" ] || die "$SPEC has no bucket_id: the controller's state has nowhere to go"
+  FLOCK_STATE_URL=hf://buckets/$BUCKET_ID/controller/$RUN
 fi
 export FLOCK_STATE_URL
 

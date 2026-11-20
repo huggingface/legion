@@ -73,7 +73,7 @@ def test_apply_creates_agents_and_launches_workers(store, jobs, settings, clock,
     env = launch["env"]
     assert env["WORKER_ID"] == W0 and env["SWARM"] == "demo" and env["TYPE"] == "researcher"
     assert env["FLOCK_URL"] == "https://controller.invalid"
-    assert env["BUCKET"] == "hf://buckets/ns/sh" and env["MSGBOARD_URL"]
+    assert env["BUCKET_ID"] == "ns/sh" and env["MSGBOARD_URL"]
     assert env["DRAIN_WINDOW"] == "10m" and len(env["WORKER_INCARNATION"]) == 32
     assert "FLOCK_TOKEN" not in env
     lifetime = parse_duration("24h").total_seconds()
@@ -529,7 +529,7 @@ def test_resume_prompt_goes_through_max_working_admission(store, jobs, clock, ti
     from flock.models import SwarmSpec
 
     spec = SwarmSpec.model_validate({
-        "swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/b",
+        "swarm": "demo", "namespace": "ns", "bucket_id": "ns/b",
         "inference": {"urls": ["http://fake/v1"], "api_key_env": "K", "max_working": 1},
         "types": {"researcher": {**HB, "model": "m", "replicas": 1,
                                  "resume_prompt": "go on"}}})
