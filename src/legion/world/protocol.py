@@ -20,7 +20,7 @@ import hmac
 import re
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 WORLD_API = "v1"
 
@@ -77,6 +77,15 @@ class WorldTool(BaseModel):
     @property
     def read_only(self) -> bool:
         return self.annotations.get("readOnlyHint") is True
+
+    @model_validator(mode="before")
+    @classmethod
+    def _old_keys(cls, v: Any) -> Any:
+        # the keys' former prefix: ignored as unknown otherwise, and the upload/timeout silently off
+        old = sorted(k for k in v if k.startswith("x-flock-")) if isinstance(v, dict) else []
+        if old:
+            raise ValueError(f"{', '.join(old)}: renamed to x-legion-*")
+        return v
 
     @field_validator("name")
     @classmethod

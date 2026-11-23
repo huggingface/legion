@@ -159,6 +159,7 @@ def test_manifest_validation():
     for bad, msg in [({"world_api": "v2"}, "not supported"), ({"name": "Bad Name"}, "must match"),
                      ({"tools": [{"name": "a"}, {"name": "a"}]}, "listed twice"),
                      ({"tools": [{"name": "a", "parameters": {"type": "array"}}]}, "type object"),
+                     ({"tools": [{"name": "a", "x-flock-timeout_s": 5}]}, "renamed to x-legion"),
                      ({"version": " "}, "version")]:
         with pytest.raises(ValidationError, match=msg):
             WorldManifest.model_validate({**ok, **bad})
