@@ -80,9 +80,13 @@ def test_the_deploy_worker_exits_with_its_launcher():
     )
     worker = int(launcher.stdout.readline())
     try:
-        deadline = time.monotonic() + 5  # until its launcher watch runs
-        while len(os.listdir(f"/proc/{worker}/task")) < 2 and time.monotonic() < deadline:
-            time.sleep(0.02)
+        tasks = Path(f"/proc/{worker}/task")
+        if tasks.is_dir():  # until its launcher watch, a second thread, runs
+            deadline = time.monotonic() + 5
+            while len(os.listdir(tasks)) < 2 and time.monotonic() < deadline:
+                time.sleep(0.02)
+        else:  # no procfs (macOS): give the watch a second
+            time.sleep(1)
         assert running(worker)
         launcher.send_signal(signal.SIGKILL)
         launcher.wait()

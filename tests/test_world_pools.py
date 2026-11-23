@@ -44,17 +44,23 @@ def test_read_only_is_in_the_manifest_and_pools_are_checked():
         tool(pool="medium")
 
 
-async def test_slow_calls_do_not_starve_the_manifest_or_fast_tools():
+async def test_slow_calls_do_not_starve_the_manifest_or_fast_tools(monkeypatch):
+    """The slow pool is full with a call queued behind it: the manifest and a fast tool still
+    answer at once."""
+    monkeypatch.setattr(server, "SLOW_THREADS", 2)
     served = Served(Jammed())
     try:
         async with httpx.AsyncClient(base_url=served.url, headers=H, timeout=60) as c:
             slow = [asyncio.create_task(c.post("/tools/slow", json={"args": {}}))
-                    for _ in range(10)]
-            for _ in range(100):  # every slow call is in its pool
-                if (await c.get("/metrics")).json()["pools"]["slow"]["in_flight"] == 10:
+                    for _ in range(3)]
+            full = {"limit": 2, "in_flight": 3, "queued": 1}  # both threads busy, one waits
+            for _ in range(100):
+                pool = (await c.get("/metrics")).json()["pools"]["slow"]
+                if {k: pool[k] for k in full} == full:
                     break
                 await asyncio.sleep(0.05)
-            r = await c.get("/manifest")
+            assert {k: pool[k] for k in full} == full, pool
+            r = await asyncio.wait_for(c.get("/manifest"), 2)
             assert r.status_code == 200 and r.json()["name"] == "jammed"
             r = await asyncio.wait_for(c.post("/tools/peek", json={"args": {}}), 2)
             assert r.json() == {"ok": True, "result": {"by": "dev-0001"}}

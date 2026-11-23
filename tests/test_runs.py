@@ -96,6 +96,8 @@ def test_lifecycle(tiny):
     a = tiny.turns(w0, 3)
     assert (a["session_id"], a["resumed"]) == (session, True), a
     assert tiny.said(w0)[1:] == ["two", "three"]  # the same
+    ended = [e["data"]["turn_id"] for e in tiny.events(w0, "agent.turn_ended")]
+    assert ended == ["t-1", "t-2", "t-3"], ended  # the new worker goes on counting
     # swarm.redrain: a resent drain, harmless, when the drain poll beats the next heartbeat
     assert [e["name"] for e in tiny.events("tiny") if e["name"] != "swarm.redrain"] == [
         "swarm.spec_applied", "worker.launched", "swarm.spec_applied",  # launch, update

@@ -138,6 +138,8 @@ async def test_heartbeat_updates_agent_status_and_cost(client, clock, tick, pric
 
     clock.advance(100)
     assert (await client.get("/agents/researcher-0000")).json()["state"] == "unknown"
+    [w] = (await client.get("/workers", params={"swarm": "demo"})).json()
+    assert w["state"] == "unknown"
     clock.advance(100)
     assert (await client.get("/agents/researcher-0000")).json()["state"] == "dead"
     workers = (await client.get("/workers", params={"swarm": "demo"})).json()
