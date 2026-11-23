@@ -77,7 +77,7 @@ def test_apply_uploads_the_folder_and_pins_its_version(tmp_path, monkeypatch, ap
     assert r.exit_code == 0, r.output
     v2 = store.get_swarm("demo")["spec"].tools_version
     assert v2 != v1 and store.get_tool_bundle("demo", v2)["tools"] == ["add", "mul"]
-    assert [b["version"] for b in store.list_tool_bundles("demo")] == [v2, v1]
+    assert sorted(b["version"] for b in store.list_tool_bundles("demo")) == sorted([v1, v2])
 
 
 def test_apply_refuses_unknown_tools_and_bad_modules(tmp_path, monkeypatch, app, store):

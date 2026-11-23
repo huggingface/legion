@@ -266,7 +266,7 @@ def test_hf_jobs_launch_starts_the_controller_job_and_release_cancels_it(
     assert api.env["LEGION_URL"] == "https://job1--7860.hf.jobs" and "status" in done
     kw = hf.kwargs
     assert kw["network_group"] == "legion" and kw["namespace"] == "ns"  # jobdeploy's default
-    assert sorted(kw["secrets"]) == ["ANTHROPIC_API_KEY", "LEGION_TOKEN", "HF_TOKEN"]
+    assert sorted(kw["secrets"]) == ["ANTHROPIC_API_KEY", "HF_TOKEN", "LEGION_TOKEN"]
     assert kw["env"]["LEGION_STATE_URL"] == "hf://buckets/ns/legion/controller/legion"
 
     log.clear()

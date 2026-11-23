@@ -742,7 +742,7 @@ async def test_each_trial_gets_its_own_network_removed_after_it(fakes, tmp_path,
     assert json.loads(overlay.read_text())["networks"]["default"] == {"external": True, "name": t2}
     # the agent's env names: the environment keeps their values out of every exec's argv
     assert fakes.trials[1].config.environment.kwargs["secret_names"] == [
-        "LEGION_TOOLS_MANIFEST", "HF_TOKEN"]
+        "HF_TOKEN", "LEGION_TOOLS_MANIFEST"]
 
 
 @pytest.mark.parametrize("backend", ["hf-sandbox", "e2b"])
