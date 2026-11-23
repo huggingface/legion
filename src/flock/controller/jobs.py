@@ -143,6 +143,15 @@ class HubJobsClient:
         # reaches it directly, never through the Spaces edge or the jobs proxy.
         self.network_group = network_group
         self.calls: Counter[str] = Counter()  # Hub API calls by method, for the logs
+        self._account: str | None = None
+
+    def namespace(self, namespace: str) -> str:
+        """Resolve HF_TOKEN's account once when the spec leaves namespace unset."""
+        if namespace:
+            return namespace
+        if self._account is None:
+            self._account = self.api.whoami()["name"]
+        return self._account
 
     def launch_args(self, spec: TypeSpec, env: dict[str, str]) -> dict[str, Any]:
         """Image, command and env for one worker job (a type's own `image` always wins)."""
@@ -161,13 +170,13 @@ class HubJobsClient:
             flavor=spec.flavor,
             timeout=int(timeout),
             labels=labels,
-            namespace=namespace,
+            namespace=self.namespace(namespace),
         )
         return job.id
 
     def inspect(self, job_id, *, namespace) -> JobState:
         self.calls["inspect_job"] += 1
-        job = self.api.inspect_job(job_id=job_id, namespace=namespace)
+        job = self.api.inspect_job(job_id=job_id, namespace=self.namespace(namespace))
         status = job.status
         return JobState(
             stage=str(getattr(status.stage, "value", status.stage)), message=status.message
@@ -175,17 +184,17 @@ class HubJobsClient:
 
     def cancel(self, job_id, *, namespace) -> None:
         self.calls["cancel_job"] += 1
-        self.api.cancel_job(job_id=job_id, namespace=namespace)
+        self.api.cancel_job(job_id=job_id, namespace=self.namespace(namespace))
 
     def logs_tail(self, job_id, *, namespace, n: int = 5) -> list[str]:
         """Last `n` log lines of a finished job (one Hub call), for a crash's last_error."""
         self.calls["fetch_job_logs"] += 1
-        return list(self.api.fetch_job_logs(job_id=job_id, namespace=namespace, tail=n))[-n:]
+        return list(self.api.fetch_job_logs(job_id=job_id, namespace=self.namespace(namespace), tail=n))[-n:]
 
     def list(self, labels, *, namespace) -> list[JobListing]:
         self.calls["list_jobs"] += 1
         out = []
-        for job in self.api.list_jobs(labels=labels, namespace=namespace):
+        for job in self.api.list_jobs(labels=labels, namespace=self.namespace(namespace)):
             stage = job.status.stage if job.status else "UNKNOWN"
             out.append(
                 JobListing(
@@ -201,7 +210,8 @@ class HubJobsClient:
 
 def hub_jobs_client(env: Mapping[str, str], dep: Any, data_dir: str) -> HubJobsClient:
     """The controller's client for compute `hf-jobs` (flock.registry)."""
-    return HubJobsClient(token=env.get("HF_TOKEN"), network_group=dep.network_group)
+    return HubJobsClient(token=env.get("HF_TOKEN"), wheel_url=env.get("FLOCK_WHEEL_URL"),
+                         network_group=dep.network_group)
 
 
 @dataclass

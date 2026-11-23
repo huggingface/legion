@@ -206,7 +206,7 @@ def test_compile_gives_one_harbor_type_per_role(tmp_path):
                              sha256="f" * 64)
     swarm = compile_spec(spec, TASK, bundle)
 
-    assert (swarm.swarm, swarm.namespace, swarm.bucket, swarm.compute.kind) == (
+    assert (swarm.swarm, swarm.namespace, swarm.bucket_id, swarm.compute.kind) == (
         "lanes", "", "", "local",
     )
     blocks = swarm.inference_blocks()  # the run's, and the role's own
@@ -313,8 +313,8 @@ def test_only_the_blocks_the_roles_run_on_are_checked(tmp_path):
 @pytest.mark.parametrize(("edit", "error"), [
     (lambda d: None, "cannot reach"),  # hf-sandbox
     (lambda d: d.update(environment={"backend": "hf-sandbox"}, compute="hf-jobs",
-                        namespace="ns", bucket="hf://buckets/ns/b"), "cannot reach"),
-    (lambda d: d.update(environment={"backend": "podman"}, compute="slurm", bucket="hf://b/x"),
+                        namespace="ns", bucket_id="ns/b"), "cannot reach"),
+    (lambda d: d.update(environment={"backend": "podman"}, compute="slurm", bucket_id="ns/b"),
      "each worker's own node"),
 ])
 def test_servers_on_this_machine_need_agents_on_it(tmp_path, edit, error):
@@ -402,7 +402,7 @@ def test_workers_env_reaches_the_hf_jobs_workers(tmp_path, monkeypatch, store, s
     """A task's `[environment.env]` `${VAR}` is filled from the worker's own env (Harbor's
     resolve_env_vars): `workers.env` puts it there, in every type and every launched job."""
     data = load_spec_yaml(COMPILE)
-    data.update(compute="hf-jobs", namespace="ns", bucket="hf://buckets/ns/sh")
+    data.update(compute="hf-jobs", namespace="ns", bucket_id="ns/sh")
     data["workers"]["env"] = {"PYBOT_REPO": "${PYBOT_REPO}"}
     for name in ("team.md", "answers.md", "round.md"):
         (tmp_path / name).write_text("x")
@@ -459,7 +459,7 @@ def test_harbor_agents_get_flock_names_and_their_roles_reach_each_assign(
     from flock.controller.naming import HANDLE_RE
 
     data = load_spec_yaml(COMPILE)
-    data.update(compute="hf-jobs", namespace="ns", bucket="hf://buckets/ns/sh")
+    data.update(compute="hf-jobs", namespace="ns", bucket_id="ns/sh")
     for name in ("team.md", "answers.md", "round.md"):
         (tmp_path / name).write_text("x")
     (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
@@ -550,6 +550,28 @@ def test_naming_consecutive_id_updates_never_rename_running_agents(tmp_path):
         keep_pins(words, consecutive_swarm(tmp_path))
 
 
+def test_one_task_per_agent_refuses_a_resize_in_a_run(tmp_path):
+    """A type whose agents each run their own task (sources.pin_tasks): an update keeps the
+    pinned map, so a count that changes the agents is refused, never an agent without a task."""
+    from flock.ops import SpecError, keep_pins
+
+    def swarm(count):
+        (tmp_path / "spec.yaml").write_text(
+            "name: crew\nmodel: m\nnaming: consecutive-id\ntask:\n"
+            "  repo: https://huggingface.co/datasets/a/b\n  selector: [team-s01, team-s02]\n"
+            f"agents:\n  count: {count}\n")
+        tasks = {f"agent-{k:03d}": {**TASK["task"], "path": f"tasks/team-s{k:02d}"}
+                 for k in range(1, count + 1)}
+        return compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), {**TASK, "tasks": tasks})
+
+    old, same = swarm(2), swarm(2)
+    keep_pins(old, same)
+    assert same.types["agent"].harbor.task["tasks"] == old.types["agent"].harbor.task["tasks"]
+    for count in (3, 1):
+        with pytest.raises(SpecError, match="one task per agent can't be resized in a run"):
+            keep_pins(old, swarm(count))
+
+
 def test_naming_consecutive_id_a_raised_ramp_gets_consecutive_names(tmp_path, store, clock):
     """The last role's ramp raised (count 1 -> 3): its new agents get agent-NNN names, never
     `<type>-NNNN` (the ramp is compared too, not only the replicas, which a ramp keeps at 0)."""
@@ -577,3 +599,22 @@ async def test_the_controller_refuses_a_naming_change_in_a_running_swarm(tmp_pat
     words = swarm.model_copy(update={"naming": "words"})
     r = await client.put("/swarms/crew", json=words.model_dump(mode="json"))
     assert r.status_code == 400 and "names never change in a run" in r.text, r.text
+
+
+def test_e2b_workers_get_the_e2b_key_not_the_hub_token(tmp_path):
+    data = load_spec_yaml(COMPILE)
+    data["environment"] = {"backend": "e2b"}
+    for name in ("team.md", "answers.md", "round.md"):
+        (tmp_path / name).write_text("x")
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    swarm = compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
+    assert swarm.types["answers"].secrets == ["MSGBOARD_OPERATOR_TOKEN", "E2B_API_KEY"]
+    data.update(compute="hf-jobs", namespace="ns", bucket_id="ns/b")  # its bucket
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    swarm = compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
+    assert swarm.types["answers"].secrets == [
+        "MSGBOARD_OPERATOR_TOKEN", "HF_TOKEN", "E2B_API_KEY"]
+    data.update(compute="slurm", bucket_id="ns/b")
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    with pytest.raises(ValueError, match="compute slurm keeps E2B_API_KEY"):
+        Spec.load(tmp_path / "spec.yaml", env={})

@@ -20,20 +20,28 @@ the world more CPUs (about 28 CPUs and 54 GB at 1,000 agents; 8 CPUs
 serve 10 agents); set `limits.alive` (agents that exist at once) and raise `limits.budget_usd`.
 hf-sandbox quotas at 1,000 sandboxes are untested.
 
+The example omits `namespace`: worker/controller Jobs, sandboxes and vLLM Jobs use
+`HF_TOKEN`'s personal account. Router requests use the inference key's default billing
+account without an org bill-to header. See [billing and storage](../../docs/billing.md).
+
 **Needs**
 
-- `HF_TOKEN`: Jobs permission in `namespace` and access to `BUCKET` (it starts the workers and
+- `HF_TOKEN`: Jobs permission and bucket create/write access in your personal account (it starts the workers and
   the sandboxes and keeps the run's state).
-- `HF_INFERENCE_TOKEN`: inference only; every sandbox holds it.
-- `PYBOT_REPO`: the code dataset (`<ns>/<name>`), seeded before the world starts. It must be
+- `HF_INFERENCE_TOKEN`: inference only; every sandbox holds it. Enable Inference Providers
+  calls for your personal billing account. For `hf_jobs` model servers it also needs read
+  access to the job's namespace for the jobs proxy.
+- `PYBOT_REPO`: the code dataset (`<your-username>/<name>`), seeded before the world starts. It must be
   public: agents clone it without a token.
 - `PYBOT_TASK_REVISION`: the commit of `HuggingFaceSwarms/pybot` to run. The task dataset is
   private: `HF_TOKEN` needs read access to it.
 - `WORLD_URL` and `PYBOT_WORLD_TOKEN`: the running world's URL and its `FLOCK_WORLD_TOKEN`
   (a new one per run).
-- `BOARD_URL` and `MSGBOARD_OPERATOR_TOKEN`: a public msgboard Space and its operator token;
+- `BOARD_URL` and `MSGBOARD_OPERATOR_TOKEN`: a dedicated public msgboard Space in your personal account and its operator token;
   the channels (general and one per lane) are created at start.
-- `BUCKET` (`hf://buckets/<ns>/<name>`); optional `RUN_NAME`. `flock init` writes every
+- `BUCKET_ID` (`[<ns>/]<name>`, created private at launch if missing); optional `RUN_NAME`.
+  A bare name uses `HF_TOKEN`'s account, e.g. `flock-runs` becomes
+  `<your-username>/flock-runs`. `flock init` writes every
   `${VAR}` of the spec into `run.env`.
 
 The board's rules (post gap, length, threads, channel limits) are not enforced on hf-sandbox:

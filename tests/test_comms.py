@@ -35,7 +35,7 @@ def board():
 
 
 def swarm_raw(**comms) -> dict:
-    return {"swarm": "sw", "namespace": "ns", "bucket": "hf://buckets/ns/b",
+    return {"swarm": "sw", "namespace": "ns", "bucket_id": "ns/b",
             "comms": {"url": "http://board", "invite_env": INVITE_ENV, "channel": "#flock-test",
                       **comms},
             "inference": FAKE_INFERENCE, "types": {"dev": {**HB, "model": "m", "comms": True}}}

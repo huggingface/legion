@@ -20,7 +20,7 @@ from .conftest import FAKE_INFERENCE, HB
 
 SPEC = {
     "swarm": "demo", "namespace": "acme",
-    "bucket": "hf://buckets/acme/runs",
+    "bucket_id": "acme/runs",
     "comms": {"board": "space", "template": "acme/msgboard-template", "invite_env": "BOARD_INVITE",
               "channel": "general", "space_secrets": {"HF_TOKEN": "BOARD_BUCKET_TOKEN"}},
     "inference": FAKE_INFERENCE,
@@ -284,7 +284,7 @@ def test_dashboard_row_written_and_rewritten(monkeypatch):
     ({"comms": {**SPEC["comms"], "url": "https://elsewhere.invalid/boards/demo"}}, "board"),
     # nothing hard-coded: another org's Spaces are refused for an acme registry
     ({"dashboard": {**DASH, "viewer": "https://otherorg-viewer.hf.space"}}, "viewer"),
-    ({"bucket": "hf://buckets/someone/runs"}, "namespace"),
+    ({"bucket_id": "someone/runs"}, "namespace"),
 ])
 def test_dashboard_refuses_rows_the_overview_drops(monkeypatch, over, why):
     monkeypatch.setattr(rundir, "bucket_store", lambda url, token: pytest.fail("written"))

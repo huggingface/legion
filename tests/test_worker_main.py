@@ -84,10 +84,10 @@ def test_config_from_env(tmp_path):
     cfg = WorkerConfig.from_env({
         "FLOCK_URL": "https://c.hf.space/", "FLOCK_TOKEN": "t", "WORKER_ID": WID,
         "SWARM": "sw", "TYPE": "researcher", "DEADLINE": "2026-10-15T09:12:00Z",
-        "BUCKET": "hf://buckets/ns/b"})
+        "BUCKET_ID": "ns/b"})
     assert cfg.url == "https://c.hf.space" and cfg.work_root.as_posix() == "/work/agents"
     assert cfg.deadline.year == 2026 and cfg.deadline.tzinfo is not None
-    assert cfg.sync_interval == 180 and cfg.bucket == "hf://buckets/ns/b"
+    assert cfg.sync_interval == 180 and cfg.bucket == "ns/b"
     assert cfg.drain_window == timedelta(minutes=10)  # default until the env says otherwise
 
 

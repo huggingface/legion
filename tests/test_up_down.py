@@ -139,7 +139,8 @@ def test_launch_starts_controller_and_world_waits_then_creates_and_release_ends_
                              f"scancel --signal=TERM --batch -u {ME} -n flock-world-run",
                              f"scancel -u {ME} -n flock-ctl-run"]  # the world ended on SIGTERM
     assert "ended flock-world-run" in res.output and "ended flock-ctl-run" in res.output
-    assert not any((r.run / "hosts").iterdir())  # launch waits for the new jobs' host files
+    assert [p.name for p in (r.run / "hosts").iterdir()] == ["bucket_id"]
+    assert (r.run / "hosts" / "bucket_id").read_text() == "ns/sh\n"
 
     # launch on the released run: the infrastructure comes back, the swarm resumes
     r.calls.write_text("")
@@ -225,6 +226,9 @@ class FakeHf:
 
     def whoami(self):
         return {"name": "ns"}
+
+    def create_bucket(self, bucket_id, *, private, exist_ok):
+        assert bucket_id == "ns/sh" and private and exist_ok
 
     def list_jobs(self, labels, namespace):
         return [SimpleNamespace(id=j, status=SimpleNamespace(stage=s))

@@ -27,7 +27,7 @@ def spawn_spec(spawn=None, limits=None, **overrides) -> SwarmSpec:
     for name, o in overrides.items():
         types[name] = {**types.get(name, {}), **o}
     body = {
-        "swarm": "demo", "namespace": "ns", "bucket": "hf://buckets/ns/sh", "inference": FAKE_INFERENCE,
+        "swarm": "demo", "namespace": "ns", "bucket_id": "ns/sh", "inference": FAKE_INFERENCE,
         "types": {k: {**base, **v} for k, v in types.items()},
         "spawn": spawn if spawn is not None else {
             "leader": {"types": {"analyst": 3, "helper": 2}, "depth": 2},

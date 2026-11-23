@@ -4,6 +4,7 @@ Container networks are faked at their command boundary (flock.harbor.networking.
 
 import asyncio
 import json
+import math
 import shlex
 import shutil
 from pathlib import Path
@@ -252,7 +253,7 @@ def clock(monkeypatch):
 def type_spec(backend="docker", **limits):
     spec = Spec.load(EXAMPLES / "pi-hf.yaml", env={})
     spec.environment.backend = backend
-    if backend == "hf-sandbox":  # never the worker's Hub token
+    if backend in ("hf-sandbox", "e2b"):  # never the worker's Hub token
         spec.inference.api_key_env = "HF_INFERENCE_TOKEN"
     for key, value in limits.items():
         setattr(spec.limits, key, value)
@@ -328,24 +329,26 @@ def pi_models(fakes, n=0):
     return provider
 
 
-def endpoint_spec(inference, backend="docker", window=None):
+def endpoint_spec(inference, backend="docker", window=None, namespace=""):
     spec = Spec.load(EXAMPLES / "pi-hf.yaml", env={})
     spec.environment.backend, spec.inference = backend, Inference.model_validate(inference)
+    spec.namespace = namespace
     ts = compile_spec(spec, TASK).types["agent"]
     ts.resolved_model.context_window = window  # as the controller's apply pins it
     return ts
 
 
-async def test_pi_gets_the_router_provider_bill_to_and_context_window(fakes, tmp_path):
-    ts = endpoint_spec({"hf_router": {"provider": "deepinfra", "bill_to": "huggingface"}},
-                       window=262144)
+@pytest.mark.parametrize("namespace", ["", "huggingface"])
+async def test_pi_gets_the_router_provider_bill_to_and_context_window(fakes, tmp_path, namespace):
+    ts = endpoint_spec({"hf_router": {"provider": "deepinfra"}},
+                       window=262144, namespace=namespace)
     a = make_adapter(tmp_path / "work" / "agent-0000", "agent-0000", ts)
     _, events = await start(a)
     await a.send("go")
     await read(events, "turn_ended")
     provider = pi_models(fakes)
     assert provider["baseUrl"] == "https://router.huggingface.co/v1"
-    assert provider["headers"] == {"X-HF-Bill-To": "huggingface"}
+    assert provider.get("headers", {}) == ({"X-HF-Bill-To": namespace} if namespace else {})
     assert provider["models"] == [{"id": "moonshotai/Kimi-K2.5:deepinfra", "contextWindow": 262144}]
     assert "--model moonshotai/Kimi-K2.5:deepinfra" in fakes.pi[0]
     await a.close()
@@ -375,6 +378,32 @@ async def test_pi_reaches_this_machine_through_podman(fakes, tmp_path):
     assert len(fakes.trials) == 1
     assert pi_models(fakes)["baseUrl"] == "http://host.containers.internal:8000/v1"
     await a.close()
+
+
+async def test_an_agent_keeps_its_server_across_trials_and_workers(fakes, tmp_path, monkeypatch):
+    """The server is picked from the swarm and the agent's name, so the agent's Trial on the
+    worker it is restored on after a restart calls the server of its first one (whose prefix
+    cache holds its context), the one its heartbeat names."""
+    from flock.worker.agents import AgentRuntime
+    from flock.worker.events import Outbox
+
+    monkeypatch.setenv("SWARM", "s3-maze-07")  # the workers' env
+    ts = endpoint_spec({"urls": [f"http://10.0.0.{i}:8000/v1" for i in range(1, 15)]})
+    old, new = (make_adapter(tmp_path / w / "agent-001", "agent-001", ts) for w in ("w1", "w2"))
+    sid, events = await start(old)
+    await old.send("go")
+    await read(events, "turn_ended")
+    await old.close()
+    shutil.copytree(old.home / "sessions", new.home / "sessions")  # the bucket restore
+    _, events = await start(new, sid)
+    await new.send("go on")
+    await read(events, "turn_ended")
+    await new.close()
+    first, second = (t.config.agent.base_url for t in fakes.trials)
+    assert first == second == pi_models(fakes, 1)["baseUrl"]
+    rt = AgentRuntime("agent-001", "agent", ts, swarm="s3-maze-07", work_root=tmp_path / "w2",
+                      adapter=new, outbox=Outbox(), secret_source={})
+    assert rt.heartbeat().endpoint == first.removeprefix("http://").removesuffix("/v1")
 
 
 async def test_prompts_during_a_turn_join_the_next_turn(fakes, tmp_path):
@@ -716,11 +745,17 @@ async def test_each_trial_gets_its_own_network_removed_after_it(fakes, tmp_path,
         "FLOCK_TOOLS_MANIFEST", "HF_TOKEN"]
 
 
-async def test_a_sandbox_trial_gets_no_network(fakes, tmp_path):
-    a = adapter(tmp_path, backend="hf-sandbox")
+@pytest.mark.parametrize("backend", ["hf-sandbox", "e2b"])
+async def test_a_sandbox_trial_gets_no_network(fakes, tmp_path, backend):
+    a = adapter(tmp_path, backend=backend)
     await start(a)
     await a.close()
-    assert fakes.net == [] and fakes.trials[0].config.environment.extra_docker_compose == []
+    env = fakes.trials[0].config.environment
+    assert fakes.net == [] and env.extra_docker_compose == []
+    if backend == "e2b":  # Harbor's own E2B environment, living as long as the Trial
+        assert env.import_path == "flock.harbor.envs:E2B"
+        assert env.kwargs["sandbox_timeout_secs"] == math.ceil(
+            fakes.trials[0].config.agent.override_timeout_sec) + 600
 
 
 async def test_close_now_cancels_unverified_and_keeps_the_sessions(fakes, tmp_path):

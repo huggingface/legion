@@ -41,7 +41,7 @@ def slurm_spec(tmp_path: Path, **compute) -> SwarmSpec:
         **compute,
     }
     return SwarmSpec.model_validate({
-        "swarm": "demo", "bucket": "hf://buckets/ns/sh", "compute": block,
+        "swarm": "demo", "bucket_id": "ns/sh", "compute": block,
         "inference": FAKE_INFERENCE,
         "types": {"researcher": {**HB, "model": "m", "replicas": 2,
                                  "agents_per_worker": 2, "secrets": ["ANTHROPIC_API_KEY"],
@@ -76,7 +76,7 @@ def test_compute_spec_keys_and_resolution(tmp_path):
     assert cfg["max_cpus"] == "64"  # the spec's default is not a value it sets
     assert resolve(spec.compute, "other", env)["cpus"] == "8"
     assert "partition" not in resolve(None, "x", {})  # no built-in cluster: sbatch's default
-    with pytest.raises(ValueError, match="bucket is required"):
+    with pytest.raises(ValueError, match="bucket_id is required"):
         SwarmSpec.model_validate({"swarm": "d", "compute": "slurm", "types": {}})
     with pytest.raises(ValueError, match="unknown types"):
         slurm_spec(tmp_path, types={"nope": {"cpus": 1}})

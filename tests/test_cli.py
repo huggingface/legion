@@ -73,7 +73,7 @@ def _provider_app(store, clock, tool_call: bool):
 
 
 PROVIDER_SPEC = {
-    "swarm": "op", "namespace": "ns", "bucket": "hf://buckets/ns/b",
+    "swarm": "op", "namespace": "ns", "bucket_id": "ns/b",
     "inference": {"urls": ["http://fake/v1"], "api_key_env": "VLLM_API_KEY"},
     "types": {"worker": {**HB, "model": "Qwen/Small", "replicas": 1}},
 }

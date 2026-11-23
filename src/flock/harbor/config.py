@@ -21,10 +21,14 @@ class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
+Selector = Annotated[str, Field(min_length=1)]
+
+
 class TaskSettings(Settings):
     repo: str
     dataset: str | None = None
-    selector: str = Field(min_length=1)
+    # one task for every agent, or a list: one per agent by position (sources.pin_tasks)
+    selector: Selector | Annotated[list[Selector], Field(min_length=1)]
     revision: str = Field(default="main", min_length=1)
 
     @field_validator("repo")
@@ -98,8 +102,15 @@ class AgentSettings(Settings):
         return {f"agent-{i + 1:03d}": role for i, role in enumerate(roles)}
 
 
+# Backends whose Trials run in a remote VM: no mounts, no local network, no private URLs.
+SANDBOXES = ("hf-sandbox", "e2b")
+# An e2b sandbox's lifetime is fixed at creation: it also covers the Trial's setup (Pi's install,
+# the session's restore), which runs before FlockPi's trial_hours clock starts.
+E2B_SETUP_S = 600
+
+
 class EnvironmentSettings(Settings):
-    backend: Literal["docker", "podman", "hf-sandbox"] = "docker"
+    backend: Literal["docker", "podman", "hf-sandbox", "e2b"] = "docker"
     # Hugging Face Jobs hardware for hf-sandbox, e.g. cpu-basic or cpu-upgrade.
     flavor: str | None = Field(default=None, min_length=1)
 
@@ -161,7 +172,7 @@ class Config(Settings):
         if board is not None and "tools" not in self.model_fields_set:
             self.tools = ["message_board.*"]
         if (
-            self.environment.backend == "hf-sandbox"
+            self.environment.backend in SANDBOXES
             and board is not None
             and not board.get("space_id")
             and not board.get("url")  # flock: a board that is up (message_board.py)
@@ -169,7 +180,7 @@ class Config(Settings):
             # Agents reach a local board through a mounted Unix socket, and a
             # sandbox can't mount it. A run without a board is fine.
             raise ValueError(
-                "environment.backend hf-sandbox can't reach a local board: set "
+                f"environment.backend {self.environment.backend} can't reach a local board: set "
                 "message_board.space_id to put the board on a Space, or remove "
                 "resources.message_board"
             )

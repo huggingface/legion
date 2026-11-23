@@ -252,7 +252,7 @@ def test_world_spec_validates():
                        ({"url": "http://w", "port": 1}, "Extra inputs")]:
         with pytest.raises(ValidationError, match=msg):
             SwarmSpec.model_validate(raw(world))
-    jobs = {**raw(), "compute": "hf-jobs", "namespace": "ns", "bucket": "hf://buckets/ns/b"}
+    jobs = {**raw(), "compute": "hf-jobs", "namespace": "ns", "bucket_id": "ns/b"}
     with pytest.raises(ValidationError, match="world.url is required for compute hf-jobs"):
         SwarmSpec.model_validate(jobs)
     jobs["world"] = {"command": ["x"], "url": "http://world.invalid/"}  # one block, both scales

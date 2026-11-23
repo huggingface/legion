@@ -282,12 +282,12 @@ def hub(tmp_path, monkeypatch) -> fake_hub.Hub:
 
 
 # The cluster's worker script (scripts/slurm/worker.sbatch) cut down: the env file the controller
-# wrote, then the secrets file it names. No BUCKET: the agents' state stays on this disk, in the
+# wrote, then the secrets file it names. No BUCKET_ID: the agents' state stays on this disk, in the
 # test's folder (a harbor worker's WORK_ROOT is the node's /tmp/flock/<worker>/work).
 WORKER_SBATCH = """\
 #!/bin/bash
 set -a; . "$1"; . "$FLOCK_SECRETS_FILE"; set +a
-unset BUCKET
+unset BUCKET_ID
 export WORK_ROOT="{node}/$WORKER_ID/work"
 exec env PYTHONPATH="{pythonpath}" {python} -m flock.worker.main
 """
@@ -314,7 +314,7 @@ def test_slurm(tiny, slurm, hub, tmp_path, monkeypatch):
                f"secrets_file: {secrets}}}")
     spec = tiny.spec(compute=compute, backend="podman", env='FLUSH_INTERVAL: "0.2"', extra=(
         '      loop: {prompt: one, while: {max_rounds: 1}, resume_prompt: resumed}\n'
-        'limits: {run_timeout_seconds: 900}\nbucket: hf://buckets/ns/tiny\n'))
+        'limits: {run_timeout_seconds: 900}\nbucket_id: ns/tiny\n'))
     tiny.flock("launch", spec, "--skip-preflight")
     assert hub.asked == ["/api/buckets/ns/tiny/tree/tiny%2F?recursive=true"]  # empty
     w0, = tiny.names("writer", 1)
@@ -332,9 +332,9 @@ def test_slurm(tiny, slurm, hub, tmp_path, monkeypatch):
     assert env_file.parent == tmp_path / "launch" and env_file.stat().st_mode & 0o777 == 0o600
     env = read_env_file(env_file)
     assert {k: env[k] for k in ("FLOCK_URL", "FLOCK_CTL_HOST_FILE", "WORKER_ID", "SWARM",
-                                "TYPE", "BUCKET", "RUN", "WORK_ROOT", "FLOCK_HARNESS")} == {
+                                "TYPE", "BUCKET_ID", "RUN", "WORK_ROOT", "FLOCK_HARNESS")} == {
         "FLOCK_URL": f"http://${{CTL_HOST}}:{port}", "FLOCK_CTL_HOST_FILE": str(host),
-        "WORKER_ID": w, "SWARM": "tiny", "TYPE": "writer", "BUCKET": "hf://buckets/ns/tiny",
+        "WORKER_ID": w, "SWARM": "tiny", "TYPE": "writer", "BUCKET_ID": "ns/tiny",
         "RUN": tmp_path.name, "WORK_ROOT": f"/tmp/flock/{w}/work", "FLOCK_HARNESS": "harbor"}
     assert "HOME" not in env  # harbor runs podman on the node, never in a container
     assert env_file.read_text().splitlines()[1].endswith(": FLOCK_TOKEN HF_TOKEN FAKE_KEY")
@@ -385,7 +385,7 @@ def test_hf_jobs(tiny, hub, tmp_path, monkeypatch):
     tiny.controller(tmp_path / "ctl", compute="hf-jobs")
     tiny.flock("launch", tiny.spec(compute="hf-jobs", backend="hf-sandbox",
                                    env='FLUSH_INTERVAL: "0.2"',
-                                   extra="namespace: ns\nbucket: hf://buckets/ns/tiny\n"),
+                                   extra="namespace: ns\nbucket_id: ns/tiny\n"),
                "--skip-preflight")
     assert hub.asked == ["/api/buckets/ns/tiny/tree/tiny%2F?recursive=true"]  # empty
     w0, = tiny.names("writer", 1)
@@ -397,9 +397,9 @@ def test_hf_jobs(tiny, hub, tmp_path, monkeypatch):
     assert (sent["namespace"], sent["dockerImage"], sent["command"]) == (
         "ns", BOOTSTRAP_IMAGE, bootstrap_command())
     env = sent["environment"]
-    assert {k: env[k] for k in ("WORKER_ID", "SWARM", "TYPE", "BUCKET", "FLOCK_WHEEL_URL",
+    assert {k: env[k] for k in ("WORKER_ID", "SWARM", "TYPE", "BUCKET_ID", "FLOCK_WHEEL_URL",
                                 "FLOCK_HARNESS")} == {
-        "WORKER_ID": w, "SWARM": "tiny", "TYPE": "writer", "BUCKET": "hf://buckets/ns/tiny",
+        "WORKER_ID": w, "SWARM": "tiny", "TYPE": "writer", "BUCKET_ID": "ns/tiny",
         "FLOCK_WHEEL_URL": "hf://buckets/ns/tiny/flock.whl", "FLOCK_HARNESS": "harbor"}
     assert sent["secrets"] == {"FLOCK_TOKEN": "tiny-token", "FAKE_KEY": "fake-key",
                                "HF_TOKEN": "fake-hub-token"}  # hf-sandbox starts sandboxes with it

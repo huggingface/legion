@@ -16,7 +16,7 @@ The env file name carries the incarnation, so a job that starts late never reads
 of the job that replaced it.
 
 The env file (`KEY=value` lines, mode 600) holds NO secret values: only settings (WORKER_ID,
-WORKER_INCARNATION, SWARM, TYPE, FLOCK_HARNESS, DEADLINE, DRAIN_WINDOW, BUCKET, RUN, WORK_ROOT,
+WORKER_INCARNATION, SWARM, TYPE, FLOCK_HARNESS, DEADLINE, DRAIN_WINDOW, BUCKET_ID, RUN, WORK_ROOT,
 the controller URL template and host file, the type's env) and a comment that names the secrets the worker
 expects from the cluster's secrets file (FLOCK_TOKEN, HF_TOKEN, FLOCK_WORLD_TOKEN, ...). FLOCK_URL is `http://${CTL_HOST}:<port>` when
 `host_file` is set: the worker reads the controller's hostname from that file at start and
