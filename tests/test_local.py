@@ -8,7 +8,6 @@ import asyncio
 import io
 import json
 import os
-import random
 import re
 import sys
 import time
@@ -152,7 +151,8 @@ def _wait(jobs: LocalJobsClient, job_id: str, stage: str, timeout: float = 10) -
 
 
 def test_local_jobs_env_contract_and_stages(tmp_path):
-    base = {"PATH": os.environ["PATH"], "FLOCK_URL": "http://elsewhere", "HOME": "/h"}
+    base = {"PATH": os.environ["PATH"], "FLOCK_URL": "http://elsewhere", "HOME": "/h",
+            "FLOCK_AGENT_TOKEN": "agent", "FLOCK_CURRENT": "/x", "FLOCK_PROMPTS_DIR": "/p"}
     jobs = LocalJobsClient(root=tmp_path, command=_script(DUMP_ENV), base_env=base)
     env = {"FLOCK_URL": "http://127.0.0.1:1", "WORKER_ID": "s-w-w0000", "HEARTBEAT_INTERVAL": "1",
            "BUCKET_ID": "me/b"}
@@ -165,7 +165,8 @@ def test_local_jobs_env_contract_and_stages(tmp_path):
     assert seen["WORK_ROOT"] == str(tmp_path.resolve() / "agents")
     assert seen["FLOCK_LOCAL_PARENT_PID"] == str(os.getpid())
     assert seen["HEARTBEAT_INTERVAL"] == "1"  # the type's env wins over the local default
-    assert seen["HOME"] == "/h"
+    assert seen["HOME"] == "/h" and seen["FLOCK_PROMPTS_DIR"] == "/p"  # documented override
+    assert "FLOCK_AGENT_TOKEN" not in seen and "FLOCK_CURRENT" not in seen  # the caller's auth
     assert seen["BUCKET_ID"] == ""  # no bucket sync locally, whatever the spec says
     assert "hello from s-w-w0000" in "\n".join(jobs.logs_tail(jid, namespace=""))
     assert [j.job_id for j in jobs.list({"swarm": "s"}, namespace="")] == [jid]
@@ -198,44 +199,22 @@ def test_local_jobs_error_cancel_and_timeout(tmp_path, monkeypatch):
     assert jobs.alive() == [] and jobs.wait_all(0)
 
 
-def test_reconcile_launches_local_processes_with_the_job_env(tmp_path):
-    store = Store(tmp_path / "data")
-    jobs = LocalJobsClient(root=tmp_path / "run", command=_script(DUMP_ENV),
-                           base_env={"PATH": os.environ["PATH"]})
-    settings = Settings(public_url="http://127.0.0.1:5", token=TOKEN, rng=random.Random(0),
-                        secret_source={"FAKE_KEY": "k"})
-    spec = local_spec(agents_per_worker=1)
-    store.put_swarm(spec, time.time())
-    acts = reconcile(store, jobs, datetime.now(UTC), settings)
-    launched = sorted(a.target for a in acts if a.kind == "launch")
-    assert launched == ["loc-w-w0000", "loc-w-w0001"]
-    for wid in launched:
-        end = time.monotonic() + 10
-        while not (tmp_path / "run" / f"{wid}.env.json").exists():
-            assert time.monotonic() < end
-            time.sleep(0.05)
-        time.sleep(0.1)
-        env = json.loads((tmp_path / "run" / f"{wid}.env.json").read_text())
-        assert env["WORKER_ID"] == wid and env["SWARM"] == "loc" and env["TYPE"] == "w"
-        assert env["FLOCK_URL"] == "http://127.0.0.1:5" and env["FLOCK_TOKEN"] == TOKEN
-        assert env["FAKE_KEY"] == "k" and env["BUCKET_ID"] == "" and env["WORKER_INCARNATION"]
-    jobs.kill_all(grace=1)
-    store.close()
-
-
 def test_killed_local_worker_is_relaunched_within_seconds(tmp_path):
     store = Store(tmp_path / "data")
     jobs = LocalJobsClient(root=tmp_path / "run", command=_script("import time; time.sleep(60)"),
                            base_env={"PATH": os.environ["PATH"]})
     settings = Settings(token=TOKEN, secret_source={})
-    store.put_swarm(local_spec(agents_per_worker=2), time.time())
+    spec = SwarmSpec.model_validate({"swarm": "loc", "inference": FAKE,
+                                     "compute": {"kind": "local", "crash_backoff": "100ms"},
+                                     "types": {"w": {**TYPE, "agents_per_worker": 2}}})
+    store.put_swarm(spec, time.time())
     reconcile(store, jobs, datetime.now(UTC), settings)
     (job,) = jobs.alive()
     jobs.procs[job].popen.kill()  # never heartbeated: only the process exit tells
     start, kinds = time.monotonic(), []
     while "launch" not in kinds:
         assert time.monotonic() - start < 5, kinds
-        time.sleep(0.2)
+        time.sleep(0.05)
         kinds += [a.kind for a in reconcile(store, jobs, datetime.now(UTC), settings)]
     assert kinds[0] == "crash" and len(jobs.alive()) == 1 and jobs.alive() != [job]
     jobs.kill_all(grace=1)
@@ -310,12 +289,6 @@ def test_local_run_refuses_a_jobs_spec_and_a_bad_until(tmp_path):
     assert r.exit_code == 2 and "--until" in r.output
 
 
-def test_redacted_spec_hides_secret_looking_env():
-    spec = local_spec(env={"OPENAI_API_KEY": "sk-1", "MY_TOKEN": "t", "MODE": "fast"})
-    env = localrun.redacted_spec(spec)["types"]["w"]["env"]
-    assert env == {"OPENAI_API_KEY": "<redacted>", "MY_TOKEN": "<redacted>", "MODE": "fast"}
-
-
 def _events(store: Store, agent: str, *kinds: str) -> None:
     from flock.models import Event
 
@@ -387,7 +360,7 @@ def test_tracker_idle_after_a_turn_timeout(tmp_path):
 
 def test_write_bundle(tmp_path):
     store = Store(tmp_path / "data")
-    spec = local_spec(env={"X_TOKEN": "hunter2"})
+    spec = local_spec(env={"X_TOKEN": "hunter2", "OPENAI_API_KEY": "sk-1", "MODE": "fast"})
     store.put_swarm(spec, time.time())
     store.insert_agent("w-0000", "loc", "w", 0, time.time())
     store.insert_agent("w-0001", "loc", "w", 1, time.time())
@@ -400,7 +373,8 @@ def test_write_bundle(tmp_path):
     assert totals["agents"] == 2 and totals["turns_completed"] == 2 and totals["events"] == 4
     doc = json.loads((tmp_path / "run" / "run.json").read_text())
     assert doc["stop_reason"] == "idle" and doc["compute"] == "local"
-    assert doc["spec"]["types"]["w"]["env"]["X_TOKEN"] == "<redacted>"
+    assert doc["spec"]["types"]["w"]["env"] == {"X_TOKEN": "<redacted>",
+                                                "OPENAI_API_KEY": "<redacted>", "MODE": "fast"}
     assert "hunter2" not in (tmp_path / "run" / "run.json").read_text()
     merged = [json.loads(x) for x in (tmp_path / "run" / "events.jsonl").read_text().splitlines()]
     assert [e["agent"] for e in merged] == ["w-0001", "w-0001", "w-0000", "w-0000"]  # by time
@@ -430,23 +404,7 @@ def test_bundle_counts_a_removed_agents_interrupted_turn(tmp_path):
     store.close()
 
 
-def test_run_local_refuses_a_jobs_spec(tmp_path):
-    opts = localrun.RunOptions(spec=make_spec(), data_dir=tmp_path, out=io.StringIO())
-    with pytest.raises(ValueError, match="compute: local"):
-        asyncio.run(localrun.run_local(opts))
-
-
 # --------------------------------------------------------------------------- local env
-
-
-def test_local_env_keeps_harness_overrides_and_drops_the_callers_flock_env(tmp_path):
-    base = {"HOME": str(tmp_path), "FLOCK_PROMPTS_DIR": "/p", "FLOCK_URL": "http://mine",
-            "FLOCK_TOKEN": "my-token", "FLOCK_AGENT_TOKEN": "agent", "FLOCK_CURRENT": "/x"}
-    jobs = LocalJobsClient(root=tmp_path / "run", base_env=base)
-    a = jobs.process_env({"WORKER_ID": "s-a-w0000", "TYPE": "a"}, {})
-    assert a["FLOCK_PROMPTS_DIR"] == base["FLOCK_PROMPTS_DIR"]  # documented override survives
-    for k in ("FLOCK_URL", "FLOCK_TOKEN", "FLOCK_AGENT_TOKEN", "FLOCK_CURRENT"):
-        assert k not in a  # the caller's connection and auth never reach a worker
 
 
 def _pid_dead(pid: int) -> bool:

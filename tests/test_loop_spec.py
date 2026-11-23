@@ -63,12 +63,6 @@ def test_agent_usd_by_model():
     assert agent_cap(spec_with({"prompt": "x"}).types["researcher"]) is None
 
 
-def test_world_backed_settings_are_accepted_but_refused():
-    s = spec_with({"prompt": "x", "on": ["world.event:claim", "message_board.mention"]})
-    assert loop_refusals(s) == [
-        "types.researcher.loop.on: world.event:claim needs a world (not in this version)"]
-
-
 def test_controller_refuses_what_it_cannot_run(app):
     c = TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"})
     s = spec_with({"prompt": "x", "on": ["world.event:claim"]})

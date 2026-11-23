@@ -158,39 +158,24 @@ def test_replica_needs_a_mapped_hf_token(tmp_path, space):
     assert c.ok is False and "space_secrets" in c.detail and not api.calls
 
 
-def test_health_wait_survives_connection_errors(tmp_path, space, monkeypatch):
+def test_health_wait_survives_connection_errors_and_starting(tmp_path, space, monkeypatch):
     import httpx
 
-    real, fails = httpx.get, []
+    board, _, _ = space
+    real, seen = httpx.get, []
 
-    def flaky(url, **kw):
-        if url.endswith("/v1/health") and not fails:
-            fails.append(url)
-            raise httpx.ConnectError("building")
+    def flaky(url, **kw):  # building (no answer), then msgboard's Space app restoring (not ready)
+        if url.endswith("/v1/health") and len(seen) < 3:
+            seen.append(url)
+            if len(seen) == 1:
+                raise httpx.ConnectError("building")
+            return httpx.Response(200, json={"status": "starting", "error": None})
         return real(url, **kw)
 
     monkeypatch.setattr(httpx, "get", flaky)
     monkeypatch.setattr(rundir, "_sleep", lambda s: None)
     rep = rundir.init(tmp_path / "run", _folder(tmp_path), env=ENV)
-    assert fails and {c.name: c for c in rep.checks}["board space"].ok
-
-
-def test_health_wait_holds_while_the_board_is_starting(tmp_path, space, monkeypatch):
-    import httpx
-
-    board, _, _ = space
-    real, starting = httpx.get, []
-
-    def slow(url, **kw):  # msgboard's Space app while it restores: 200, but not ready
-        if url.endswith("/v1/health") and len(starting) < 2:
-            starting.append(url)
-            return httpx.Response(200, json={"status": "starting", "error": None})
-        return real(url, **kw)
-
-    monkeypatch.setattr(httpx, "get", slow)
-    monkeypatch.setattr(rundir, "_sleep", lambda s: None)
-    rep = rundir.init(tmp_path / "run", _folder(tmp_path), env=ENV)
-    assert len(starting) == 2 and {c.name: c for c in rep.checks}["board space"].ok
+    assert len(seen) == 3 and {c.name: c for c in rep.checks}["board space"].ok
     assert "general" in board.channels.values()
 
 

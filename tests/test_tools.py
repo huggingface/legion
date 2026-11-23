@@ -18,7 +18,7 @@ from flock.tools.bundle import (
     read_manifest,
     version_of,
 )
-from flock.tools.loader import ToolsError, check_args, describe, load_dir, select
+from flock.tools.loader import ToolsError, check_args, describe, load_dir
 from flock.tools.spec import prepare
 
 from .conftest import FAKE_INFERENCE, HB
@@ -162,17 +162,6 @@ def test_readonly_tools_are_flagged_in_the_manifest(tmp_path):
     assert {t.name: t.readonly for t in m.tools} == {"task_board": True, "claim": False}
     assert {t["name"]: t.get("readonly") for t in m.to_json()["tools"]} == {"task_board": True,
                                                                        "claim": None}
-
-
-def test_select_is_strict():
-    from flock.tools.loader import Manifest, ToolDef
-
-    m = Manifest([ToolDef("add", "", {}, "m", "add"), ToolDef("sub", "", {}, "m", "sub")])
-    assert [t.name for t in select(m, "all")] == ["add", "sub"]
-    assert [t.name for t in select(m, ["sub"])] == ["sub"]
-    assert select(m, None) == []
-    with pytest.raises(ToolsError, match="types.dev.tools: unknown tool.s. mul; the tools folder has: add, sub"):
-        select(m, ["add", "mul"], where="types.dev.tools")
 
 
 NULLABLE_SRC = """

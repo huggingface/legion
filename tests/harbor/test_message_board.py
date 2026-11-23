@@ -62,22 +62,6 @@ async def test_agent_created_channels_permissions_retry_and_export(
     assert all(secret not in serialized for secret in board.secrets)
 
 
-async def test_two_boards_are_isolated(board, tmp_path):
-    other = BoardRuntime(tmp_path / "other-state")
-    try:
-        await other.start()
-        a = board.provision(["same-name"])[0]
-        b = other.provision(["same-name"])[0]
-        with Client(board.url, a["token"]) as client:
-            client.post(client.channel_id("general"), "only on first board")
-        with Client(other.url, b["token"]) as client:
-            assert client.read(client.channel_id("general"))["messages"] == []
-        with Client(other.url, a["token"]) as client, pytest.raises(BoardError):
-            client.me()
-    finally:
-        await other.stop()
-
-
 def extract_bundle(tmp_path, names):
     bundle = build_tool_bundle(TOOLS_DIR, names, tmp_path / "tools.tar.gz")
     directory = tmp_path / "bundle"
@@ -126,8 +110,8 @@ async def test_bundle_runs_without_host_environment_and_rejects_unselected_tools
     assert identity["token"] not in result.stdout + result.stderr
 
 
-async def test_cli_uses_authenticated_socket_and_removes_it(tmp_path):
-    runtime = BoardRuntime(tmp_path / "state")
+async def test_cli_uses_authenticated_socket_and_removes_it(board, tmp_path):
+    runtime = BoardRuntime(tmp_path / "other-state")
     directory = extract_bundle(tmp_path, ["message_board.post"])
     try:
         await runtime.start()
@@ -149,6 +133,11 @@ async def test_cli_uses_authenticated_socket_and_removes_it(tmp_path):
                 client.read(client.channel_id("general"))["messages"][0]["body"]
                 == "via socket"
             )
+        same = board.provision(["socket-agent"])[0]  # another board: isolated, same name or not
+        with Client(board.url, same["token"]) as client:
+            assert client.read(client.channel_id("general"))["messages"] == []
+        with Client(board.url, identity["token"]) as client, pytest.raises(BoardError):
+            client.me()
     finally:
         await runtime.stop()
     assert not socket_path.exists()

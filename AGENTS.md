@@ -48,4 +48,6 @@ Be conservative about adding tests.
 - **Scratch tests are fine while developing:** keep them in `scratch/` or `tmp/` and do not commit them.
 - **Run what you touched:** `pytest tests/test_<area>.py` (or `-k`) while iterating, and the full suite once
   before pushing.
+- **Full suite in parallel:** `pytest -n auto` (pytest-xdist, as CI runs it); tests must not share fixed
+  ports, files or global state.
 - **Documentation-only changes need no tests:** run `git diff --check` instead.

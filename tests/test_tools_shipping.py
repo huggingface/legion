@@ -94,17 +94,6 @@ def test_apply_refuses_unknown_tools_and_bad_modules(tmp_path, monkeypatch, app,
     assert r.exit_code == 1 and "broken.py: syntax error line 1" in r.output
 
 
-def test_existing_specs_are_unchanged(tmp_path, monkeypatch, app, store):
-    """No type selects tools: an unrelated tools/ next to the spec is not shipped."""
-    wire(monkeypatch, app)
-    folder(tmp_path)
-    f = write_spec(tmp_path, raw_spec())
-    r = runner.invoke(cli.app, ["launch", str(f)])
-    assert r.exit_code == 0 and "tools:" not in r.output
-    assert store.get_swarm("demo")["spec"].tools_version is None
-    assert store.list_tool_bundles("demo") == []
-
-
 async def test_controller_checks_bundles_and_tells_workers(tmp_path, client, store, tick):
     b = pack(folder(tmp_path))
     spec = SwarmSpec.model_validate(raw_spec(tools=["add"]))

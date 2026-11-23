@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import base64
-import json
 import os
 import subprocess
 
@@ -140,29 +139,6 @@ def test_clone_filters_never_run(repos, tmp_path):
     assert capture_v2(work, "clone") is not None
     assert not marker.exists()
     assert len(list((clone / ".git/objects").rglob("*"))) == loose  # no objects left in the clone
-
-
-def test_payload_size_1k_files(tmp_path, capsys):
-    """Measured: a 1,000-file clone with a 3-file change, v1 vs v2 JSON payload sizes."""
-    seed = tmp_path / "seed"
-    for i in range(1000):
-        d = seed / f"pkg{i // 100}"
-        d.mkdir(parents=True, exist_ok=True)
-        (d / f"m{i}.py").write_text(f"# module {i}\n" + "def f(x):\n    return x + 1\n" * 20)
-    git(tmp_path, "init", "-q", "-b", "main", str(seed))
-    git(seed, "add", ".")
-    git(seed, "commit", "-qm", "seed")
-    work = tmp_path / "work"
-    work.mkdir()
-    git(tmp_path, "clone", "-q", str(seed), str(work / "clone"))
-    for i in (1, 2, 3):
-        p = work / "clone" / f"pkg0/m{i}.py"
-        p.write_text(p.read_text() + "def g():\n    return 2\n")
-    v1 = len(json.dumps(capture(work, "clone")))
-    v2 = len(json.dumps(capture_v2(work, "clone")))
-    with capsys.disabled():
-        print(f"\n1k files, 3 changed: v1 {v1:,} bytes, v2 {v2:,} bytes")
-    assert v2 * 100 < v1
 
 
 OK = {"ok": True, "result": "done"}

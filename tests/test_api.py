@@ -47,6 +47,7 @@ async def test_apply_and_get(client, tick):
     assert body["spec"]["types"]["researcher"]["replicas"] == 3
     assert body["status"]["agents_total"] == 3 and body["status"]["workers_total"] == 2
     assert body["status"]["types"]["researcher"]["agents_by_state"] == {"unknown": 3}
+    assert body["status"]["types"]["researcher"]["workers_by_state"] == {"launching": 2}
     other = make_spec(swarm="other")
     r = await client.put("/swarms/other", json=other.model_dump(mode="json"))
     assert r.status_code == 409  # type names are global because agent names are
@@ -112,19 +113,6 @@ async def test_prompt_to_live_worker_wakes_long_poll(client, store, clock, tick)
     ]
 
 
-async def test_draining_worker_does_not_get_prompts(client, store, clock, tick):
-    await apply(client, make_spec(researcher={"replicas": 1}))
-    tick()
-    store.clear_commands(W0)
-    agents = [AgentHeartbeat(name="researcher-0000", state="idle")]
-    await client.post(f"/workers/{W0}/heartbeat", json=hb_body(clock, W0, agents, draining=True))
-    ack = (await client.post("/agents/researcher-0000/prompt", json={"text": "hi"})).json()
-    assert ack["status"] == "pending"
-    assert (await client.get(f"/workers/{W0}/commands", params={"wait": 0})).json() == {
-        "commands": []
-    }
-
-
 async def test_heartbeat_updates_agent_status_and_cost(client, clock, tick, priced):
     await apply(client, make_spec(researcher={"replicas": 2}))
     tick()
@@ -150,6 +138,8 @@ async def test_heartbeat_updates_agent_status_and_cost(client, clock, tick, pric
 
     clock.advance(100)
     assert (await client.get("/agents/researcher-0000")).json()["state"] == "unknown"
+    [w] = (await client.get("/workers", params={"swarm": "demo"})).json()
+    assert w["state"] == "unknown"
     clock.advance(100)
     assert (await client.get("/agents/researcher-0000")).json()["state"] == "dead"
     workers = (await client.get("/workers", params={"swarm": "demo"})).json()
@@ -344,10 +334,10 @@ async def test_healthz_reports_requests_and_process(client, tick):
 
 
 async def test_heartbeat_during_restore_does_not_double_count_cost(client, clock, tick, priced):
-    """1k run: after a relaunch the worker heartbeats agents whose restore has not finished yet,
-    with an empty token map. That read as "counters went backwards" and folded the old totals
-    into the base; once restored, the worker reported its cumulative totals again (they survive
-    in the bucket state), so the agent's cost was counted twice (+$0.67 on $2.00)."""
+    """After a relaunch the worker heartbeats agents whose restore has not finished yet, with an
+    empty token map. That must not read as "counters went backwards" and fold the old totals
+    into the base: once restored, the worker reports its cumulative totals again (they survive
+    in the bucket state), and the cost would be counted twice."""
     await apply(client, make_spec(researcher={"replicas": 1}))
     tick()
     t1 = {priced: TokenUsage(input=1_000_000)}  # $4

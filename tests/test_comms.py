@@ -28,7 +28,7 @@ CH = 12
 
 @pytest.fixture
 def board():
-    b, srv, url = fake_msgboard.serve()
+    b, srv, url = fake_msgboard.serve(prefix="/boards/demo")
     b.url = url
     yield b
     srv.shutdown()
@@ -136,10 +136,12 @@ def test_controller_resolves_channel_and_posts_kickoff_once(board):
                 {INVITE_ENV: board.invite})
     with pytest.raises(CommsError, match="invite link is not valid"):
         resolve(SwarmSpec.model_validate(swarm_raw(url=board.url)), None, {INVITE_ENV: "wrong"})
+    assert all(p.startswith("/boards/demo/v1/") for p in board.raw_paths)
+    assert set(board.token_headers) == {"X-Msgboard-Token"}
 
 
 def test_controller_refuses_an_archived_channel_before_any_post_or_join():
-    """Defect 7: an archived channel is refused at resolve, not at the kickoff post (409)."""
+    """An archived channel is refused at resolve, not at the kickoff post (409)."""
     b, srv, url = fake_msgboard.serve(fake_msgboard.Board(archived={CH}))
     try:
         with pytest.raises(CommsError, match=r"channel flock-test \(id 12\) is archived"):

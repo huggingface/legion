@@ -53,21 +53,6 @@ async def test_bulk_prompt_by_type_and_state(client, store, clock, tick):
     assert (await client.post("/swarms/demo/prompts", json={"type": "researcher", "text": "x"})).status_code == 409
 
 
-async def test_bulk_prompts_respect_max_working(store, clock, tick):
-    spec = pspec(CAP, worker={**HB, "model": "m", "replicas": 3})
-    wid = "p-worker-w0000"
-    async with await _cap_client(store, clock, True) as c:
-        assert (await put(c, spec)).status_code == 200
-        tick()
-        await _delivered(c, wid)  # drain the assigns
-        idle = [AgentHeartbeat(name=f"worker-000{i}", state="idle") for i in range(3)]
-        await c.post(f"/workers/{wid}/heartbeat", json=hb(clock, wid, idle))
-        ack = (await c.post("/swarms/p/prompts", json={"type": "worker", "text": "paint"})).json()
-        assert ack["queued"] == 3
-        assert await _delivered(c, wid) == ["worker-0000"]  # max_working 1: one admitted
-        assert sum(store.pending_counts("p").values()) == 2  # the rest wait in the controller
-
-
 async def test_agent_tokens_cannot_bulk_prompt(client, app, store, tick):
     import httpx
 

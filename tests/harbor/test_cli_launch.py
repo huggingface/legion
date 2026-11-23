@@ -1,17 +1,11 @@
 """A Harbor spec through flock's commands: `flock launch` and `flock update` compile it (the
 task pinned once, the tool bundle's sha recorded), a resume keeps the run's pin and folder paths
 (a moved folder, `--ref`), and a running type's Trial inputs are fixed; links inside the shipped
-folders are refused, and `flock init` warns of them and writes the compiled secrets; a local run drives it end to end (controller, a worker process
-that unpacks the shipped tools and resources folders, HarborAdapter, FlockPi) on
-test_adapter.py's fakes."""
+folders are refused, and `flock init` warns of them and writes the compiled secrets."""
 
-import asyncio
-import json
 import os
 import shutil
 import subprocess
-import sys
-from io import StringIO
 from pathlib import Path
 
 import pytest
@@ -20,8 +14,6 @@ from typer.testing import CliRunner
 
 import flock.harbor
 from flock import cli, rundir
-from flock.controller import localrun
-from flock.controller.naming import HANDLE_RE
 from flock.harbor import sources
 from flock.ops import SpecError, check_spec, read_spec
 
@@ -182,29 +174,6 @@ def test_links_in_the_shipped_folders_and_init(tmp_path, pins):
     rep = rundir.init(tmp_path / "run", exp, env=env)
     assert not [c for c in rep.checks if c.name == "links" or c.ok is False], rep.checks
     assert "\n#MSGBOARD_OPERATOR_TOKEN=\n" in (tmp_path / "run" / "run.env").read_text()
-
-
-def test_a_local_run_drives_harbor_trials(tmp_path, monkeypatch, pins):
-    monkeypatch.setenv("HF_TOKEN", "test-inference-secret")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("FLUSH_INTERVAL", "0.2")
-    spec_file = str(experiment(tmp_path / "exp") / "spec.yaml")
-    spec = read_spec(spec_file)
-    folders, _ = check_spec(spec, spec_file)
-    shutil.rmtree(tmp_path / "exp")  # the worker unpacks the shipped folders, not these
-    out = StringIO()
-    result = asyncio.run(localrun.run_local(localrun.RunOptions(
-        spec=spec, data_dir=tmp_path / ".flock", until=60, until_idle=True, prompt="go",
-        refresh=0.2, reconcile_interval=0.2, out=out, tools=folders.data,
-        worker_command=[sys.executable, str(Path(__file__).with_name("fake_worker.py"))])))
-    assert result.reason == "idle" and result.exit_code == 0, out.getvalue()
-    assert result.totals["turns_completed"] == 2, out.getvalue()
-    files = sorted((result.run_dir / "events").glob("*.jsonl"))
-    assert len(files) == 2 and all(HANDLE_RE.match(f.stem) for f in files)  # flock's names
-    for f in files:
-        events = [json.loads(x) for x in f.read_text().splitlines()]
-        assert "reply-" in json.dumps([e for e in events if e["type"] == "message"])
-        assert not [e for e in events if e["type"] == "error"], events
 
 
 def test_the_mini_swarm_spec_compiles(monkeypatch, pins):

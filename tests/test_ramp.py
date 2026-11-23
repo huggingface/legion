@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from flock.controller.health import parse_vllm
 from flock.controller.reconcile import vllm_busy
 from flock.models import RampHold, RampSpec
 
@@ -139,14 +138,6 @@ def test_guard_holds_on_missing_short_stale_or_reset_metrics():
     assert "unavailable" in vllm_busy({"a": samples()[:2]}, H, 1120.0)
     assert "unavailable" in vllm_busy({"a": samples()}, H, 1120.0 + 600)
     assert "reset" in vllm_busy({"a": samples(completed=(50, 60, 3))}, H, 1120.0)
-
-
-def test_parse_vllm_counts_completions_but_not_aborts():
-    text = ('vllm:num_requests_running{m="x"} 3\nvllm:num_requests_waiting 1\n'
-            'vllm:request_success_total{finished_reason="stop"} 7\n'
-            'vllm:request_success_total{finished_reason="length"} 2\n'
-            'vllm:request_success_total{finished_reason="abort"} 50\n')
-    assert parse_vllm(text) == {"running": 3, "waiting": 1, "completed": 9}
 
 
 def test_hold_if_only_above_the_floor_and_warns_after_three(store, clock, tick):

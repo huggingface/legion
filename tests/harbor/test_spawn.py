@@ -159,7 +159,8 @@ limits: {run_timeout_seconds: 900}
 def test_a_leader_spawns_a_child_that_runs_a_turn(tmp_path, monkeypatch):
     """A local run (controller, worker processes, HarborAdapter, FlockPi on fakes): the
     leader's first turn calls spawn.spawn; the controller creates the child, places it on a
-    helper worker, and the child answers its first prompt."""
+    helper worker, and the child answers its first prompt. The workers unpack the shipped tools
+    and resources folders, not the experiment's."""
     monkeypatch.setenv("HF_TOKEN", "test-inference-secret")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     (tmp_path / "home").mkdir()  # a usable HOME: TMPDIR stays short enough for AF_UNIX
@@ -171,6 +172,7 @@ def test_a_leader_spawns_a_child_that_runs_a_turn(tmp_path, monkeypatch):
     (exp / "spec.yaml").write_text(LOCAL)
     spec = read_spec(str(exp / "spec.yaml"))
     folders, _ = check_spec(spec, str(exp / "spec.yaml"))
+    shutil.rmtree(exp)  # the workers unpack the shipped folders, not these
     out = StringIO()
     result = asyncio.run(localrun.run_local(localrun.RunOptions(
         spec=spec, data_dir=tmp_path / ".flock", until=60, until_idle=True, prompt="go",
@@ -188,3 +190,4 @@ def test_a_leader_spawns_a_child_that_runs_a_turn(tmp_path, monkeypatch):
     assert HANDLE_RE.match(child) and len(names) == 2 and child in names, out.getvalue()
     kid = events(child)
     assert "reply-" in json.dumps([e for e in kid if e["type"] == "message"]), kid
+    assert not [e for n in names for e in events(n) if e["type"] == "error"]

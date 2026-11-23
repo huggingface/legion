@@ -53,7 +53,7 @@ def make_run(tmp_path, flock_worker, env_extra="", cluster_extra=""):
         f"SWARM=s\nTYPE=t\n"
         f"WORK_ROOT={tmp_path / 'w' / 'work'}\nWORKER_ID=s-t-w0001\nWORKER_INCARNATION=abc\n"
         + env_extra)
-    for f in (run / "run.env", env_file):
+    for f in (run / "cluster.env", run / "run.env", env_file):  # whatever the umask
         f.chmod(0o600)
     return run / "slurm" / "worker.sbatch", env_file
 

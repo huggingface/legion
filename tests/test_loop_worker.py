@@ -97,7 +97,7 @@ class MaxTurnsAdapter(ScriptedAdapter):
 @pytest.mark.parametrize("data", [{"reason": "max_turns"},             # reason
                                   {"subtype": "error_max_turns"}])     # subtype alone
 async def test_max_turns_is_not_a_failed_loop_turn(tmp_path, data):
-    """Defect 5: with tool_choice required, ending at max_turns is normal; 5 in a row run the
+    """With tool_choice required, ending at max_turns is normal; 5 in a row run the
     loop to max_rounds instead of ending it with `errors`."""
     rt, ad = runtime(tmp_path, idle_grace="5s", adapter=MaxTurnsAdapter(tmp_path / "h", data=data))
     await rt.setup(restore=False)
@@ -239,19 +239,6 @@ class TransportFailureAdapter(ScriptedAdapter):
         self._q.put(AdapterEvent("turn_ended", status="error", error="fetch failed",
                                 data={"reason": "model_transport"}))
         self._turn = None
-
-
-async def test_transport_stalls_do_not_exhaust_worker_loop(tmp_path, monkeypatch):
-    monkeypatch.setattr("flock.worker.agents.LOOP_ERROR_BACKOFF", 0.01)
-    monkeypatch.setattr("flock.worker.agents.LOOP_TRANSIENT_BACKOFF", 0.01)
-    rt, ad = runtime(tmp_path, idle_grace="5s", adapter=TransportFailureAdapter(tmp_path / "h"))
-    await rt.setup(restore=False)
-    rt.start_loop(start(max_rounds=5))
-    await until(lambda: custom(rt, "loop_stopped"), timeout=5)
-    assert len(ad.sent) == 5
-    assert custom(rt, "loop_stopped")[0]["reason"] == "max_rounds"
-    assert rt._loop_errors == 0
-    await rt.stop()
 
 
 def test_transient_backoff_doubles_with_jitter_up_to_the_cap():

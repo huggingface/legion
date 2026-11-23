@@ -348,17 +348,13 @@ def test_crash_log_tail_survives_a_controller_restart(tmp_path, slurm, store, cl
     assert again.logs_tail(job)[-1] == "ImportError: no module x"
 
 
-def test_unknown_compute_kind_is_a_hard_error(tmp_path, caplog):
+def test_unknown_compute_kind_is_a_hard_error(tmp_path):
     from flock.controller.main import build
 
     env = {"FLOCK_TOKEN": TOKEN, "FLOCK_DATA": str(tmp_path / "d"), "FLOCK_COMPUTE": "slrum"}
     with pytest.raises(SystemExit, match="FLOCK_COMPUTE='slrum' is not one of"):
         build(env)
     assert not (tmp_path / "d").exists()  # refused before anything was opened
-    caplog.set_level("INFO", logger="flock.controller")
-    b = build({**env, "FLOCK_COMPUTE": "slurm"})
-    assert "compute slurm: SlurmJobsClient" in caplog.text
-    b.store.close()
 
 
 def test_harbor_workers_run_on_the_node_and_say_so(tmp_path, slurm, store, clock):

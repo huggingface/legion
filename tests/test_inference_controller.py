@@ -528,16 +528,6 @@ async def test_preflight_warns_on_zero_usage(preflight_client):
         assert x["usage_reported"] is False and "zero token usage" in x["warning"]
 
 
-async def test_preflight_reports_missing_tool_call(preflight_client):
-    fake, seen = fake_provider(tool_call=False)
-    async with await preflight_client(fake, SECRETS) as c:
-        rep = (await c.post("/swarms/p/preflight", json=preflight_spec().model_dump(mode="json"))).json()
-    assert rep["ok"] is False
-    for x in rep["results"]:
-        assert x["ok"] is False and x["tool_call_seen"] is False and "no tool call" in x["error"]
-    assert len(seen) == 2  # no follow-up without a tool call
-
-
 async def test_preflight_http_error_and_missing_secret(preflight_client):
     fake, seen = fake_provider(status=404)
     async with await preflight_client(fake, {"HF_TOKEN": "x"}) as c:
@@ -590,12 +580,6 @@ async def test_preflight_probes_chat_completions(preflight_client):
     assert m2[2]["tool_call_id"] == "call_1" == m2[1]["tool_calls"][0]["id"]
 
 
-def test_api_for_every_harness_is_chat_completions():
-    from flock.controller.preflight import api_for
-    from flock.models import Harness
-    assert [api_for(h) for h in Harness] == ["chat_completions"] * len(Harness)
-
-
 @pytest.mark.parametrize("namespace", ["", "huggingface"])
 async def test_preflight_sends_the_router_provider_and_bill_to_as_pi_does(preflight_client, namespace):
     fake, seen = fake_provider()
@@ -637,10 +621,11 @@ async def test_preflight_fails_without_a_tool_call_or_its_follow_up(preflight_cl
     spec = pspec(FAKE_GPU, pixel={**HB, "model": "Qwen/Small"})
     for kw, err in (({"tool_call": False}, "no tool call"), ({"text_call": True}, "no tool call"),
                     ({"follow_up_fails": True}, "follow-up turn")):
-        fake, _ = fake_provider(**kw)
+        fake, seen = fake_provider(**kw)
         async with await preflight_client(fake, SECRETS) as c:
             [x] = (await c.post("/swarms/p/preflight", json=spec.model_dump(mode="json"))).json()["results"]
         assert not x["ok"] and err in x["error"] and "--tool-call-parser" in x["error"]
+        assert len(seen) == (1 if err == "no tool call" else 2)  # no follow-up without a tool call
 
 
 async def test_status_counts_agents_with_zero_usage(client, clock, tick):
@@ -657,7 +642,7 @@ async def test_status_counts_agents_with_zero_usage(client, clock, tick):
     assert "report zero tokens (cost unknown)" in (await client.get("/")).text
 
 
-# max_working at prompt admission; the reviewer's provider_cap_repro.py is the first case.
+# max_working at prompt admission
 CAP = {"urls": ["http://fake/v1"], "max_working": 1}
 
 

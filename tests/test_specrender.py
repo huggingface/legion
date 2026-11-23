@@ -45,7 +45,6 @@ def test_env_files_win_over_the_process_environment(tmp_path, monkeypatch):
     two.write_text("A=2\n")
     assert read_env_file(one) == {"A": "1", "B": "from one", "C": "c"}
     spec = tmp_path / "spec.yaml"
-    spec.write_text("a: ${A}\nb: ${B}\nc: ${C}\n")
     monkeypatch.delenv("A", raising=False)
     monkeypatch.setenv("C", "env")
     monkeypatch.setenv("D", "shell")

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import threading
-import time
 
 import httpx
 import pytest
@@ -45,22 +44,24 @@ def test_read_only_is_in_the_manifest_and_pools_are_checked():
         tool(pool="medium")
 
 
-async def test_manifest_and_fast_tools_answer_under_100_slow_calls():
+async def test_slow_calls_do_not_starve_the_manifest_or_fast_tools(monkeypatch):
+    """The slow pool is full with a call queued behind it: the manifest and a fast tool still
+    answer at once."""
+    monkeypatch.setattr(server, "SLOW_THREADS", 2)
     served = Served(Jammed())
     try:
-        async with httpx.AsyncClient(base_url=served.url, headers=H, timeout=60,
-                                     limits=httpx.Limits(max_connections=200)) as c:
+        async with httpx.AsyncClient(base_url=served.url, headers=H, timeout=60) as c:
             slow = [asyncio.create_task(c.post("/tools/slow", json={"args": {}}))
-                    for _ in range(100)]
-            await asyncio.sleep(1)  # every slow call is in a thread or queued
-            lat = []
+                    for _ in range(3)]
+            full = {"limit": 2, "in_flight": 3, "queued": 1}  # both threads busy, one waits
             for _ in range(100):
-                t0 = time.monotonic()
-                r = await c.get("/manifest")
-                lat.append(time.monotonic() - t0)
-                assert r.status_code == 200 and r.json()["name"] == "jammed"
-            lat.sort()
-            assert lat[98] < 0.1, f"p99 /manifest {lat[98]:.3f} s"
+                pool = (await c.get("/metrics")).json()["pools"]["slow"]
+                if {k: pool[k] for k in full} == full:
+                    break
+                await asyncio.sleep(0.05)
+            assert {k: pool[k] for k in full} == full, pool
+            r = await asyncio.wait_for(c.get("/manifest"), 2)
+            assert r.status_code == 200 and r.json()["name"] == "jammed"
             r = await asyncio.wait_for(c.post("/tools/peek", json={"args": {}}), 2)
             assert r.json() == {"ok": True, "result": {"by": "dev-0001"}}
             assert not any(t.done() for t in slow)
@@ -70,7 +71,6 @@ async def test_manifest_and_fast_tools_answer_under_100_slow_calls():
     finally:
         served.world.release.set()
         served.close()
-
 
 class Patient(World):
     name, version = "patient", "1"

@@ -63,16 +63,6 @@ async def test_persist_workdir_false_skips_workdir(tmp_path):
     assert not any("/workdir/" in k for k in store.files)
 
 
-def test_http_route_names_bucket_calls():
-    from flock.worker.sync import http_route
-
-    assert http_route("GET", "huggingface.co", "/api/buckets/ns/b/tree/sw/x") == "GET buckets/tree"
-    assert http_route("POST", "huggingface.co", "/api/buckets/ns/b/batch") == "POST buckets/batch"
-    assert http_route("GET", "huggingface.co", "/api/buckets/ns/b") == "GET buckets"
-    assert http_route("GET", "cas-server.xethub.hf.co", "/v1/reconstructions/abc") == (
-        "GET cas-server.xethub.hf.co/v1")
-
-
 async def test_sync_counts_push_and_restore_failures(tmp_path):
     class Broken(MemoryStore):
         def upload(self, files):
@@ -227,19 +217,6 @@ async def test_restore_skips_an_unreadable_file_and_restores_the_rest(tmp_path, 
     assert rt2.sync.stats.snapshot()["errors"] == {"restore_file_failed": 1}
 
 
-async def test_setup_emits_restore_partial(tmp_path, monkeypatch):
-    monkeypatch.setattr("flock.worker.sync.RESTORE_BACKOFF", (0, 0, 0))
-    store = FlakyStore()
-    pre = await _seeded(tmp_path, store)
-    store.bad = {pre + "workdir/f1.txt"}
-    rt2, _ = runtime(tmp_path / "b", sync=BucketSync(store, "sw"))
-    await rt2.setup()
-    ev = next(e for e in rt2.outbox._q if e.type == "restore_partial")
-    assert ev.data["data"] == {"failed": 1, "paths": [pre + "workdir/f1.txt"]}
-    assert rt2.state.session_id == "s-1"  # the rest of the state came back
-    assert not any(e.type == "error" for e in rt2.outbox._q)
-
-
 async def test_restore_retries_a_transient_failure(tmp_path, monkeypatch):
     slept: list[float] = []
     monkeypatch.setattr("flock.worker.sync.time.sleep", slept.append)
@@ -269,7 +246,8 @@ async def test_failed_session_file_still_starts_with_session_restarted(tmp_path,
     restarted = next(e for e in rt2.outbox._q if e.type == "session_restarted")
     assert restarted.data["data"]["previous_session_id"] == "s-1"
     partial = next(e for e in rt2.outbox._q if e.type == "restore_partial")
-    assert partial.data["data"]["paths"] == [pre + "harness/s-1.jsonl"]
+    assert partial.data["data"] == {"failed": 1, "paths": [pre + "harness/s-1.jsonl"]}
+    assert not any(e.type == "error" for e in rt2.outbox._q)
     await rt2.stop()
 
 

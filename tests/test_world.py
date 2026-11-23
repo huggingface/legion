@@ -485,7 +485,7 @@ def test_stop_kills_a_helper_that_ignores_sigterm(tmp_path):
     """The world's leader exits on SIGTERM at once; a helper in its process group ignores it
     and is SIGKILLed before the world counts as stopped."""
     (tmp_path / "world.py").write_text(HELPER_WORLD)
-    host = WorldHost(log_dir=tmp_path / "logs", start_timeout=10, stop_grace=1.0)
+    host = WorldHost(log_dir=tmp_path / "logs", start_timeout=10, stop_grace=0.2)
     helper = None
     try:
         host.ensure("sw", WorldSpec(dir=str(tmp_path), command=[sys.executable, "world.py"]), "t")

@@ -8,7 +8,6 @@ import json
 import os
 import shutil
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -82,16 +81,20 @@ TOOLS = {"add": add}
 
 
 class Sandboxes:
-    """Each `pi` call sleeps in a thread, as hf-sandbox's `sandbox.run`; records the overlap."""
+    """Each `pi` call blocks a thread, as hf-sandbox's `sandbox.run`, until `want` calls run at
+    once (or 10 s pass); records the overlap."""
 
     def __init__(self):
-        self.lock, self.now, self.peak = threading.Lock(), 0, 0
+        self.lock, self.now, self.peak, self.want = threading.Lock(), 0, 0, 1
+        self.full = threading.Event()
 
     def call(self):
         with self.lock:
             self.now += 1
             self.peak = max(self.peak, self.now)
-        time.sleep(0.5)
+            if self.now >= self.want:
+                self.full.set()
+        self.full.wait(10)
         with self.lock:
             self.now -= 1
 
@@ -153,6 +156,7 @@ async def test_twenty_agents_share_the_host_and_their_sandbox_commands_overlap(w
     loop = asyncio.get_running_loop()
     loop.set_default_executor(ThreadPoolExecutor(4))  # what a 2-vCPU job gets by default
     host, adapters = agents(tmp_path)
+    world.sandboxes.want = 20
     await asyncio.gather(*(a.start(a.workdir, None, a.spec) for a in adapters))
     streams = [a.events() for a in adapters]
     for a in adapters:

@@ -15,6 +15,7 @@ runner = CliRunner()
 
 def test_update_replicas_agents_workers_remove(tmp_path, monkeypatch, app, store, tick):
     wire(monkeypatch, app)
+    monkeypatch.setenv("USER", "alice")
     spec_file = tmp_path / "spec.yaml"
     write_spec(spec_file, make_spec())
     assert runner.invoke(cli.app, ["launch", str(spec_file)]).exit_code == 0
@@ -24,6 +25,8 @@ def test_update_replicas_agents_workers_remove(tmp_path, monkeypatch, app, store
     tick()
     r = runner.invoke(cli.app, ["status", "demo", "--type", "researcher"])
     assert r.exit_code == 0 and r.output.count("researcher-000") == 5, r.output
+    assert " gen 2" in r.output.splitlines()[1], r.output
+    assert store.spec_history("demo")[1]["source"]["by"] == "alice"
     r = runner.invoke(cli.app, ["status", "demo", "--json"])
     assert "demo-researcher-w0002" in [w["id"] for w in json.loads(r.output)["workers"]]
     r = runner.invoke(cli.app, ["status", "--agent", "researcher-0004"])
@@ -202,19 +205,6 @@ def test_apply_sends_its_git_source(tmp_path, monkeypatch, app, store):
         "by": "alice"}  # not a repo (the folder does not exist)
     spec_file.write_text(spec_file.read_text().replace("replicas: 3", "replicas: 4"))
     assert json.loads(ops.source_header(spec_file)["X-Flock-Source"])["dirty"] is True
-
-
-def test_status_shows_the_generation(tmp_path, monkeypatch, app, store):
-    wire(monkeypatch, app)
-    monkeypatch.setenv("USER", "alice")
-    spec_file = tmp_path / "spec.yaml"
-    write_spec(spec_file, make_spec())
-    assert runner.invoke(cli.app, ["launch", str(spec_file)]).exit_code == 0
-    spec_file.write_text(spec_file.read_text().replace("replicas: 3", "replicas: 5"))
-    assert runner.invoke(cli.app, ["update", str(spec_file), "--replicas", "spec"]).exit_code == 0
-    r = runner.invoke(cli.app, ["status", "demo"])
-    assert r.exit_code == 0 and " gen 2" in r.output.splitlines()[1], r.output
-    assert store.spec_history("demo")[1]["source"]["by"] == "alice"
 
 
 def test_hidden_world_app_and_plain_help():

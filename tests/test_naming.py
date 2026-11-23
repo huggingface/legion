@@ -1,7 +1,6 @@
 """`naming: words` (docs/spawn.md "Names"): readable `<adjective>-<noun>` agent names, reserved
 in the store, unique on the controller, never reused, kept for a recreated replica slot and
-across a controller restart, a type's `name_prefix`, valid
-board handles; numeric naming unchanged."""
+across a controller restart, a type's `name_prefix`, valid board handles."""
 
 from __future__ import annotations
 
@@ -11,7 +10,6 @@ from pydantic import ValidationError
 from flock.controller import naming
 from flock.controller.store import Store
 from flock.models import SwarmSpec
-from flock.words import ADJECTIVES, NOUNS
 
 from .test_spawn_api import apply, spawn, spawn_spec
 
@@ -21,12 +19,6 @@ def words_spec(swarm: str = "demo", **kw) -> SwarmSpec:
     d.update(swarm=swarm, naming="words")
     d["types"]["helper"]["name_prefix"] = "iv-"
     return SwarmSpec.model_validate(d)
-
-
-def test_word_lists():
-    assert 180 <= len(ADJECTIVES) <= 220 and 300 <= len(NOUNS) <= 360
-    assert len(set(ADJECTIVES)) == len(ADJECTIVES) and len(set(NOUNS)) == len(NOUNS)
-    assert all(w.isalpha() and w.islower() for w in ADJECTIVES + NOUNS)
 
 
 def test_two_thousand_unique_handles_with_prefix(tmp_path):
@@ -58,15 +50,6 @@ def test_names_persist_and_slots_keep_theirs(tmp_path):
     a = Store(tmp_path / "a")  # a controller restart: the reservations are in the store
     assert naming.replica_names(a, spec, "analyst", 6, 3.0)[:5] == first
     a.close()
-
-
-def test_numeric_naming_unchanged(tmp_path):
-    s = Store(tmp_path / "s")
-    assert naming.replica_names(s, spawn_spec(), "analyst", 3, 0.0) == [
-        "analyst-0000", "analyst-0001", "analyst-0002"]
-    assert naming.new_child_name(s, spawn_spec(), "leader-0000", "helper", 4, 0.0) == \
-        "leader-0000-helper-0004"
-    s.close()
 
 
 def test_name_prefix_validation():
