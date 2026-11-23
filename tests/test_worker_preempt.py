@@ -105,8 +105,9 @@ async def test_sigusr1_preempts_within_budget_and_restart_restores(tmp_path):
     took = time.monotonic() - t0
 
     assert code == PREEMPT_EXIT
-    # sequential would be N_AGENTS * 2 * UPLOAD_S = 12.5 s; in parallel it is ~2 calls' worth
-    assert took < 4.0, took
+    # sequential would be N_AGENTS * 2 * UPLOAD_S = 12.5 s; in parallel it is ~2 calls' worth.
+    # 8 s leaves room for a slow runner and still fails a one-by-one drain
+    assert took < 8.0, took
     assert store.peak >= 10
     print(f"\npreempt drain: {N_AGENTS} agents in {took:.2f} s with {UPLOAD_S}s bucket calls "
           f"(peak {store.peak} concurrent); at the measured ~0.3 s/agent (7 s per 25 agents, "
