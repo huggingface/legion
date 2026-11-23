@@ -8,7 +8,7 @@ from datetime import timedelta
 import httpx
 import pytest
 
-from flock.models import (
+from legion.models import (
     AssignCommand,
     CommandBatch,
     DrainCommand,
@@ -20,9 +20,9 @@ from flock.models import (
     WorkerMem,
     type_spec_rev,
 )
-from flock.worker import main as wmain
-from flock.worker.events import utcnow
-from flock.worker.main import ControllerClient, Worker, WorkerConfig
+from legion.worker import main as wmain
+from legion.worker.events import utcnow
+from legion.worker.main import ControllerClient, Worker, WorkerConfig
 
 from .worker_fakes import MemoryStore, RecordingSync, ScriptedAdapter, spec, until
 
@@ -82,7 +82,7 @@ def fast_backoff(monkeypatch):
 
 def test_config_from_env(tmp_path):
     cfg = WorkerConfig.from_env({
-        "FLOCK_URL": "https://c.hf.space/", "FLOCK_TOKEN": "t", "WORKER_ID": WID,
+        "LEGION_URL": "https://c.hf.space/", "LEGION_TOKEN": "t", "WORKER_ID": WID,
         "SWARM": "sw", "TYPE": "researcher", "DEADLINE": "2026-10-15T09:12:00Z",
         "BUCKET_ID": "ns/b"})
     assert cfg.url == "https://c.hf.space" and cfg.work_root.as_posix() == "/work/agents"
@@ -94,7 +94,7 @@ def test_config_from_env(tmp_path):
 async def test_drain_window_from_env_applies_before_any_assign(tmp_path):
     # lifetime 6 min, drain window 5 min: must not drain at once just because no assign came yet
     cfg = WorkerConfig.from_env({
-        "FLOCK_URL": "http://c", "FLOCK_TOKEN": "t", "WORKER_ID": WID,
+        "LEGION_URL": "http://c", "LEGION_TOKEN": "t", "WORKER_ID": WID,
         "SWARM": "sw", "TYPE": "researcher", "DRAIN_WINDOW": "5m",
         "DEADLINE": (utcnow() + timedelta(minutes=6)).isoformat()})
     assert cfg.drain_window == timedelta(minutes=5)
@@ -145,7 +145,7 @@ async def test_dispatch_against_fake_controller(tmp_path):
 async def test_heartbeat_carries_memory_restores_and_knobs(tmp_path, monkeypatch):
     from datetime import UTC, datetime
 
-    from flock.worker.sync import BucketSync
+    from legion.worker.sync import BucketSync
 
     worker, _ = make_worker(tmp_path, FakeController(), sync=BucketSync(MemoryStore(), "sw"))
     t0 = datetime(2026, 10, 28, 9, tzinfo=UTC)
@@ -155,18 +155,18 @@ async def test_heartbeat_carries_memory_restores_and_knobs(tmp_path, monkeypatch
     assert hb.restore.model_dump() == {"agents": 2, "files_done": 3, "files_total": 15,
                                        "started": t0}
     assert hb.mem.limit_mb == 2 and hb.tools is None and len(hb.knobs_rev) == 12
-    monkeypatch.setenv("FLOCK_SYNC_EXCLUDE", "big/")  # any knob changes the hash
+    monkeypatch.setenv("LEGION_SYNC_EXCLUDE", "big/")  # any knob changes the hash
     assert wmain.knobs_rev(worker.cfg) != hb.knobs_rev
     await worker.client.aclose()
 
 
 async def test_live_worker_knobs_beat_env_and_bump_knobs_rev(tmp_path, monkeypatch):
-    from flock.worker import sync as sync_mod
-    from flock.worker.sync import is_excluded, restore_threads, workdir_excludes
+    from legion.worker import sync as sync_mod
+    from legion.worker.sync import is_excluded, restore_threads, workdir_excludes
 
     monkeypatch.setattr(sync_mod, "SPEC_KNOBS", {})
-    monkeypatch.setenv("FLOCK_SYNC_EXCLUDE", "envonly/")
-    monkeypatch.setenv("FLOCK_MEM_DRAIN", "0.8")
+    monkeypatch.setenv("LEGION_SYNC_EXCLUDE", "envonly/")
+    monkeypatch.setenv("LEGION_MEM_DRAIN", "0.8")
     worker, _ = make_worker(tmp_path, FakeController())
     rev0 = worker.knobs_rev
     knobs = {"sync_interval_s": 30, "drain_budget_s": 9, "sync_exclude": ["big/"],
@@ -177,13 +177,13 @@ async def test_live_worker_knobs_beat_env_and_bump_knobs_rev(tmp_path, monkeypat
     pats = workdir_excludes()  # the spec's list replaces the env's, the defaults stay
     assert is_excluded("big/x", pats) and not is_excluded("envonly/x", pats)
     assert is_excluded("node_modules/x", pats)
-    assert worker.mem_knob("FLOCK_MEM_DRAIN", 0.85) == 0.9
-    assert worker.mem_knob("FLOCK_MEM_PREEMPT", 0.93) == 0.93
+    assert worker.mem_knob("LEGION_MEM_DRAIN", 0.85) == 0.9
+    assert worker.mem_knob("LEGION_MEM_PREEMPT", 0.93) == 0.93
     assert worker.knobs_rev != rev0 and worker.heartbeat_payload().knobs_rev == worker.knobs_rev
     worker._live_from({"type_spec": spec().model_dump(mode="json")})  # back to env, defaults
     assert worker.cfg.sync_interval == 0.2
     assert is_excluded("envonly/x", workdir_excludes()) and worker.knobs_rev == rev0
-    assert worker.mem_knob("FLOCK_MEM_DRAIN", 0.85) == 0.8
+    assert worker.mem_knob("LEGION_MEM_DRAIN", 0.85) == 0.8
     await worker.client.aclose()
 
 
@@ -251,7 +251,7 @@ async def test_stale_slot_exits_zero_without_sync(tmp_path, status):
 
 async def test_worker_sends_its_incarnation_on_polls_and_heartbeats(tmp_path):
     cfg = WorkerConfig.from_env({
-        "FLOCK_URL": "http://c", "FLOCK_TOKEN": "t", "WORKER_ID": WID,
+        "LEGION_URL": "http://c", "LEGION_TOKEN": "t", "WORKER_ID": WID,
         "SWARM": "sw", "TYPE": "researcher", "WORKER_INCARNATION": "inc-1",
         "DEADLINE": (utcnow() + timedelta(hours=1)).isoformat()})
     assert cfg.incarnation == "inc-1"
@@ -359,7 +359,7 @@ def test_memory_helpers_trim_and_cap_arenas_safely(monkeypatch):
 async def test_memory_loop_trims_and_logs_the_worker_sizes(tmp_path, monkeypatch, caplog):
     import logging
 
-    from flock.worker.cgroup import CgroupMem
+    from legion.worker.cgroup import CgroupMem
 
     from .test_worker_cgroup import v2
 
@@ -369,9 +369,9 @@ async def test_memory_loop_trims_and_logs_the_worker_sizes(tmp_path, monkeypatch
     w.cgroup = CgroupMem(tmp_path / "fs", env={})
     trims = []
     monkeypatch.setattr(wmain, "trim_heap", lambda: trims.append(1))
-    monkeypatch.setenv("FLOCK_MEMORY_LOG_S", "0.01")
+    monkeypatch.setenv("LEGION_MEMORY_LOG_S", "0.01")
     monkeypatch.setattr(wmain, "MEMORY_SAMPLE", 0.01)
-    caplog.set_level(logging.INFO, logger="flock.worker")
+    caplog.set_level(logging.INFO, logger="legion.worker")
     task = asyncio.create_task(w.memory_loop())
     await until(lambda: len(trims) >= 2)
     task.cancel()
@@ -381,7 +381,7 @@ async def test_memory_loop_trims_and_logs_the_worker_sizes(tmp_path, monkeypatch
     assert w.heartbeat_payload().mem == w.mem
     if wmain.rss_mb() is not None:
         assert any("memory: rss" in r.message and "outbox_bytes" in r.message for r in caplog.records)
-    monkeypatch.setenv("FLOCK_MEMORY_LOG_S", "0")  # log off; the cgroup is still sampled
+    monkeypatch.setenv("LEGION_MEMORY_LOG_S", "0")  # log off; the cgroup is still sampled
     trims.clear()
     w.mem = None
     task = asyncio.create_task(w.memory_loop())
@@ -412,16 +412,16 @@ async def test_memory_loop_survives_a_failed_sample(tmp_path, monkeypatch):
 
 
 def test_restore_threads_env_is_capped_and_spec_knobs_rebind(monkeypatch):
-    from flock.worker import sync as sync_mod
-    monkeypatch.setenv("FLOCK_RESTORE_THREADS", "500")
+    from legion.worker import sync as sync_mod
+    monkeypatch.setenv("LEGION_RESTORE_THREADS", "500")
     assert sync_mod.restore_threads() == 32
-    monkeypatch.setenv("FLOCK_RESTORE_THREADS", "0")
+    monkeypatch.setenv("LEGION_RESTORE_THREADS", "0")
     assert sync_mod.restore_threads() == sync_mod.RESTORE_THREADS
 
 
 @pytest.mark.parametrize("bad", ["../x", "/x", "a/..", "."])
 def test_workdir_ephemeral_rejects_escapes(bad):
-    from flock.models import WorkdirSpec
+    from legion.models import WorkdirSpec
     with pytest.raises(ValueError):
         WorkdirSpec(ephemeral=[bad])
     assert WorkdirSpec(ephemeral=["scratch"]).ephemeral == ["scratch/"]

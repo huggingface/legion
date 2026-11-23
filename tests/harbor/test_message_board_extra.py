@@ -1,14 +1,14 @@
-"""message_board_extra.* (flock's board tools beyond message_board.*) against a managed local board."""
+"""message_board_extra.* (legion's board tools beyond message_board.*) against a managed local board."""
 
 from pathlib import Path
 
 import pytest
 from msgboard.client import BoardError, Client
 
-import flock.harbor
-from flock.harbor.tools.runner import load_module
+import legion.harbor
+from legion.harbor.tools.runner import load_module
 
-TOOLS_DIR = Path(flock.harbor.__file__).with_name("builtin") / "tools"
+TOOLS_DIR = Path(legion.harbor.__file__).with_name("builtin") / "tools"
 message_board_extra = load_module(TOOLS_DIR / "message_board_extra.py")
 BoardResource = load_module(TOOLS_DIR.parent / "resources" / "message_board.py").Resource
 

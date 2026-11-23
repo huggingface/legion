@@ -14,18 +14,18 @@ from types import SimpleNamespace
 
 import pytest
 
-import flock.harbor
-from flock import secrets_file
-from flock.harbor import launch, sources
-from flock.harbor.spec import Spec, compile_spec
-from flock.harbor.tools.bundle import build_tool_bundle
-from flock.worker.adapters.harbor import make_adapter
-from flock.worker.harbor import HarborHost
+import legion.harbor
+from legion import secrets_file
+from legion.harbor import launch, sources
+from legion.harbor.spec import Spec, compile_spec
+from legion.harbor.tools.bundle import build_tool_bundle
+from legion.worker.adapters.harbor import make_adapter
+from legion.worker.harbor import HarborHost
 
 from .. import fake_msgboard
 from .test_adapter import TASK, FakeEnv, Fakes, Trial, read
 
-BOARD = Path(flock.harbor.__file__).with_name("builtin") / "resources" / "message_board.py"
+BOARD = Path(legion.harbor.__file__).with_name("builtin") / "resources" / "message_board.py"
 
 SPEC = """
 name: host
@@ -174,7 +174,7 @@ async def test_twenty_agents_share_the_host_and_their_sandbox_commands_overlap(w
     for a, trial in zip(adapters, world.trials, strict=True):
         assert trial.config.agent.env["FAKE_TOKEN"] == f"tok-{a.agent}"
         assert trial.config.task.path == host.task_path
-        assert trial.config.environment.import_path == "flock.harbor.envs:HFSandbox"
+        assert trial.config.environment.import_path == "legion.harbor.envs:HFSandbox"
     assert adapters[0].trial_status() == {"id": "agent-0000-t1", "attempt": 1, "alive": True}
 
     await asyncio.gather(*(a.close() for a in adapters))
@@ -210,12 +210,12 @@ class Resource:
 @pytest.mark.parametrize("steps", [False, True])
 async def test_a_trials_grading_and_the_exports_outlive_the_worker(world, tmp_path, monkeypatch,
                                                                    steps):
-    """FLOCK_RESULTS_DIR (a Slurm worker's <run dir>/results, on the shared disk): each ended
+    """LEGION_RESULTS_DIR (a Slurm worker's <run dir>/results, on the shared disk): each ended
     Trial's result and verifier files (a multi-step Trial's under steps/<name>/) and, at exit,
     the resources' exports are copied there, so a run is scored after the node's WORK_ROOT is
     gone."""
     world.steps = steps
-    for key, value in (("FLOCK_RESULTS_DIR", str(tmp_path / "results")), ("SWARM", "host"),
+    for key, value in (("LEGION_RESULTS_DIR", str(tmp_path / "results")), ("SWARM", "host"),
                        ("WORKER_ID", "host-agent-w0000")):
         monkeypatch.setenv(key, value)
     (tmp_path / "resources" / "exporting.py").write_text(EXPORTING)
@@ -315,7 +315,7 @@ async def test_board_agents_join_on_any_worker_spawned_and_reassigned(world, tmp
     shutil.copy(BOARD, tmp_path / "resources" / "message_board.py")
     (tmp_path / "spec.yaml").write_text(SPEC.replace(
         "{fake: {mount: MOUNT}}", f"{{fake: {{mount: false}}, message_board: {{url: '{url}', "
-        "channels: [flock-test], rules: {max_len: 2000}}}"))
+        "channels: [legion-test], rules: {max_len: 2000}}}"))
     ts = compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK, None).types["agent"]
     events, hosts = [], []
     for w in ("w1", "w2"):

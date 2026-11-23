@@ -1,19 +1,19 @@
-"""flock.registry: every harness, compute and server entry is complete and its code imports."""
+"""legion.registry: every harness, compute and server entry is complete and its code imports."""
 
 import inspect
 
 import pytest
 from pydantic import ValidationError
 
-from flock.controller.main import build
-from flock.models import ComputeSpec, Harness, Inference, TypeSpec
-from flock.registry import COMPUTE, HARNESSES, SERVERS, load
+from legion.controller.main import build
+from legion.models import ComputeSpec, Harness, Inference, TypeSpec
+from legion.registry import COMPUTE, HARNESSES, SERVERS, load
 
 
 @pytest.mark.parametrize("name", HARNESSES)
 def test_harness_entry_is_complete(name):
     h = HARNESSES[name]
-    # harbor's also takes the worker's `host` (flock.worker.harbor)
+    # harbor's also takes the worker's `host` (legion.worker.harbor)
     assert list(inspect.signature(load(h.adapter)).parameters)[:3] == ["workdir", "name", "spec"]
     assert Harness(name) == name
 
@@ -36,6 +36,6 @@ def test_unknown_names_keep_their_errors():
         TypeSpec.model_validate({"harness": "nope"})
     with pytest.raises(ValidationError, match="Input should be 'hf-jobs', 'local' or 'slurm'"):
         ComputeSpec(kind="nope")
-    with pytest.raises(SystemExit, match=r"FLOCK_COMPUTE='nope' is not one of hf-jobs, local, "
+    with pytest.raises(SystemExit, match=r"LEGION_COMPUTE='nope' is not one of hf-jobs, local, "
                                          r"slurm \(unset: hf-jobs\)"):
-        build({"FLOCK_TOKEN": "t", "FLOCK_COMPUTE": "nope"})
+        build({"LEGION_TOKEN": "t", "LEGION_COMPUTE": "nope"})

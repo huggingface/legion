@@ -1,4 +1,4 @@
-"""`flock workers` shows why a worker last failed: the job's status and its log tail on a crash,
+"""`legion workers` shows why a worker last failed: the job's status and its log tail on a crash,
 the exception on a failed launch (newcomer run, F3: a wheel download 401 was only in the logs)."""
 
 from __future__ import annotations
@@ -8,7 +8,7 @@ import json
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from flock import cli
+from legion import cli
 
 from .conftest import TOKEN, make_spec, wire
 
@@ -19,14 +19,14 @@ def test_crash_records_status_and_log_tail(store, jobs, clock, tick, app, monkey
     store.put_swarm(make_spec(researcher={"replicas": 1}), clock().timestamp())
     tick()
     job = jobs.job_for(W0)
-    line = "Error: 401 Unauthorized for hf://buckets/me/flock/dist/x.whl"
+    line = "Error: 401 Unauthorized for hf://buckets/me/legion/dist/x.whl"
     jobs.logs[job] = ["bootstrap: installing", "", line]
     jobs.set_stage(job, "ERROR", "Job failed with exit code: 1")
     clock.advance(61)
     tick()
     err = store.get_worker(W0)["last_error"]
     assert err == ("ERROR: Job failed with exit code: 1 | bootstrap: installing / "
-                   "Error: 401 Unauthorized for hf://buckets/me/flock/dist/x.whl")
+                   "Error: 401 Unauthorized for hf://buckets/me/legion/dist/x.whl")
 
     wire(monkeypatch, app)
     r = CliRunner().invoke(cli.app, ["status", "demo"])

@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 
-from flock.models import TokenUsage
-from flock.worker.agents import AgentState
+from legion.models import TokenUsage
+from legion.worker.agents import AgentState
 
 from .worker_fakes import MemoryStore, RecordingSync, ScriptedAdapter, event_types, runtime, until
 

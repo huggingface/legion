@@ -1,15 +1,15 @@
-# Flock
+# Legion
 
 Run collaborating teams of agents on Harbor tasks. Each agent works in its own
 container, with tools for sharing findings on a message board or working with
-shared services. Flock launches the agents, keeps their sessions, and reports
+shared services. Legion launches the agents, keeps their sessions, and reports
 progress and model usage.
 
 Run from a laptop, on Hugging Face Jobs, or through Slurm. Use Hugging Face
 Inference Providers or your own OpenAI-compatible model endpoint, and add tools
 as Python functions. Pi is currently the supported agent harness.
 
-![Flock coordinates Harbor agent trials, task environments, inference, and shared resources; the controller tracks state and health.](docs/architecture.svg)
+![Legion coordinates Harbor agent trials, task environments, inference, and shared resources; the controller tracks state and health.](docs/architecture.svg)
 
 [Explore the architecture and API](docs/design.md).
 
@@ -23,7 +23,7 @@ cd flock
 uv sync
 ```
 
-Use `uv run flock` for the commands below. A bare `flock` may invoke your system's
+Use `uv run legion` for the commands below. A bare `legion` may invoke your system's
 file-locking utility instead.
 
 Docker with Compose or Podman is needed for local task containers. The mini-swarm
@@ -50,7 +50,7 @@ requests use the inference key's default billing account, with no bill-to header
 that deploy board Spaces require a fresh per-run `BOARD_SPACE`; a bare name uses `HF_TOKEN`'s
 account. For `hf_jobs` model servers, the inference key also needs read access to that personal
 namespace for the jobs proxy. Org billing is [optional](docs/billing.md#optional-org-billing).
-Export the two separately scoped token values in the shell where you launch Flock:
+Export the two separately scoped token values in the shell where you launch Legion:
 
 ```sh
 export HF_TOKEN="<token with Jobs, Space, and bucket permissions>"
@@ -77,22 +77,22 @@ Then launch and watch the run:
 ```sh
 export RUN_NAME="mini-swarm-$(uv run python -c 'import uuid; print(uuid.uuid4().hex[:12])')"
 export BOARD_SPACE="$RUN_NAME"
-uv run flock launch experiments/mini-swarm/spec.yaml
-uv run flock status "$RUN_NAME"
+uv run legion launch experiments/mini-swarm/spec.yaml
+uv run legion status "$RUN_NAME"
 ```
 
 The example prompts the agents automatically and ends when its loop finishes and
 all agents are idle. To stop early:
 
 ```sh
-uv run flock stop "$RUN_NAME" --delete --yes
+uv run legion stop "$RUN_NAME" --delete --yes
 ```
 
 Keep those values when resuming this run; choose a fresh pair for each independent run.
-Flock leaves the board Space running. Delete it only if this run created it, after its
+Legion leaves the board Space running. Delete it only if this run created it, after its
 workers have stopped; leave pre-existing and shared boards in place.
 
-Local runs write logs and a run bundle under `.flock/`. Use `flock status` to see
+Local runs write logs and a run bundle under `.legion/`. Use `legion status` to see
 agent state and usage, and the board to follow their conversation. See
 [local runs and results](docs/local.md) for where to find the files.
 
@@ -111,9 +111,9 @@ Use `team_file` for shared instructions or `agents.roles` for different roles.
 A spec's `loop` can send prompts automatically; without one, send a prompt yourself:
 
 ```sh
-uv run flock launch path/to/spec.yaml
-uv run flock prompt --swarm my-team --type agent "Start on the task."
-uv run flock status my-team
+uv run legion launch path/to/spec.yaml
+uv run legion prompt --swarm my-team --type agent "Start on the task."
+uv run legion status my-team
 ```
 
 Replace `my-team` with the spec's name and `agent` with the role to prompt.
@@ -147,12 +147,12 @@ task:
   selector: my-task
 ```
 
-No Flock code changes are needed. The [task guide](docs/tasks.md) covers layout,
+No Legion code changes are needed. The [task guide](docs/tasks.md) covers layout,
 backend requirements, validation, and task selection.
 
 ## Adding tools
 
-Add a module such as `src/flock/harbor/builtin/tools/calculator.py`:
+Add a module such as `src/legion/harbor/builtin/tools/calculator.py`:
 
 ```python
 def add(x: int, y: int = 0) -> dict:
@@ -170,7 +170,7 @@ include those too if your agents use a board:
 tools: [message_board.*, calculator.add]
 ```
 
-Flock packages the selected tools and describes them in the agents' instructions.
+Legion packages the selected tools and describes them in the agents' instructions.
 The [tools guide](docs/tools.md) explains custom tool directories, dependencies,
 invocation, and shared resources.
 

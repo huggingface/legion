@@ -1,5 +1,5 @@
 [project]
-name = "flock"
+name = "legion"
 version = "0.0.1"
 description = "Host coding-harness agent swarms on Hugging Face Jobs: keep them alive, prompt them, watch them."
 requires-python = ">=3.12"  # Harbor needs 3.12+
@@ -13,7 +13,7 @@ dependencies = [
   "uvicorn[standard]>=0.30",
   "jinja2>=3.1",
   "tomli>=2",
-  # Harbor (flock.harbor: every agent is a Trial)
+  # Harbor (legion.harbor: every agent is a Trial)
   "harbor[e2b]==0.25.0",
   "podman-compose==1.5.0",
   "msgboard[hf] @ git+https://github.com/huggingface/msgboard.git@563911d586e3435f2aadb25d7a8f565cce828406",
@@ -27,10 +27,10 @@ worker = []  # kept: Dockerfile.worker installs `[worker]`
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "pytest-xdist>=3", "ruff>=0.6", "respx>=0.21"]
 
 [project.scripts]
-flock = "flock.cli:app"
-flock-agent = "flock.cli:agent_app"
-flock-controller = "flock.controller.main:main"
-flock-worker = "flock.worker.main:main"
+legion = "legion.cli:app"
+legion-agent = "legion.cli:agent_app"
+legion-controller = "legion.controller.main:main"
+legion-worker = "legion.worker.main:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -40,34 +40,34 @@ build-backend = "hatchling.build"
 allow-direct-references = true  # msgboard is pinned to a git commit
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/flock"]
+packages = ["src/legion"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"scripts/slurm" = "flock/slurm"  # `flock init` copies them into a slurm run directory
+"scripts/slurm" = "legion/slurm"  # `legion init` copies them into a slurm run directory
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
-  "live: deploys a real board to a Hugging Face Space; skipped unless FLOCK_LIVE_SPACES is set",
+  "live: deploys a real board to a Hugging Face Space; skipped unless LEGION_LIVE_SPACES is set",
 ]
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
 
-# shipped into task containers (the tool bundle, flock.harbor.tools.bundle): Python 3.10 there
+# shipped into task containers (the tool bundle, legion.harbor.tools.bundle): Python 3.10 there
 [tool.ruff.per-file-target-version]
-"src/flock/harbor/builtin/tools/*.py" = "py310"
-"src/flock/harbor/__init__.py" = "py310"
-"src/flock/harbor/results.py" = "py310"
-"src/flock/harbor/tools/__init__.py" = "py310"
-"src/flock/harbor/tools/runner.py" = "py310"
+"src/legion/harbor/builtin/tools/*.py" = "py310"
+"src/legion/harbor/__init__.py" = "py310"
+"src/legion/harbor/results.py" = "py310"
+"src/legion/harbor/tools/__init__.py" = "py310"
+"src/legion/harbor/tools/runner.py" = "py310"
 
 [tool.ruff.lint.per-file-ignores]
 # ruff >= 0.17 enables PYI041 by default; models.py is the shared contract, left as written.
-"src/flock/models.py" = ["PYI041"]
+"src/legion/models.py" = ["PYI041"]
 # The vendored Harbor task-runner code keeps its own lint settings.
-"src/flock/harbor/**" = ["BLE001", "PLR1704", "SIM117", "TRY004", "TRY201", "UP017"]
+"src/legion/harbor/**" = ["BLE001", "PLR1704", "SIM117", "TRY004", "TRY201", "UP017"]
 "tests/harbor/**" = ["C401", "ISC004", "PLW1510", "RUF012", "SIM117"]
 "tests/harbor/test_message_board_live.py" = ["BLE001"]

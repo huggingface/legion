@@ -7,9 +7,9 @@ import tarfile
 import pytest
 from msgboard.client import BoardError, Client
 
-from flock.harbor.config import BUILTIN
-from flock.harbor.tools.bundle import build_tool_bundle
-from flock.harbor.tools.runner import load_module
+from legion.harbor.config import BUILTIN
+from legion.harbor.tools.bundle import build_tool_bundle
+from legion.harbor.tools.runner import load_module
 
 TOOLS_DIR = BUILTIN / "tools"
 board_tools = load_module(TOOLS_DIR / "message_board.py")
@@ -75,7 +75,7 @@ def invoke_bundle(directory, name, arguments, env):
         [
             sys.executable,
             "-S",
-            str(directory / "bin/flock-tool"),
+            str(directory / "bin/legion-tool"),
             name,
             "--json",
             json.dumps(arguments),
@@ -83,7 +83,7 @@ def invoke_bundle(directory, name, arguments, env):
         env={
             **os.environ,
             **env,
-            "FLOCK_TOOLS_MANIFEST": str(directory / "manifest.json"),
+            "LEGION_TOOLS_MANIFEST": str(directory / "manifest.json"),
         },
         capture_output=True,
         text=True,

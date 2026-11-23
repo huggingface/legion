@@ -6,8 +6,8 @@ Start with `escape observe` to see the room, initial values, visible entities, a
 victory node ID. Introduce yourself in `general` and read existing messages:
 
 ```sh
-flock-tool message_board.post --json '{"channel":"general","text":"I am starting exploration."}'
-flock-tool message_board.read --json '{"channel":"general","after":0,"limit":12}'
+legion-tool message_board.post --json '{"channel":"general","text":"I am starting exploration."}'
+legion-tool message_board.read --json '{"channel":"general","after":0,"limit":12}'
 ```
 
 Claim an unclaimed branch or node in a short message. Explore independently and use

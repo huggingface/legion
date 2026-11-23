@@ -1,4 +1,4 @@
-"""Optional native Pi regression: FLOCK_PI_CLI points to its installed CLI JS."""
+"""Optional native Pi regression: LEGION_PI_CLI points to its installed CLI JS."""
 
 import json
 import os
@@ -8,11 +8,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from flock.harbor.harnesses.pi import HF_CHAT_EXTENSION
+from legion.harbor.harnesses.pi import HF_CHAT_EXTENSION
 
 
 @pytest.mark.skipif(
-    not os.environ.get("FLOCK_PI_CLI"), reason="native Pi not configured"
+    not os.environ.get("LEGION_PI_CLI"), reason="native Pi not configured"
 )
 @pytest.mark.parametrize(
     "extension, expected_role", [(False, "developer"), (True, "system")]
@@ -69,11 +69,11 @@ def test_native_pi_reasoning_request(tmp_path, extension, expected_role):
         if extension:
             extensions = config / "extensions"
             extensions.mkdir()
-            (extensions / "flock-hf.js").write_text(HF_CHAT_EXTENSION)
+            (extensions / "legion-hf.js").write_text(HF_CHAT_EXTENSION)
         result = subprocess.run(
             [
                 "node",
-                os.environ["FLOCK_PI_CLI"],
+                os.environ["LEGION_PI_CLI"],
                 "--print",
                 "--mode",
                 "json",

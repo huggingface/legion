@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Build the flock wheel and upload it to the bucket for bootstrap-mode workers.
-#   scripts/publish-wheel.sh <bucket-dir>     e.g. hf://buckets/<your-username>/flock/dist
-# The bucket must exist: hf buckets create <your-username>/flock --private
+# Build the legion wheel and upload it to the bucket for bootstrap-mode workers.
+#   scripts/publish-wheel.sh <bucket-dir>     e.g. hf://buckets/<your-username>/legion/dist
+# The bucket must exist: hf buckets create <your-username>/legion --private
 # Uploads to <bucket-dir>/<git short sha>[-dirty]/<wheel> and prints that hf:// URL, which is
-# what the controller's FLOCK_WHEEL_URL should hold. One directory per revision, so a
+# what the controller's LEGION_WHEEL_URL should hold. One directory per revision, so a
 # relaunched worker never picks up a newer wheel than the controller was configured with.
 # Next to it harbor-deps.tar (the controller job and every worker need it, controller/jobdeploy.py
 # and controller/jobs.py; the Space build too, scripts/deploy-space.sh): the msgboard wheel (a

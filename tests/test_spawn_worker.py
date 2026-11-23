@@ -1,12 +1,12 @@
-"""Worker side of spawn: the bootstrap puts the flock CLI on PATH, and unassigning an ephemeral
-agent purges it. The harness env's identity (never the worker's FLOCK_TOKEN) and the parent in
+"""Worker side of spawn: the bootstrap puts the legion CLI on PATH, and unassigning an ephemeral
+agent purges it. The harness env's identity (never the worker's LEGION_TOKEN) and the parent in
 session_started: tests/test_runs.py::test_spawn."""
 
 from __future__ import annotations
 
 import asyncio
 
-from flock.models import AssignCommand, PromptCommand
+from legion.models import AssignCommand, PromptCommand
 
 from .test_worker_main import FakeController, make_worker
 from .worker_fakes import spec, until
@@ -17,7 +17,7 @@ CHILD = "leader-0000-analyst-0001"
 async def test_unassign_purges_an_ephemeral_agent_and_keeps_others(tmp_path):
     """docs/spawn.md "Ephemeral types": after its final sync, the worker deletes an ephemeral
     agent's workdir, session log and state; a normal agent's files stay."""
-    from flock.models import UnassignCommand
+    from legion.models import UnassignCommand
 
     keep = "leader-0000-analyst-0002"
     ctrl = FakeController()

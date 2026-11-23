@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Launch the controller as an HF Job in its workers' network group (job mode, docs/deploy-job.md).
-#   scripts/deploy-job.sh <wheel-url> [--flavor cpu-upgrade] [--group flock] [--timeout 48h]
+#   scripts/deploy-job.sh <wheel-url> [--flavor cpu-upgrade] [--group legion] [--timeout 48h]
 #                         [--namespace NS] [--state-url URL] [--secret NAME]... [--replace] [--dry-run]
 #   scripts/deploy-job.sh --down --group G (<wheel-url> | --state-url URL)   # cancel + delete state
-# Needs HF_TOKEN and FLOCK_TOKEN (plus every --secret)
+# Needs HF_TOKEN and LEGION_TOKEN (plus every --secret)
 # in the environment; values are never printed. JOB_LABELS sets the workers' deployment-wide
-# job labels (default experiment=flock-m1). Prints the job id and its two proxy URLs.
+# job labels (default experiment=legion-m1). Prints the job id and its two proxy URLs.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m flock.controller.jobdeploy "$@"
+PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m legion.controller.jobdeploy "$@"

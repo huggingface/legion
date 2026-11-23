@@ -13,8 +13,8 @@ from pathlib import Path
 import pytest
 from msgboard.client import Client
 
-from flock.harbor.config import BUILTIN
-from flock.harbor.resources import load_module
+from legion.harbor.config import BUILTIN
+from legion.harbor.resources import load_module
 
 RESOURCES = BUILTIN / "resources"
 board = load_module(RESOURCES / "message_board.py")

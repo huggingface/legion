@@ -1,4 +1,4 @@
-"""The flock CLI as an agent runs it: FLOCK_AGENT_TOKEN, FLOCK_AGENT, spawn/status/events/
+"""The legion CLI as an agent runs it: LEGION_AGENT_TOKEN, LEGION_AGENT, spawn/status/events/
 prompt/remove."""
 
 from __future__ import annotations
@@ -10,9 +10,9 @@ import pytest
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from flock import cli
-from flock.client import connect
-from flock.controller import spawn as spawning
+from legion import cli
+from legion.client import connect
+from legion.controller import spawn as spawning
 
 from .conftest import TOKEN
 from .test_spawn_api import LEADER, spawn_spec
@@ -30,19 +30,19 @@ def agent_cli(monkeypatch, app, store, tick):
     tick()
 
     def become(name: str | None) -> None:
-        monkeypatch.delenv("FLOCK_TOKEN", raising=False)
+        monkeypatch.delenv("LEGION_TOKEN", raising=False)
         if name is None:
-            monkeypatch.delenv("FLOCK_AGENT_TOKEN", raising=False)
-            monkeypatch.delenv("FLOCK_AGENT", raising=False)
-            monkeypatch.setenv("FLOCK_TOKEN", TOKEN)
+            monkeypatch.delenv("LEGION_AGENT_TOKEN", raising=False)
+            monkeypatch.delenv("LEGION_AGENT", raising=False)
+            monkeypatch.setenv("LEGION_TOKEN", TOKEN)
         else:
-            monkeypatch.setenv("FLOCK_AGENT_TOKEN", spawning.agent_token(store, name, "demo", 0))
-            monkeypatch.setenv("FLOCK_AGENT", name)
-            monkeypatch.setenv("FLOCK_TOKEN", "")  # what the worker leaves in the harness env
-        monkeypatch.setattr("flock.client.connect", lambda *_: TestClient(app, headers=_auth()))
+            monkeypatch.setenv("LEGION_AGENT_TOKEN", spawning.agent_token(store, name, "demo", 0))
+            monkeypatch.setenv("LEGION_AGENT", name)
+            monkeypatch.setenv("LEGION_TOKEN", "")  # what the worker leaves in the harness env
+        monkeypatch.setattr("legion.client.connect", lambda *_: TestClient(app, headers=_auth()))
 
     def _auth() -> dict:
-        tok = os.environ.get("FLOCK_AGENT_TOKEN") or os.environ.get("FLOCK_TOKEN", "")
+        tok = os.environ.get("LEGION_AGENT_TOKEN") or os.environ.get("LEGION_TOKEN", "")
         return {"Authorization": f"Bearer {tok}"}
 
     return become
@@ -53,10 +53,10 @@ def run(*args: str):
 
 
 def test_client_prefers_the_agent_token(monkeypatch):
-    monkeypatch.setenv("FLOCK_TOKEN", "swarm")
-    monkeypatch.setenv("FLOCK_AGENT_TOKEN", "agent")
+    monkeypatch.setenv("LEGION_TOKEN", "swarm")
+    monkeypatch.setenv("LEGION_AGENT_TOKEN", "agent")
     assert connect().headers["authorization"] == "Bearer agent"
-    monkeypatch.setenv("FLOCK_AGENT_TOKEN", "")
+    monkeypatch.setenv("LEGION_AGENT_TOKEN", "")
     assert connect().headers["authorization"] == "Bearer swarm"
 
 
@@ -107,7 +107,7 @@ def test_operator_names_swarms_or_agents(agent_cli):
     assert json.loads(run("status", child).output)["parent"] == LEADER  # not a swarm: an agent
     r = run("status", "demo", "--parent", LEADER)
     assert child in r.output and "leader-0000 " not in r.output
-    assert run("spawn", "analyst").exit_code == 1  # no FLOCK_AGENT, no --parent
+    assert run("spawn", "analyst").exit_code == 1  # no LEGION_AGENT, no --parent
     assert json.loads(run("remove", child).output) == {"removed": [child]}
     r = runner.invoke(cli.app, ["stop", "demo", "--delete", "--yes"])
     assert json.loads(r.output) == {"swarm": "demo", "removing": True}

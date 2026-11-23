@@ -6,8 +6,8 @@ from email.utils import format_datetime
 
 import httpx
 
-from flock.comms import board as board_mod
-from flock.comms.board import _delay, parse_retry_after
+from legion.comms import board as board_mod
+from legion.comms.board import _delay, parse_retry_after
 
 
 def test_retry_after_seconds_and_http_date():

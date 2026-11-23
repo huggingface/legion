@@ -1,6 +1,6 @@
-# mini-swarm with the model on a vLLM server flock starts on HF Jobs: the same three agents,
+# mini-swarm with the model on a vLLM server legion starts on HF Jobs: the same three agents,
 # task, loop and limits as spec.yaml, and the same model, on one h200 instead of the HF router.
-# flock starts the job, waits until it answers, and cancels it when the run ends.
+# legion starts the job, waits until it answers, and cancels it when the run ends.
 # Needs, cost, launch, other sizes: README.md.
 name: ${RUN_NAME:-mini-swarm-hf-jobs-1}
 model: ${MODEL:-Qwen/Qwen3.8-27B}

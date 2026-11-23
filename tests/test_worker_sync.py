@@ -7,13 +7,13 @@ import os
 
 import pytest
 
-from flock.worker.sync import MODES_FILE, BucketSync, apply_modes, collect_modes, parse_bucket
+from legion.worker.sync import MODES_FILE, BucketSync, apply_modes, collect_modes, parse_bucket
 
 from .worker_fakes import MemoryStore, runtime, until
 
 
 def test_parse_bucket():
-    assert parse_bucket("hf://buckets/ns/flock") == ("ns/flock", "")
+    assert parse_bucket("hf://buckets/ns/legion") == ("ns/legion", "")
     assert parse_bucket("hf://buckets/ns/b/runs/x/") == ("ns/b", "runs/x/")
 
 
@@ -200,7 +200,7 @@ async def test_restore_reports_progress_while_in_flight(tmp_path):
 
 
 async def test_restore_skips_an_unreadable_file_and_restores_the_rest(tmp_path, monkeypatch):
-    monkeypatch.setattr("flock.worker.sync.RESTORE_BACKOFF", (0, 0, 0))
+    monkeypatch.setattr("legion.worker.sync.RESTORE_BACKOFF", (0, 0, 0))
     store = FlakyStore()
     pre = await _seeded(tmp_path, store)
     store.bad = {pre + "workdir/f1.txt"}
@@ -211,7 +211,7 @@ async def test_restore_skips_an_unreadable_file_and_restores_the_rest(tmp_path, 
     assert (rt2.workdir / "f0.txt").read_text() == "data0"
     assert (rt2.workdir / "f2.txt").read_text() == "data2"
     assert not (rt2.workdir / "f1.txt").exists()
-    assert not list(rt2.workdir.rglob("*.flock-part"))  # no half-written leftovers
+    assert not list(rt2.workdir.rglob("*.legion-part"))  # no half-written leftovers
     # the batch, then the file alone; a 404 is permanent: no retry rounds
     assert sum(pre + "workdir/f1.txt" in c for c in store.calls) == 2
     assert rt2.sync.stats.snapshot()["errors"] == {"restore_file_failed": 1}
@@ -219,7 +219,7 @@ async def test_restore_skips_an_unreadable_file_and_restores_the_rest(tmp_path, 
 
 async def test_restore_retries_a_transient_failure(tmp_path, monkeypatch):
     slept: list[float] = []
-    monkeypatch.setattr("flock.worker.sync.time.sleep", slept.append)
+    monkeypatch.setattr("legion.worker.sync.time.sleep", slept.append)
     store = FlakyStore()
     pre = await _seeded(tmp_path, store)
     store.transient, store.fails = {pre + "workdir/f2.txt"}, 2  # batch and solo attempt fail
@@ -231,7 +231,7 @@ async def test_restore_retries_a_transient_failure(tmp_path, monkeypatch):
 
 
 async def test_failed_session_file_still_starts_with_session_restarted(tmp_path, monkeypatch):
-    monkeypatch.setattr("flock.worker.sync.RESTORE_BACKOFF", (0, 0, 0))
+    monkeypatch.setattr("legion.worker.sync.RESTORE_BACKOFF", (0, 0, 0))
     store = FlakyStore()
     pre = await _seeded(tmp_path, store)
     store.bad = {pre + "harness/s-1.jsonl"}  # the harness session transcript
@@ -262,7 +262,7 @@ async def test_restore_listing_failure_still_raises(tmp_path):
 
 
 async def test_push_after_partial_restore_never_deletes_remote_files(tmp_path, monkeypatch):
-    monkeypatch.setattr("flock.worker.sync.RESTORE_BACKOFF", (0, 0, 0))
+    monkeypatch.setattr("legion.worker.sync.RESTORE_BACKOFF", (0, 0, 0))
     store = FlakyStore()
     pre = await _seeded(tmp_path, store)
     store.bad = {pre + "workdir/f1.txt"}
@@ -291,31 +291,31 @@ async def test_push_after_failed_listing_never_deletes_remote_files(tmp_path):
     assert pre + "workdir/x.txt" in store.files
 
 
-async def test_flock_part_files_are_never_pushed_and_restore_cleans_them(tmp_path):
+async def test_legion_part_files_are_never_pushed_and_restore_cleans_them(tmp_path):
     store = MemoryStore()
     rt, _ = runtime(tmp_path / "a", sync=BucketSync(store, "sw"))
     await rt.setup(restore=False)
     rt.workdir.mkdir(parents=True, exist_ok=True)
     (rt.workdir / "f.txt").write_text("f")
     (rt.workdir / "sub").mkdir()
-    (rt.workdir / "f.txt.flock-part").write_text("")
-    (rt.workdir / "sub" / "g.bin.flock-part").write_text("half")
+    (rt.workdir / "f.txt.legion-part").write_text("")
+    (rt.workdir / "sub" / "g.bin.legion-part").write_text("half")
     await rt.sync_now("test")
-    assert not any(k.endswith(".flock-part") for k in store.files)
+    assert not any(k.endswith(".legion-part") for k in store.files)
     assert "sw/researcher/researcher-0001/workdir/f.txt" in store.files
-    # a .flock-part already in the bucket is not deleted by the mirror either
-    store.files["sw/researcher/researcher-0001/workdir/old.flock-part"] = b""
+    # a .legion-part already in the bucket is not deleted by the mirror either
+    store.files["sw/researcher/researcher-0001/workdir/old.legion-part"] = b""
     await rt.sync.push(rt)
-    assert "sw/researcher/researcher-0001/workdir/old.flock-part" in store.files
+    assert "sw/researcher/researcher-0001/workdir/old.legion-part" in store.files
     await rt.stop()
-    del store.files["sw/researcher/researcher-0001/workdir/old.flock-part"]
+    del store.files["sw/researcher/researcher-0001/workdir/old.legion-part"]
 
     # a crash left temporaries on the next machine's disk: restore removes them
     rt2, _ = runtime(tmp_path / "b", sync=BucketSync(store, "sw"))
     (rt2.workdir / "sub").mkdir(parents=True)
-    (rt2.workdir / "sub" / "stray.flock-part").write_text("x")
+    (rt2.workdir / "sub" / "stray.legion-part").write_text("x")
     await rt2.sync.restore(rt2)
-    assert not list(rt2.workdir.rglob("*.flock-part"))
+    assert not list(rt2.workdir.rglob("*.legion-part"))
     assert (rt2.workdir / "f.txt").read_text() == "f"
 
 
@@ -342,7 +342,7 @@ async def test_first_push_after_full_restore_uploads_nothing_unchanged(tmp_path)
 
 
 def test_workdir_stats_skip_excluded_paths_and_rank_top_dirs(tmp_path):
-    from flock.worker.sync import WorkdirStats, workdir_excludes
+    from legion.worker.sync import WorkdirStats, workdir_excludes
     wd = tmp_path / "wd"
     for rel, data in [("a.txt", "12"), ("snaps/1/x", "1"), ("snaps/2/y", "1"), ("snaps/z", "1"),
                       ("src/m.py", "123"), ("src/node_modules/p/i.js", "big" * 100),
@@ -358,7 +358,7 @@ def test_workdir_stats_skip_excluded_paths_and_rank_top_dirs(tmp_path):
 
 
 def test_not_found_is_skipped_at_once_other_errors_are_retried(tmp_path, caplog):
-    from flock.worker.sync import download_resilient
+    from legion.worker.sync import download_resilient
 
     class Store(MemoryStore):
         def __init__(self):
@@ -382,7 +382,7 @@ def test_not_found_is_skipped_at_once_other_errors_are_retried(tmp_path, caplog)
     store.files = {n: b"x" for n in names}
     slept: list[float] = []
     files = [(n, tmp_path / n) for n in names]
-    with caplog.at_level("INFO", logger="flock.worker.sync"):
+    with caplog.at_level("INFO", logger="legion.worker.sync"):
         done, failed = download_resilient(store, files, backoff=(1.0, 4.0, 10.0), sleep=slept.append)
     assert [r for r, _ in done] == ["ok"]
     assert sorted(failed) == sorted(n for n in names if n != "ok")
@@ -393,13 +393,13 @@ def test_not_found_is_skipped_at_once_other_errors_are_retried(tmp_path, caplog)
 
 
 async def test_restore_logs_skipped_files_as_one_summary_line(tmp_path, monkeypatch, caplog):
-    monkeypatch.setattr("flock.worker.sync.RESTORE_BACKOFF", (0, 0, 0))
+    monkeypatch.setattr("legion.worker.sync.RESTORE_BACKOFF", (0, 0, 0))
     store = FlakyStore()
     pre = await _seeded(tmp_path, store, n_files=15)
     store.bad = {pre + f"workdir/f{i}.txt" for i in range(12)}
     rt2, _ = runtime(tmp_path / "b", sync=BucketSync(store, "sw"))
     caplog.clear()
-    with caplog.at_level("INFO", logger="flock.worker.sync"):
+    with caplog.at_level("INFO", logger="legion.worker.sync"):
         res = await rt2.sync.restore(rt2)
     assert len(res.failed) == 12
     warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
@@ -408,17 +408,17 @@ async def test_restore_logs_skipped_files_as_one_summary_line(tmp_path, monkeypa
 
 
 def test_restore_batch_size_from_env(monkeypatch):
-    from flock.worker.sync import restore_batch
-    monkeypatch.delenv("FLOCK_RESTORE_BATCH", raising=False)
+    from legion.worker.sync import restore_batch
+    monkeypatch.delenv("LEGION_RESTORE_BATCH", raising=False)
     assert restore_batch() == 1000
     for raw, want in (("7", 7), ("1", 1), ("0", 1000), ("-3", 1000), ("abc", 1000), ("", 1000)):
-        monkeypatch.setenv("FLOCK_RESTORE_BATCH", raw)
+        monkeypatch.setenv("LEGION_RESTORE_BATCH", raw)
         assert restore_batch() == want
 
 
 def test_failed_big_batch_falls_back_per_file(tmp_path, monkeypatch):
-    from flock.worker.sync import download_resilient
-    monkeypatch.setenv("FLOCK_RESTORE_BATCH", "4")
+    from legion.worker.sync import download_resilient
+    monkeypatch.setenv("LEGION_RESTORE_BATCH", "4")
     store = FlakyStore(bad={"r/f2"})
     for i in range(6):
         store.files[f"r/f{i}"] = b"x"
@@ -432,14 +432,14 @@ def test_failed_big_batch_falls_back_per_file(tmp_path, monkeypatch):
 
 
 def test_default_workdir_excludes_match_at_any_depth(monkeypatch):
-    from flock.worker.sync import is_excluded, workdir_excludes
-    monkeypatch.delenv("FLOCK_SYNC_EXCLUDE", raising=False)
-    monkeypatch.delenv("FLOCK_SYNC_EXCLUDE_DEFAULTS", raising=False)
+    from legion.worker.sync import is_excluded, workdir_excludes
+    monkeypatch.delenv("LEGION_SYNC_EXCLUDE", raising=False)
+    monkeypatch.delenv("LEGION_SYNC_EXCLUDE_DEFAULTS", raising=False)
     pats = workdir_excludes()
     for rel in ["__pycache__/a.cpython-311.pyc", "a/b/__pycache__/x.txt", "m.pyc", "a/b/m.pyc",
                 ".pytest_cache/v/x", "p/.pytest_cache/v/x", ".mypy_cache/x", "p/q/.mypy_cache/x",
                 ".ruff_cache/x", "p/.ruff_cache/x", ".hypothesis/x", "p/.hypothesis/d/x",
-                "pkg.egg-info/PKG-INFO", "src/pkg.egg-info/PKG-INFO", "f.txt.flock-part", ".cache/pip/x",
+                "pkg.egg-info/PKG-INFO", "src/pkg.egg-info/PKG-INFO", "f.txt.legion-part", ".cache/pip/x",
                 "web/node_modules/a/b.js", ".venv/bin/python", "p/venv/lib/x", ".tox/py/x",
                 ".nox/s/x", "n/.ipynb_checkpoints/a.ipynb", ".gradle/x", "app/.next/x", "a/b.o"]:
         assert is_excluded(rel, pats), rel
@@ -450,15 +450,15 @@ def test_default_workdir_excludes_match_at_any_depth(monkeypatch):
 
 
 def test_workdir_excludes_env_extends_and_disables(monkeypatch):
-    from flock.worker.sync import is_excluded, workdir_excludes
-    monkeypatch.setenv("FLOCK_SYNC_EXCLUDE", "*.tmp, node_modules/")
+    from legion.worker.sync import is_excluded, workdir_excludes
+    monkeypatch.setenv("LEGION_SYNC_EXCLUDE", "*.tmp, node_modules/")
     pats = workdir_excludes()
     assert is_excluded("a/b.tmp", pats) and is_excluded("web/node_modules/x/y.js", pats)
     assert is_excluded("a/__pycache__/x", pats)
-    monkeypatch.setenv("FLOCK_SYNC_EXCLUDE_DEFAULTS", "0")
+    monkeypatch.setenv("LEGION_SYNC_EXCLUDE_DEFAULTS", "0")
     pats = workdir_excludes()
     assert not is_excluded("a/__pycache__/x", pats) and not is_excluded("m.pyc", pats)
-    assert is_excluded("a/b.tmp", pats) and is_excluded("f.flock-part", pats)
+    assert is_excluded("a/b.tmp", pats) and is_excluded("f.legion-part", pats)
 
 
 async def test_mirror_skips_caches_and_never_deletes_remote_ones(tmp_path):
@@ -497,7 +497,7 @@ async def test_restore_skips_excluded_remote_files(tmp_path):
 
 
 async def test_over_soft_limit_notes_hourly_and_hard_limit_emits_event(tmp_path):
-    from flock.worker.sync import QUOTA_NOTE_EVERY
+    from legion.worker.sync import QUOTA_NOTE_EVERY
     store = MemoryStore()
     sync = BucketSync(store, "sw")
     rt, _ = runtime(tmp_path, sync=sync, workdir={"soft_files": 2, "max_files": 5})
@@ -581,7 +581,7 @@ async def test_parallel_restore_gives_the_same_tree_as_sequential(tmp_path, monk
     import threading
     import time
 
-    from flock.worker import sync as sync_mod
+    from legion.worker import sync as sync_mod
 
     class SlowStore(MemoryStore):
         def __init__(self):
@@ -693,7 +693,7 @@ def umask022():
 
 
 async def test_base_tar_round_trip_keeps_modes_links_mtimes_and_skips_excludes(tmp_path, umask022):
-    from flock.worker.sync import BASE_JSON, BASE_TAR
+    from legion.worker.sync import BASE_JSON, BASE_TAR
 
     store = MemoryStore()
     rt = await _agent(tmp_path / "a", store)
@@ -717,7 +717,7 @@ async def test_base_tar_round_trip_keeps_modes_links_mtimes_and_skips_excludes(t
 
 
 async def test_delta_after_base_sends_only_changes_and_tombstones_delete(tmp_path, umask022):
-    from flock.worker.sync import BASE_JSON
+    from legion.worker.sync import BASE_JSON
 
     store = MemoryStore()
     rt = await _agent(tmp_path / "a", store)
@@ -807,7 +807,7 @@ async def test_restore_after_a_crash_while_making_a_base_equals_the_source(
 
 
 async def test_plain_mirror_bucket_restores_then_gets_a_base_and_can_go_back(tmp_path, umask022):
-    from flock.worker.sync import BASE_JSON, BASE_TAR
+    from legion.worker.sync import BASE_JSON, BASE_TAR
 
     store = MemoryStore()
     rt = await _agent(tmp_path / "a", store, workdir={"ephemeral": ["scratch"]})  # base off
@@ -832,7 +832,7 @@ async def test_plain_mirror_bucket_restores_then_gets_a_base_and_can_go_back(tmp
 
 
 async def test_unreadable_base_is_an_incomplete_restore_and_blocks_deletes(tmp_path):
-    from flock.worker.sync import BASE_TAR
+    from legion.worker.sync import BASE_TAR
 
     store = FlakyStore(bad=[PRE + BASE_TAR])
     rt = await _agent(tmp_path / "a", store)
@@ -894,7 +894,7 @@ async def test_a_delta_replacing_a_base_symlink_is_not_written_through_it(tmp_pa
 
 
 async def test_drain_stops_a_base_build_and_nothing_is_committed(tmp_path, umask022):
-    from flock.worker.sync import BASE_JSON, BASE_TAR
+    from legion.worker.sync import BASE_JSON, BASE_TAR
 
     store = MemoryStore()
     rt = await _agent(tmp_path / "a", store)
@@ -909,7 +909,7 @@ async def test_drain_stops_a_base_build_and_nothing_is_committed(tmp_path, umask
 async def test_no_base_and_no_restore_without_free_disk(tmp_path, umask022, monkeypatch):
     import shutil
 
-    from flock.worker.sync import BASE_JSON, BASE_TAR
+    from legion.worker.sync import BASE_JSON, BASE_TAR
 
     store = MemoryStore()
     rt = await _agent(tmp_path / "a", store)

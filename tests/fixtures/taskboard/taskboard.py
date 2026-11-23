@@ -1,13 +1,13 @@
 """A shared task board world (docs/world.md), a test fixture: agents list, add, claim and finish tasks.
 
-    cd tests/fixtures/taskboard && FLOCK_WORLD_TOKEN=dev python -m flock.world serve taskboard:TaskBoard
+    cd tests/fixtures/taskboard && LEGION_WORLD_TOKEN=dev python -m legion.world serve taskboard:TaskBoard
 
 State is one SQLite file in the current directory (`$TASKBOARD_DB`, default `taskboard.db`), so
 it survives a restart of the world. On first start the board is seeded from `tasks.txt` next to
 it (one task per line, `name: description`; `#` starts a comment). A claim is exclusive: a
-second agent's claim fails with the owner's name. When flock removes an agent (`agent_done`),
+second agent's claim fails with the owner's name. When legion removes an agent (`agent_done`),
 its claimed tasks go back to open. Every change is logged in the `events` table with the
-agent, request id and turn flock sent.
+agent, request id and turn legion sent.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from typing import Literal
 
-from flock.world import Agent, ToolError, World, tool
+from legion.world import Agent, ToolError, World, tool
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (

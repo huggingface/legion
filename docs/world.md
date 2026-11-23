@@ -1,12 +1,12 @@
 # Worlds
 
 A world is shared state behind tools: a task board, a canvas, a game. It is an HTTP service
-outside flock, in any language. Each call reaches the world with the calling agent's name and a
-secret. flock never reads or stores the world's state.
+outside legion, in any language. Each call reaches the world with the calling agent's name and a
+secret. legion never reads or stores the world's state.
 
 Harbor agents reach a world through the `world` resource and its `world.*` tools: the run's
 `resources: {world: {url, token_env}}` and `tools: [world.*]`
-(experiments/pybot/spec.yaml; `flock.harbor.builtin.resources.world`). The resource
+(experiments/pybot/spec.yaml; `legion.harbor.builtin.resources.world`). The resource
 adds the secret and the agent's name on the worker, so no world credential enters a Trial's
 container (on hf-sandbox each agent gets its own agent token instead).
 
@@ -18,7 +18,7 @@ A Harbor spec has no `world:` block: it is reachable only from a hand-written sw
 # spec.yaml
 world:
   dir: counter                                      # where `command` runs, relative to the spec
-  command: ["{python}", -m, flock.world, serve, "counter:Counter"]
+  command: ["{python}", -m, legion.world, serve, "counter:Counter"]
 ```
 
 `counter/counter.py` is the one-tool world under "Write your own world" below.
@@ -27,7 +27,7 @@ world:
 
 | key | what |
 |---|---|
-| `world.command` | Starts the world (a list, or a string split like a shell). flock fills in `{port}` (a free port) and `{python}` (flock's own interpreter). The controller starts it with `compute: local`; with `compute: slurm` the run's world job does (docs/slurm.md "Deploying"), next to `url`. |
+| `world.command` | Starts the world (a list, or a string split like a shell). legion fills in `{port}` (a free port) and `{python}` (legion's own interpreter). The controller starts it with `compute: local`; with `compute: slurm` the run's world job does (docs/slurm.md "Deploying"), next to `url`. |
 | `world.dir` | Where `command` runs, relative to the spec file. Defaults to the spec's directory. |
 | `world.url` | A world that is already running (a Job, a Space, your laptop). Required with `compute: hf-jobs`. With `compute: local` it is used when there is no `command`. |
 | `world.token_env` | Names the secret sent as `X-World-Token`. It is read from the controller's environment, like provider keys; workers do not get this one (the Harbor world resource's own `token_env` is read on the worker). A started world without it gets a generated secret. |
@@ -39,14 +39,14 @@ part of the spec.
 One block works at both scales. `command` is used locally and `url` on HF Jobs, so a spec can
 carry both, and `compute:` is the only line that changes.
 
-## What flock does
+## What legion does
 
-**At apply** (`flock launch`, any re-apply):
+**At apply** (`legion launch`, any re-apply):
 
 1. With `compute: local` and a `command`, the controller starts the world as a child process. It
-   runs in `dir` with these variables set: `FLOCK_WORLD_PORT`, `FLOCK_WORLD_HOST=127.0.0.1`,
-   `FLOCK_WORLD_TOKEN` (the secret) and `FLOCK_SWARM`. It also inherits the controller's
-   environment, minus every `FLOCK_*` variable. The controller waits up to 30 s for
+   runs in `dir` with these variables set: `LEGION_WORLD_PORT`, `LEGION_WORLD_HOST=127.0.0.1`,
+   `LEGION_WORLD_TOKEN` (the secret) and `LEGION_SWARM`. It also inherits the controller's
+   environment, minus every `LEGION_*` variable. The controller waits up to 30 s for
    `GET /manifest`. A re-apply keeps the running world unless `command`, `dir`, the secret or a
    `*.py` file under `dir` changed. In that case the replacement starts next to the running world
    on another port, and the running world stops only after the replacement passed every check
@@ -63,14 +63,14 @@ message says why, for example:
 world: cannot reach http://127.0.0.1:8770/manifest: ConnectError: [Errno 111] Connection refused
 world: http://w:8000 refused the token (401): check world.token_env
 world: invalid manifest from http://w:8000: tools.0.name: Value error, tool name '1x' must match (...)
-world.command exited with 1 before serving GET /manifest; its log (.flock/<run>/logs/world-<swarm>.log) ends with: ...
+world.command exited with 1 before serving GET /manifest; its log (.legion/<run>/logs/world-<swarm>.log) ends with: ...
 ```
 
-A started world stops when its swarm is removed (`flock stop --delete`), when its block is removed, and
-when the local controller ends (`flock stop --release`), after the workers. Stopping sends SIGTERM to the world's whole process
+A started world stops when its swarm is removed (`legion stop --delete`), when its block is removed, and
+when the local controller ends (`legion stop --release`), after the workers. Stopping sends SIGTERM to the world's whole process
 group (it runs in its own session). After 5 s, SIGKILL goes to whatever is left in the group,
 including helpers that outlived the main process. Its output goes to
-`<run>/logs/world-<swarm>.log` under a `flock launch` run; a standalone local controller lets it inherit
+`<run>/logs/world-<swarm>.log` under a `legion launch` run; a standalone local controller lets it inherit
 its own output.
 
 ## Protocol: World API v1
@@ -81,15 +81,15 @@ HTTP and JSON. A world is any server that answers these routes:
 |---|---|---|
 | `GET /manifest` | | the manifest (below); also the health check |
 | `POST /tools/<name>` | `{"args": {...}}` | `{"ok": true, "result": <any JSON>}` or `{"ok": false, "error": {"code": "...", "message": "..."}}` |
-| `POST /hooks` | `{"event", "agent", "type", "swarm", "turn", "data"}` | `{"ok": true}`; not sent by flock now (below) |
+| `POST /hooks` | `{"event", "agent", "type", "swarm", "turn", "data"}` | `{"ok": true}`; not sent by legion now (below) |
 | `GET /metrics` | | optional, capability `metrics-v1`: load and health numbers (below) |
 | `GET /healthz` | | optional, no secret: `{"status": "ready"}` or `{"status": "parked"}` |
 | `/admin/*` | | optional, capability `admin-v1`, the admin secret: knobs and lane pauses (below) |
 
 | header | sent | meaning |
 |---|---|---|
-| `X-World-Token` | every request | the shared secret; answer `401` if it is wrong. `flock.world.server` also takes, on `/manifest` and tool calls, the agent's own token `agent_token(secret, X-Flock-Agent)` (protocol.py), so an agent that holds it acts only as itself |
-| `X-Flock-Agent` | tool calls | the calling agent (`worker-0001`); trust it when the secret matches |
+| `X-World-Token` | every request | the shared secret; answer `401` if it is wrong. `legion.world.server` also takes, on `/manifest` and tool calls, the agent's own token `agent_token(secret, X-Legion-Agent)` (protocol.py), so an agent that holds it acts only as itself |
+| `X-Legion-Agent` | tool calls | the calling agent (`worker-0001`); trust it when the secret matches |
 | `X-Request-Id` | tool calls | unique per call; log it with what the call changed |
 
 The manifest:
@@ -108,12 +108,12 @@ The manifest:
 - Each tool is a Chat Completions function: `name`, `description`, and `parameters` (a JSON
   schema of type object). Optional `annotations: {"readOnlyHint": true}` marks a tool that
   changes nothing.
-- Unknown fields are ignored. flock ignores capabilities it does not use, so a world can declare
+- Unknown fields are ignored. legion ignores capabilities it does not use, so a world can declare
   more.
 - A tool's error is a `200` with `ok: false`; the agent reads `message`. An optional
   `error.retry_after_s` says the call cannot succeed for that many seconds (a budget, a busy
   backend). Use `4xx` and `5xx` for protocol failures: `401` for the secret, `404` for an
-  unknown tool, `429` or `503` with `Retry-After` when overloaded (`python -m flock.world serve` answers
+  unknown tool, `429` or `503` with `Retry-After` when overloaded (`python -m legion.world serve` answers
   `{"ok": false, "error": {"code": "overloaded", "message", "retry_after_s"}}`).
 - `result` goes to the model as is if it is a string, otherwise as JSON. If `result` is absent,
   a `text` string is used instead.
@@ -122,13 +122,13 @@ The manifest:
 
 ## Write your own world
 
-**In Python**, with the `flock.world` base. Mark tool methods with `@tool`. Schemas come from the
-type hints and the docstring (`flock.tools.loader`). A parameter named
+**In Python**, with the `legion.world` base. Mark tool methods with `@tool`. Schemas come from the
+type hints and the docstring (`legion.tools.loader`). A parameter named
 `agent` (or annotated `Agent`) receives the caller and is never shown to the model.
 
 ```python
 # counter/counter.py
-from flock.world import Agent, ToolError, World, tool
+from legion.world import Agent, ToolError, World, tool
 
 
 class Counter(World):
@@ -155,15 +155,15 @@ class Counter(World):
 ```
 
 ```sh
-cd counter && FLOCK_WORLD_TOKEN=dev python -m flock.world serve counter:Counter   # :8765
+cd counter && LEGION_WORLD_TOKEN=dev python -m legion.world serve counter:Counter   # :8765
 curl -s -H 'X-World-Token: dev' localhost:8765/manifest
-curl -s -H 'X-World-Token: dev' -H 'X-Flock-Agent: me' -d '{"args": {"by": 2}}' \
+curl -s -H 'X-World-Token: dev' -H 'X-Legion-Agent: me' -d '{"args": {"by": 2}}' \
   localhost:8765/tools/bump        # {"ok":true,"result":{"n":2,"last":"me"}}
 ```
 
-`python -m flock.world serve module:Class` imports the module from the current directory. It serves on
-`$FLOCK_WORLD_HOST:$FLOCK_WORLD_PORT` (default `127.0.0.1:8765`, or `--host` / `--port`) and
-requires `$FLOCK_WORLD_TOKEN` (`--token-env NAME` for another variable; `--insecure` for none).
+`python -m legion.world serve module:Class` imports the module from the current directory. It serves on
+`$LEGION_WORLD_HOST:$LEGION_WORLD_PORT` (default `127.0.0.1:8765`, or `--host` / `--port`) and
+requires `$LEGION_WORLD_TOKEN` (`--token-env NAME` for another variable; `--insecure` for none).
 Synchronous tools and hooks run one at a time, so the world needs no locks of its own
 (`concurrent = True`: they run at once, and the world guards its own state); `async def` tools
 and hooks run concurrently. Synchronous tools run in one of two thread pools:
@@ -176,21 +176,21 @@ returns `{"code": "internal"}` with the exception text. Overriding `manifest()` 
 args, agent)` serves tools that are not methods. The server checks each call against
 `manifest()` as served at that moment, so what `GET /manifest` advertises is exactly what
 `POST /tools/<name>` accepts, also after the manifest changes. It needs the `controller` extra (FastAPI, uvicorn),
-which `flock launch` needs too.
+which `legion launch` needs too.
 
 `raise ToolError(message, code, retry_after_s=N)` adds `retry_after_s` to the error, for a
 refusal that will not change for a while (a used-up budget, a busy backend). The message stays what the agent reads.
 
 **Admission control.** The server refuses a tool call with `429`, `Retry-After` and
 `code: "overloaded"` when its pool is overloaded: the fast pool's oldest queued call has
-waited more than `FLOCK_WORLD_FAST_MAX_WAIT_S` (2 s), or the slow pool's running and queued
-calls reach its 64 threads plus `FLOCK_WORLD_SLOW_QUEUE` (8). `retry_after_s` is
-`FLOCK_WORLD_RETRY_AFTER_S` (30). The decision is made from the path before the body is read,
+waited more than `LEGION_WORLD_FAST_MAX_WAIT_S` (2 s), or the slow pool's running and queued
+calls reach its 64 threads plus `LEGION_WORLD_SLOW_QUEUE` (8). `retry_after_s` is
+`LEGION_WORLD_RETRY_AFTER_S` (30). The decision is made from the path before the body is read,
 so a refused upload is drained and never decoded. `GET /manifest`, `GET /metrics` and the
 hooks are never refused.
 
 **Metrics.** `GET /metrics` (the same token) answers JSON, or Prometheus text with
-`Accept: text/plain` (`flock_world_<name>`, labels `tool`, `pool`, `code`). Windowed values
+`Accept: text/plain` (`legion_world_<name>`, labels `tool`, `pool`, `code`). Windowed values
 cover the last `window_s` (300 s):
 
 ```json
@@ -217,10 +217,10 @@ logs one WARNING at most every 10 s with the reason, the tool and how many it re
 concurrently with tools: keep it cheap.
 
 **Saving state.** A world that keeps its state in memory can save it in O(changes) with
-`flock.world.store`, a `(kind, key) -> JSON` table on SQLite in WAL mode:
+`legion.world.store`, a `(kind, key) -> JSON` table on SQLite in WAL mode:
 
 ```python
-from flock.world.store import Store
+from legion.world.store import Store
 
 store = Store(state_dir / "state.db")
 prs = dict(store.iter("prs"))                   # hot rows, at start
@@ -236,10 +236,10 @@ rows dirty for the next one. `close()` checkpoints the WAL into the database fil
 path)` (module function) copies a database another process is writing, for archive scripts.
 
 **Lanes for external writes.** A world that writes to an outside service with one token (a
-Git host, an API) can give each kind of write its own lane, from `flock.world.lanes`:
+Git host, an API) can give each kind of write its own lane, from `legion.world.lanes`:
 
 ```python
-from flock.world.lanes import Lane, LaneBusy, Lanes
+from legion.world.lanes import Lane, LaneBusy, Lanes
 
 lanes = Lanes({"push": Lane(slots=1), "merge": Lane(slots=1),
                "comment": Lane(slots=1, gap_s=1.0)}, dir=state_dir, paused=lambda lane: ...)
@@ -272,7 +272,7 @@ lanes.outbox("comment", drain=post).put(key=pr, payload=text)   # post(key, payl
   `wait_s_total`, `ok`, `transient`, `final`, `tripped`, `paused`, `outbox_depth`,
   `outbox_oldest_age_s`.
 
-**Parked mode.** `python -m flock.world serve` binds its port first and builds the world in a background
+**Parked mode.** `python -m legion.world serve` binds its port first and builds the world in a background
 thread. While that raises (a failed restore, the Hub unreachable, a bad config), it is
 *parked*: it logs the error and builds again after 30 s, doubling up to 10 min, forever.
 `GET /manifest`, tool calls and hooks then answer `503` with `Retry-After` and
@@ -308,7 +308,7 @@ class Shop(World):
 
 `on_change(value)` runs in a thread (raise to refuse); without one, read `self.knobs[name]`.
 Values set through the API and the paused lanes are written to `knobs.json` in the world's
-state dir (`World.state_dir()`: `$FLOCK_WORLD_STATE_DIR` by default) and read back at the next start, so a requeued world keeps them;
+state dir (`World.state_dir()`: `$LEGION_WORLD_STATE_DIR` by default) and read back at the next start, so a requeued world keeps them;
 the defaults a world passes (usually from its environment) apply only to knobs never set.
 The manifest lists the knob names under `knobs` and adds the capability `admin-v1`.
 
@@ -321,21 +321,21 @@ The manifest lists the knob names under `knobs` and adds the capability `admin-v
 | `POST /admin/resume` | `{"lanes": [...]}` | the same |
 
 `/admin/*` takes the admin secret in `X-World-Token`, never the world secret (that gets `401`):
-`$FLOCK_WORLD_ADMIN_TOKEN` in the world's environment; unset, `/admin` answers `403`. It is
+`$LEGION_WORLD_ADMIN_TOKEN` in the world's environment; unset, `/admin` answers `403`. It is
 never derived from the world secret. Bodies are capped at 64 KB, and
 admission control never applies to `/admin`. Operators go through the controller, which sends
 the same secret and records each knob change as a swarm event (`world_knob {name, old, new,
 by, reason}`):
 
-- a world flock starts (`command`, `compute: local`): the controller derives the secret from
-  its own token and the swarm and starts the world with it in `$FLOCK_WORLD_ADMIN_TOKEN`;
-- any other world (`url`; Slurm, a Space): set `FLOCK_WORLD_ADMIN_TOKEN` in the world's
+- a world legion starts (`command`, `compute: local`): the controller derives the secret from
+  its own token and the swarm and starts the world with it in `$LEGION_WORLD_ADMIN_TOKEN`;
+- any other world (`url`; Slurm, a Space): set `LEGION_WORLD_ADMIN_TOKEN` in the world's
   environment and in the controller's secrets (the run's secrets file on Slurm,
-  `flock init --secrets`), and keep it from the workers.
+  `legion init --secrets`), and keep it from the workers.
 
 ```bash
-python -m flock.world knobs <swarm>                                   # values, defaults, ranges, paused lanes
-python -m flock.world set <swarm> pr.open_floor=10 --reason "hub 429s"
+python -m legion.world knobs <swarm>                                   # values, defaults, ranges, paused lanes
+python -m legion.world set <swarm> pr.open_floor=10 --reason "hub 429s"
 ```
 
 **In any other language:** serve the three routes above. A world without hooks needs only two.
@@ -348,14 +348,14 @@ python -m flock.world set <swarm> pr.open_floor=10 --reason "hub 429s"
 4. Bound results: byte caps, pagination, narrowing hints.
 5. Stable error codes plus `retry_after_s`; make writes idempotent on `X-Request-Id` where the backend allows.
 6. Inject the backend, and test with a fake.
-7. Pass `python -m flock.world doctor <url> [--token T] [--calls N]`. It warns about reads without the hint, writes with no read on the same noun and read tools with no limit/page argument, lists the capabilities, checks `/healthz` and `/metrics`, and with `--calls N` runs N concurrent calls of each read-only tool with empty args (p50/p95, error codes, `/manifest` latency meanwhile). It exits 1 when the manifest is unreachable or a read-only tool errors; warnings exit 0. Tools with required arguments are not called.
+7. Pass `python -m legion.world doctor <url> [--token T] [--calls N]`. It warns about reads without the hint, writes with no read on the same noun and read tools with no limit/page argument, lists the capabilities, checks `/healthz` and `/metrics`, and with `--calls N` runs N concurrent calls of each read-only tool with empty args (p50/p95, error codes, `/manifest` latency meanwhile). It exits 1 when the manifest is unreachable or a read-only tool errors; warnings exit 0. Tools with required arguments are not called.
 
 ## Local and HF Jobs
 
-| | `compute: local` (`flock launch`) | `compute: hf-jobs` |
+| | `compute: local` (`legion launch`) | `compute: hf-jobs` |
 |---|---|---|
 | who runs the world | the controller, from `command` in `dir` | you: a Job, a Space or any host the workers can reach; give `url` (and the run's `resources.world.url`) |
-| port | chosen by flock (`{port}`, `$FLOCK_WORLD_PORT`), on 127.0.0.1 | yours |
+| port | chosen by legion (`{port}`, `$LEGION_WORLD_PORT`), on 127.0.0.1 | yours |
 | secret | generated (or `token_env`) | `token_env`, set on the controller; the world resource reads its own `token_env` on the worker |
 | lifetime | stops with the swarm or the run | yours |
 
@@ -366,8 +366,8 @@ Space is public, so the secret is its only protection.
 ## Not in this version
 
 - Starting a world as an HF Job.
-- `flock doctor --world <url>` (a conformance and load check).
-- The world → flock direction: a world token to prompt, stop or grant agents.
+- `legion doctor --world <url>` (a conformance and load check).
+- The world → legion direction: a world token to prompt, stop or grant agents.
 - Optional capabilities with routes of their own (`state`, `score`, `claims`, `rounds`,
   `events`, `render`, `checks`). Loop settings that need them (`loop.while.score_*`,
   `every: rounds`, `on: world.*`) are still refused at apply.
@@ -378,7 +378,7 @@ Space is public, so the secret is its only protection.
 
 A world can advertise `workspace-upload-v1` and implement
 `call_workspace(name, args, agent, snapshot)`. A tool opts in with
-`x-flock-workspace` on its manifest entry:
+`x-legion-workspace` on its manifest entry:
 `{"arg": "<argument>", "default": "<value when absent>", "skip": ["<value>", ...], "skip_prefix": "<prefix>"}`
 (only `arg` is required). For a call to that tool, the agent's `world.*` tool captures the
 git clone named by that argument, rooted inside the agent's workspace, unless the value is in
@@ -402,7 +402,7 @@ commands from the clone's config) and sends
 `git diff --cached --binary --find-renames <base_sha>` (binary files, deletions,
 renames and mode changes). A 3-file change in a 5,000-file clone is about 1 KB
 instead of 3.8 MB. A patch over 20 MiB, or a clone v2 cannot capture, goes as v1.
-The world applies it with `flock.world.workspace.apply_patch(snapshot, tree)` on
+The world applies it with `legion.world.workspace.apply_patch(snapshot, tree)` on
 its own checkout of `base_sha` (worktree only, so its excludes apply when it
 stages the tree); it refuses symlinks, submodules, paths outside the tree or in
 `.git`, and more than 10,000 files or 128 MiB declared (`git apply` runs under
@@ -412,5 +412,5 @@ anything; the tool then resends the call once as v1. `GET /metrics` counts
 `upload_v1_total` and `upload_v2_total`.
 
 A tool's optional
-`x-flock-timeout_s` raises the tool's HTTP read timeout for its calls (for example
+`x-legion-timeout_s` raises the tool's HTTP read timeout for its calls (for example
 330 seconds for a tool that may run for 300).

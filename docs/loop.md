@@ -5,14 +5,14 @@ final round and leaves them idle. `limits.budget_usd` is a hard stop for the who
 
 Code: `models.py` (`LoopSpec`, `LoopMeta`, `LoopStartCommand`, `LoopStopCommand`,
 `LoopStatus`), `controller/loop.py` (the engine), `worker/agents.py` + `worker/loop.py` (the
-worker side and rendering), `cli.py` (`flock stop --final`, `flock status`).
+worker side and rendering), `cli.py` (`legion stop --final`, `legion status`).
 
 ## Spec
 
 ```yaml
 loop:                          # a Harbor spec's run loop; a role's own `agents.roles.<r>.loop` replaces it
   prompt: "Round {round}: claim and paint. Repeat until the result says you are done."
-  # or prompt_file: prompts/round.md (read by `flock launch`, relative to the spec)
+  # or prompt_file: prompts/round.md (read by `legion launch`, relative to the spec)
   every: turn_end            # turn_end (default) | a duration: 30s, 2m
   on: [message_board.mention]        # wake-ups from the board resource (see "Wake queue")
   wake:                      # how wake-ups spend rounds (all optional; these are the defaults)
@@ -37,7 +37,7 @@ limits:
 |---|---|
 | `prompt` / `prompt_file` | the loop prompt, a template rendered on the worker (placeholders below); one is required |
 | `every` | `turn_end`: the next loop prompt as soon as the agent's turn completes. A duration: an idle agent gets the next one that long after its previous loop prompt was sent |
-| `on` | wake sources (`message_board.mention`, ...: the board resource's events): a wake queues the loop prompt early (2 s debounce). `world.*` needs a world. Write it plain: `flock launch` reads specs with YAML 1.2 booleans (only `true`/`false`), so `on:` stays a key |
+| `on` | wake sources (`message_board.mention`, ...: the board resource's events): a wake queues the loop prompt early (2 s debounce). `world.*` needs a world. Write it plain: `legion launch` reads specs with YAML 1.2 booleans (only `true`/`false`), so `on:` stays a key |
 | `wake.min_gap` | per agent: at least this long between two wake prompts (default `30s`; `0s` turns it off). Wakes that arrive in the gap are coalesced into one prompt when it ends |
 | `wake.max`, `wake.window` | per agent: at most `max` wake prompts (default 10) per run of the loop, or per `window` when set; `null` for no cap. Past it, wakes are ignored (`wake()` returns false) |
 | `wake.counts_as_round` | default `false`: a wake prompt is not a round. It carries the current `{round}`, does not advance it and does not count toward `max_rounds`; `wake.max` caps it instead. `true`: a wake prompt is the next round |
@@ -70,13 +70,13 @@ JSON and code in a prompt survive.
 ## How it runs
 
 The controller runs a loop engine next to the reconcile loop: one tick per second
-(`FLOCK_LOOP_INTERVAL`). A tick first checks the budget, then for each type with a loop
+(`LEGION_LOOP_INTERVAL`). A tick first checks the budget, then for each type with a loop
 evaluates `while` and sends what is due. Every controller-sent prompt goes through the
 bulk-prompt path (`POST /swarms/{s}/prompts` with `state: idle, skip_pending: true`): an agent
 that is working or already has an undelivered prompt is skipped, so prompts never stack, and
 every turn is admitted under the provider's `max_working` like any other prompt.
 
-**Who re-prompts on `turn_end`** (`flock status` shows it as the mode):
+**Who re-prompts on `turn_end`** (`legion status` shows it as the mode):
 
 - `worker` (provider without `max_working`): the controller sends one `loop_start` command per
   agent. The worker then sends the rendered prompt when the agent is
@@ -105,7 +105,7 @@ count.
 
 **Stopping.** The loop stops when a type-wide condition fails (`until`, `budget_usd`, the
 budget threshold), when every agent has left it (`max_rounds`, `agent_usd`,
-`errors`; the reason is theirs if they agree, else `agents_done`), on `flock stop --final`, or
+`errors`; the reason is theirs if they agree, else `agents_done`), on `legion stop --final`, or
 when `loop:` is removed from the spec (no final round then). Stopping drops the type's
 undelivered loop prompts and sends `loop_stop` to worker-side loops.
 
@@ -143,7 +143,7 @@ prompts are then delivered. Cost is
 what the controller's ledger knows, which is updated by heartbeats (every 30 s), so the overshoot
 is bounded by about one heartbeat of spend of the working agents.
 
-**Live settings.** `flock launch` with a changed `loop:` takes effect at the
+**Live settings.** `legion launch` with a changed `loop:` takes effect at the
 next tick: controller-side settings (`every`, `while`, `final`) are read every tick,
 and worker-side loops get a fresh `loop_start` with the new prompt and limits (`loop_updated`
 event). The mode is recomputed on every tick from `every` and the provider's `max_working`, so a
@@ -163,17 +163,17 @@ so a controller restart resumes the loops; only queued wake-ups are lost.
 
 ### Pause and resume
 
-A hold (`flock stop`) stops new work reaching some agents without ending their loop. Unlike
-`flock stop --final` it resets nothing and runs no final round.
+A hold (`legion stop`) stops new work reaching some agents without ending their loop. Unlike
+`legion stop --final` it resets nothing and runs no final round.
 
 ```
-flock stop demo --type ds --reason "provider maintenance"      # one or more --type / --agent
-flock stop demo --agent ds-0003 --interrupt --reason "look"    # also stop the turn in flight
-flock stop demo                                                # no --type/--agent: every type
-flock launch demo --type ds                                    # no --type/--agent: every hold
+legion stop demo --type ds --reason "provider maintenance"      # one or more --type / --agent
+legion stop demo --agent ds-0003 --interrupt --reason "look"    # also stop the turn in flight
+legion stop demo                                                # no --type/--agent: every type
+legion launch demo --type ds                                    # no --type/--agent: every hold
 ```
 
-`flock stop demo --release` also frees the compute (docs/live.md "Lifecycle").
+`legion stop demo --release` also frees the compute (docs/live.md "Lifecycle").
 
 While an agent is held (its type or its name is held):
 
@@ -193,7 +193,7 @@ Holds are stored in `swarm_flags` (a controller restart keeps them). Events on t
 `paused {types, agents, reason, by, auto, interrupt}` and `resumed {types, agents, by, auto}`
 (only the names a call actually changed). `GET /swarms/{s}` has
 `status.held: {types: {T: {since, reason, by, auto}}, agents: {...}}` (null when nothing is
-held) and `flock status` prints a `HELD` line per held type or agent. An agent held through its
+held) and `legion status` prints a `HELD` line per held type or agent. An agent held through its
 type is resumed with its type, not with `--agent`.
 
 API: `POST /swarms/{s}/pause {types?, agents?, interrupt?, reason?, by?}` and
@@ -221,7 +221,7 @@ queued, is taken back from the wake count, and from the round count when it coun
 
 Why: in a thread of five agents each reply woke the four others, and each wake was a full round,
 so `max_rounds` went on board chatter in minutes. With the defaults one agent gets at most one
-wake prompt per 30 s and 10 per run, and they leave the round budget alone. `flock launch` warns when an `on:` source can never
+wake prompt per 30 s and 10 per run, and they leave the round budget alone. `legion launch` warns when an `on:` source can never
 fire: a `message_board.*` source in a run without a board resource, or any other source (only
 `message_board.*` is fed).
 
@@ -244,7 +244,7 @@ key never reaches workers (`worker_type_spec`).
 
 ### Events
 
-Swarm stream (`GET /swarms/{s}/events`, `flock status <swarm> --events`): `loop_started {type, mode,
+Swarm stream (`GET /swarms/{s}/events`, `legion status <swarm> --events`): `loop_started {type, mode,
 every, restart}`, `loop_tick {type, prompted, rounds}` (only on ticks that sent
 something), `loop_updated {type}`, `loop_stopped {type, reason, rounds_total, dropped}`,
 `final_round {type, agent}`, `final_done {type, sent, done, skipped}`,
@@ -266,7 +266,7 @@ prompt outside the round count has `counted: false` in its `loop_prompt`. The co
   template; `LoopMeta {kind, type, round, started_at, wall_s, cap_usd, why, counted, wake}` is what
   the worker renders it with. `round: null` lets the worker number it.
 - `LoopStartCommand {agent, text, meta, max_rounds, deadline, run}` and `LoopStopCommand {agent,
-  reason}`: worker-side `turn_end`. `run` names one run of the loop: a new run (after `flock
+  reason}`: worker-side `turn_end`. `run` names one run of the loop: a new run (after `legion
   loop --start`) resets the worker's round counter, a repeat of the same run keeps it. Deploy the worker wheel with the controller.
 - `GET /swarms/{s}/loop`: `LoopStatus` per type with per-agent detail (`rounds_total` counts rounds, `wakes_total` wake
 prompts, so wakes and cadence rounds are apart; the same fields are in `run.json` `loops`); `POST /swarms/{s}/loop
@@ -276,10 +276,10 @@ prompts, so wakes and cadence rounds are apart; the same fields are in `run.json
 ### CLI
 
 ```
-flock stop demo --final --type ds                    # stop now, then the final round
+legion stop demo --final --type ds                    # stop now, then the final round
 # no final round, or starting a stopped loop again: POST /swarms/demo/loop (no CLI command)
-flock status demo                                    # adds: loop ds: running (controller, every 120s), rounds 3-5, 0/3 agents done
-flock status demo --events                           # the swarm stream
+legion status demo                                    # adds: loop ds: running (controller, every 120s), rounds 3-5, 0/3 agents done
+legion status demo --events                           # the swarm stream
 ```
 
 `--start` begins a new run of the loop: the clock (`until`, `{elapsed}`) and the round counters
@@ -336,7 +336,7 @@ Final-round spend is exempt from `agent_usd` and bounded only by the reserve and
 
 ## Not supported yet
 
-`on: world.*` is accepted by the model and refused by `flock launch` and `PUT /swarms` with
+`on: world.*` is accepted by the model and refused by `legion launch` and `PUT /swarms` with
 "needs a world (not in this version)". Not done: a `run_stopping` hook to a world, per-call
 booking to tighten the budget overshoot, a `loop.start: manual` switch, and a swarm-level
 `limits.final_reserve_usd` (the reserve is `final.reserve_usd` per type, summed for the swarm

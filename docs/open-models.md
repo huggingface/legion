@@ -1,4 +1,4 @@
-# Open models in flock
+# Open models in legion
 
 A spec names its model with `model`, a Hub id, and says where it runs with one `inference` block:
 
@@ -6,7 +6,7 @@ A spec names its model with `model`, a Hub id, and says where it runs with one `
   (Inference Providers). This is the default when the spec has no `inference` block.
 - **`urls`**: OpenAI-compatible servers you run, on a Slurm cluster, a cloud box or your own
   machine.
-- **`hf_jobs`**: vLLM servers flock starts on [HF Jobs](https://huggingface.co/docs/huggingface_hub/guides/jobs)
+- **`hf_jobs`**: vLLM servers legion starts on [HF Jobs](https://huggingface.co/docs/huggingface_hub/guides/jobs)
   for the run, and cancels when it ends.
 
 The block has the same shape in a Harbor spec (the run's, or a role's own) and in a swarm spec
@@ -30,7 +30,7 @@ inference:
   urls: [http://10.53.196.166:8000/v1, http://10.53.196.167:8000/v1]
   api_key_env: VLLM_API_KEY        # optional: no key by default
 
-# Servers flock starts on HF Jobs
+# Servers legion starts on HF Jobs
 inference:
   hf_jobs:
     flavor: a100-large             # a GPU flavor (`hf jobs hardware`)
@@ -50,14 +50,14 @@ inference:
 
 | Field | Meaning |
 |---|---|
-| `hf_router.provider` | A router provider (`deepinfra`, `cerebras`, ...), or a selection policy: `fastest`, `cheapest`, `preferred`. Unset: the router's default (`fastest`). flock sends `<model>:<provider>`. |
+| `hf_router.provider` | A router provider (`deepinfra`, `cerebras`, ...), or a selection policy: `fastest`, `cheapest`, `preferred`. Unset: the router's default (`fastest`). legion sends `<model>:<provider>`. |
 | `urls` | One or more base URLs ending in `/v1`, all serving `model`. A comma-separated string works too (`urls: ${VLLM_URLS}`). |
 | `hf_jobs.flavor` | Required. The GPU flavor of each server's job, e.g. `l4x1`, `a100-large`, `h200`. |
-| `hf_jobs.tool_call_parser` | Required. vLLM's `--tool-call-parser` (`qwen3_coder` for Qwen3.5 and Qwen3.8); flock always adds `--enable-auto-tool-choice`. |
+| `hf_jobs.tool_call_parser` | Required. vLLM's `--tool-call-parser` (`qwen3_coder` for Qwen3.5 and Qwen3.8); legion always adds `--enable-auto-tool-choice`. |
 | `hf_jobs.reasoning_parser` | vLLM's `--reasoning-parser` (`qwen3`). |
-| `hf_jobs.vllm_args` | Every other `vllm serve` flag, as `KEY=VALUE` strings ([below](#servers-flock-starts-hf_jobs)). |
+| `hf_jobs.vllm_args` | Every other `vllm serve` flag, as `KEY=VALUE` strings ([below](#servers-legion-starts-hf_jobs)). |
 | `hf_jobs.timeout` | The job's lifetime, the backstop if the run never cancels it. Default: the run's `limits.run_timeout_seconds` plus `startup_timeout` plus 15 minutes. |
-| `hf_jobs.startup_timeout` | How long flock waits for every replica to answer (default `20m`). |
+| `hf_jobs.startup_timeout` | How long legion waits for every replica to answer (default `20m`). |
 | `hf_jobs.replicas` | Servers of the model (default 1); each agent calls one, as with several `urls`. |
 | `hf_jobs.image` | The vLLM image (default `vllm/vllm-openai:v0.33.0`). |
 | `api_key_env` | The env var that holds the key (never the key itself). Default: `HF_TOKEN` for `hf_router` and `hf_jobs`, none for `urls`. |
@@ -72,12 +72,12 @@ run's and a role's `[input, output, cached]` in USD per 1M tokens (see [Cost](#c
 
 The top-level `namespace` selects the billing account for all HF Jobs (including vLLM),
 hf-sandbox and router calls. With it unset, Jobs use `HF_TOKEN`'s account and the router bills
-the inference key's owner; flock sends no `X-HF-Bill-To` header. With an org set, the inference
+the inference key's owner; legion sends no `X-HF-Bill-To` header. With an org set, the inference
 key needs Inference Providers permission on that org (`inference.serverless.write`); for
 `hf_jobs` it also needs read access to the org to pass the jobs proxy. `HF_TOKEN` needs Jobs
 and bucket write access there. See [billing and storage](billing.md) for token details.
 
-`flock launch` compiles a Harbor spec's block into the swarm spec as it is. Each type's
+`legion launch` compiles a Harbor spec's block into the swarm spec as it is. Each type's
 `resolved_model` then pins the block it runs on, its price and, at apply, the context window
 (below). Harbor's Pi speaks OpenAI **Chat Completions** (`POST {url}/chat/completions`).
 
@@ -112,7 +112,7 @@ model family; `qwen3_coder` for Qwen3.5 and Qwen3.8).
   written.
   - A private cluster address (`10.x`) needs the swarm on the same cluster (`compute: slurm`,
     docs/slurm.md).
-  - `localhost` is the machine that runs flock. With `environment.backend: podman` flock gives
+  - `localhost` is the machine that runs legion. With `environment.backend: podman` legion gives
     the agents `host.containers.internal` instead, the name podman puts in every container's
     `/etc/hosts` for its host, and allowlists it. The server must listen on the host's address,
     not only on `127.0.0.1`: vLLM does by default, Ollama with `OLLAMA_HOST=0.0.0.0`.
@@ -121,10 +121,10 @@ model family; `qwen3_coder` for Qwen3.5 and Qwen3.8).
     Under `compute: slurm`, `localhost` would be each worker's own node and is refused too.
 - **Keys.** A server without a key needs no `api_key_env`; Pi then gets a placeholder key.
 - **A server that moves.** When a server restarts on another node, update `urls` and run
-  `flock update`. A change to a running type's block (anything but `max_working`) restarts the
+  `legion update`. A change to a running type's block (anything but `max_working`) restarts the
   type's workers: they drain (in-flight turns finish), and their agents resume on new workers,
   whose Trials call and allowlist the new servers and get the new key.
-- **Cost.** $0 unless the spec sets `pricing`; the real cost is the GPUs' time, which flock does
+- **Cost.** $0 unless the spec sets `pricing`; the real cost is the GPUs' time, which legion does
   not count.
 
 ### Your own machine
@@ -138,16 +138,16 @@ vllm serve Qwen/Qwen3.5-0.8B --port 8000 \
   --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3
 # or Ollama (MODEL is its own name):
 #   OLLAMA_HOST=0.0.0.0 ollama serve & ollama pull qwen3.5:2b
-#   MODEL=qwen3.5:2b SERVER_URL=http://localhost:11434/v1 uv run flock launch ...
-uv run flock launch experiments/mini-swarm/urls.yaml
-uv run flock status mini-swarm-urls
+#   MODEL=qwen3.5:2b SERVER_URL=http://localhost:11434/v1 uv run legion launch ...
+uv run legion launch experiments/mini-swarm/urls.yaml
+uv run legion status mini-swarm-urls
 ```
 
 ### On the HF cluster
 
 The server runs on a GPU node, in Pyxis; the agents run in rootless podman on a CPU node and
 reach it by the GPU node's address. The GPU nodes' podman (3.4, with CNI plugins that refuse the
-networks it writes) cannot start the containers on the network flock gives each Trial; the CPU
+networks it writes) cannot start the containers on the network legion gives each Trial; the CPU
 nodes' (4.9) can. `scripts/slurm/podman-node.sh` sets up podman in a shell on a node as
 `worker.sbatch` does for Slurm workers (storage under `/tmp`, no user systemd).
 
@@ -156,8 +156,8 @@ sbatch -p hopper-b200 serve-vllm.sbatch Qwen/Qwen3.5-0.8B
 # its log ends with: serving Qwen/Qwen3.5-0.8B at http://<node address>:8000/v1
 srun -p hopper-cpu -n 1 -c 8 --mem=16G --pty bash
 source .venv/bin/activate && source scripts/slurm/podman-node.sh
-SERVER_URL=http://<node address>:8000/v1 flock launch experiments/mini-swarm/urls.yaml
-flock status mini-swarm-urls
+SERVER_URL=http://<node address>:8000/v1 legion launch experiments/mini-swarm/urls.yaml
+legion status mini-swarm-urls
 ```
 
 `serve-vllm.sbatch`, one vLLM server on one GPU (the Slurm recipe below uses it too):
@@ -205,14 +205,14 @@ environment:
   backend: podman
 ```
 
-`flock init` checks that the servers answer a tool call (its `providers` check), and
-`flock launch` checks the model and pins its context window. A server that restarts on another
-node gets a new address: update `VLLM_URLS` in run.env and run `flock update` (the type's
+`legion init` checks that the servers answer a tool call (its `providers` check), and
+`legion launch` checks the model and pins its context window. A server that restarts on another
+node gets a new address: update `VLLM_URLS` in run.env and run `legion update` (the type's
 workers restart on the new URLs).
 
-## Servers flock starts (`hf_jobs`)
+## Servers legion starts (`hf_jobs`)
 
-With `hf_jobs`, nobody starts a server by hand or copies a URL. `flock launch`:
+With `hf_jobs`, nobody starts a server by hand or copies a URL. `legion launch`:
 
 1. asks the controller to start the servers (`POST /swarms/{swarm}/servers`): one group per
    model, `replicas` jobs each, or the running ones it finds again after a restart;
@@ -223,8 +223,8 @@ With `hf_jobs`, nobody starts a server by hand or copies a URL. `flock launch`:
    (`types.<t>.resolved_model.inference.urls`).
 
 From there on everything is the `urls` path: the model check, the context window read from the
-servers, preflight and Pi's model config. The run's end cancels the jobs: `flock stop --delete`,
-or a local run that ends by itself. `flock update` of a changed `hf_jobs` block or model starts
+servers, preflight and Pi's model config. The run's end cancels the jobs: `legion stop --delete`,
+or a local run that ends by itself. `legion update` of a changed `hf_jobs` block or model starts
 its new servers first. The apply then pins them, and, as for any block change, the type's
 workers restart on them. With `hf_jobs`, `max_working` is also the servers' `max_num_seqs`, so
 changing it starts new servers too.
@@ -254,7 +254,7 @@ servers Qwen/Qwen3.8-27B (hf_jobs a100-large, namespace you, types agent, contex
   its own jobs: with the run's `hf_jobs` settings, or with its own if it sets its own
   `inference` block (another flavor, say). Roles with the same model and settings share them,
   with the most `replicas` (and the longest `startup_timeout`) any of them asks for.
-  `flock status`, `GET /swarms/{swarm}/servers` and the status page list each job by model,
+  `legion status`, `GET /swarms/{swarm}/servers` and the status page list each job by model,
   with its URL, stage, state, flavor and uptime.
 - **The job.** `vllm serve <model>` on `hf_jobs.image`, with port 8000 exposed through the jobs
   proxy (`expose=[8000]`, as `hf jobs run --expose 8000`) at `https://<job id>--8000.hf.jobs`,
@@ -263,26 +263,26 @@ servers Qwen/Qwen3.8-27B (hf_jobs a100-large, namespace you, types agent, contex
   controller finds them by these instead of starting new ones (it retries until the Hub
   answers). The weights download inside the job, which gets no Hub token, so the model must be
   public.
-- **The vLLM arguments** follow trl-internal's evals config. flock sets `--host`, `--port`,
+- **The vLLM arguments** follow trl-internal's evals config. legion sets `--host`, `--port`,
   `--served-model-name` (the Hub id) and the tool-calling flags. `vllm_args` holds every other
   flag as a `KEY=VALUE` string: `max_model_len=131072` becomes `--max-model-len 131072`, and
   `true` and `false` become `--flag` and `--no-flag`. Strings keep YAML from guessing types. A
-  key flock owns is refused: `host`, `port`, `served_model_name`, `model`, the tool-calling and
+  key legion owns is refused: `host`, `port`, `served_model_name`, `model`, the tool-calling and
   reasoning flags (named fields), and `api_key` ([below](#keys-and-the-jobs-proxy)). So is a key
   given twice. `max_num_seqs` (the block's `max_working`) and `tensor_parallel_size` (the
   flavor's GPUs, divided by any `data_parallel_size` or `pipeline_parallel_size`) are filled in
   unless `vllm_args` sets them.
-- **Failures** stop the launch with the reason and the job's last log lines, show in `flock
+- **Failures** stop the launch with the reason and the job's last log lines, show in `legion
   status`, and cancel the group's jobs: an image that does not pull, vLLM running out of memory
   (a `max_model_len` the GPU cannot hold), or no answer within `startup_timeout` (also when
   the Hub does not answer). A start refused part-way (a quota) cancels the jobs it started. An
   apply drops failed groups the spec no longer uses from the status. A job that ends
-  during the run marks its server `failed` in `flock status` (the verdict is failing); flock does
+  during the run marks its server `failed` in `legion status` (the verdict is failing); legion does
   not replace it.
-- **Not cancelled:** `flock stop --release` keeps the servers (the run is held, not over), and a
-  controller killed outright leaves them to their `timeout`. A `flock launch` of the same spec
+- **Not cancelled:** `legion stop --release` keeps the servers (the run is held, not over), and a
+  controller killed outright leaves them to their `timeout`. A `legion launch` of the same spec
   afterwards reuses them.
-- **Cost.** The flavor's hourly price while the job runs (`hf jobs hardware`). flock prices the
+- **Cost.** The flavor's hourly price while the job runs (`hf jobs hardware`). legion prices the
   tokens as for `urls` ($0 unless the spec sets `pricing`) and does not count GPU time.
 
 ### Keys and the jobs proxy
@@ -300,26 +300,26 @@ What a request to an exposed job gets, as tested with an echo server and with vL
 | `--expose 8000` | 401 | 401 | 200 | no `Authorization`; others (`X-Api-Key`) pass |
 | `--expose-public 8000` | 200 | 200 | 200 | no `Authorization` |
 
-- **flock uses `--expose`.** The proxy checks the HF token; vLLM runs without a key behind it.
+- **legion uses `--expose`.** The proxy checks the HF token; vLLM runs without a key behind it.
 - **`--expose-public` with vLLM's `--api-key` does not work.** The proxy drops `Authorization` in
   both modes, and vLLM's key check reads only `Authorization: Bearer`, so every request gets
   vLLM's 401. A key in another header gets through the proxy, but vLLM would need a shim in the
-  job to check it. flock refuses `api_key` in `vllm_args`.
+  job to check it. legion refuses `api_key` in `vllm_args`.
 - **The agents' token.** The Hub docs ask for "an HF token with read access to the job's
   namespace". Tested: a fine-grained token of the namespace's user with `repo.content.read`,
   `inference.serverless.write` and `job.write` passes; so does the user's write token. Not
   tested: a token without `job.write` (whether repository read alone is enough), or an org's
   namespace.
 
-### `flock serve`
+### `legion serve`
 
-`flock serve <spec>` starts a spec's `hf_jobs` servers on their own, with the code a run uses,
+`legion serve <spec>` starts a spec's `hf_jobs` servers on their own, with the code a run uses,
 waits until they answer, and prints their URLs, the job ids and how to stop them. Several runs
 can then share one server, without each paying for its startup, by listing its URL:
 
 ```sh
 export BOARD_SPACE="mini-swarm-$(uv run python -c 'import uuid; print(uuid.uuid4().hex[:12])')"
-uv run flock serve experiments/mini-swarm/hf-jobs.yaml --timeout 4h
+uv run legion serve experiments/mini-swarm/hf-jobs.yaml --timeout 4h
 # ready:
 #   Qwen/Qwen3.8-27B replica 0: https://<job id>--8000.hf.jobs/v1 (job <job id>, a100-large, namespace <your-username>)
 # A run uses them with, in its spec:
@@ -327,7 +327,7 @@ uv run flock serve experiments/mini-swarm/hf-jobs.yaml --timeout 4h
 #   inference:
 #     urls: [https://<job id>--8000.hf.jobs/v1]
 #     api_key_env: HF_INFERENCE_TOKEN  # an HF token that can read the job's personal namespace
-uv run flock serve experiments/mini-swarm/hf-jobs.yaml --stop   # or: hf jobs cancel <job id>
+uv run legion serve experiments/mini-swarm/hf-jobs.yaml --stop   # or: hf jobs cancel <job id>
 ```
 
 This swarm config requires `BOARD_SPACE`; `serve` itself starts no board. If you later
@@ -336,9 +336,9 @@ under `HF_TOKEN`'s personal account; qualified IDs explicitly select another per
 
 It needs no controller: `HF_TOKEN` (or the saved login) starts and probes the jobs. They are
 labelled `serve` instead of `swarm`, so no run's controller adopts or cancels them; only
-`--stop` (every job `flock serve` labelled for the spec's name) or their `timeout`
-(`--timeout`, default the spec's) ends them. With `--run` (or `FLOCK_RUN_DIR`) it reads the
-run's cluster.env and run.env, as `flock launch` does. flock does not share
+`--stop` (every job `legion serve` labelled for the spec's name) or their `timeout`
+(`--timeout`, default the spec's) ends them. With `--run` (or `LEGION_RUN_DIR`) it reads the
+run's cluster.env and run.env, as `legion launch` does. legion does not share
 servers across runs by itself.
 
 ## Model check and context window
@@ -355,7 +355,7 @@ providers a request may reach (the named one, or under a policy every one with t
 Each counts with its own window (vLLM's and SGLang's `max_model_len`, the router's
 `context_length`), or `inference.context_window` when it reports none; one without either
 refuses the apply, naming it. Pi's model config gets it as `contextWindow`, so Pi
-compacts before the server refuses a request, and `flock status` shows it per model. A re-apply
+compacts before the server refuses a request, and `legion status` shows it per model. A re-apply
 with the same block and model keeps the pinned value without asking the servers again.
 
 ## Keys
@@ -371,9 +371,9 @@ name:
 
 How the key travels: `Authorization: Bearer <key>`. Controller secrets to set: every
 `api_key_env` your blocks name (or `HF_TOKEN` for the router and `hf_jobs` by default), plus the
-`secrets` your types list, plus `FLOCK_TOKEN`; with `hf_jobs`, also `HF_TOKEN`, which starts the
+`secrets` your types list, plus `LEGION_TOKEN`; with `hf_jobs`, also `HF_TOKEN`, which starts the
 jobs. A Trial's environment is the task's plus the inference key, the
-tools and the resources; `FLOCK_TOKEN` and the workers' `HF_TOKEN` stay in the worker.
+tools and the resources; `LEGION_TOKEN` and the workers' `HF_TOKEN` stay in the worker.
 
 ## Reasoning
 
@@ -391,12 +391,12 @@ of new tokens only.
 
 Cost is only as good as the usage the server reports. A turn that completes with zero tokens is
 flagged: the worker logs a warning (once per agent), the `turn_ended` event carries
-`usage_missing: true`, and `flock status` and the status page count such agents per inference
+`usage_missing: true`, and `legion status` and the status page count such agents per inference
 block (`zero_usage_agents`) with a "cost unknown" warning.
 
 ## Preflight
 
-`flock update --check` on a running swarm (or `POST /swarms/{swarm}/preflight` with the spec as
+`legion update --check` on a running swarm (or `POST /swarms/{swarm}/preflight` with the spec as
 the body) makes the controller probe each distinct model and inference block the way a harness
 starts. First the model check above, then two non-streamed Chat Completions turns, as Pi calls
 it (a tool call written as text is no tool call, since Pi takes only `tool_calls`): turn one asks
@@ -405,13 +405,13 @@ result and must complete. Per model it reports `ok`, `tool_call_seen`, `follow_u
 `usage_reported`, `latency_ms`, `error` and `warning`. `ok` needs both turns: a server that
 answers turn one and fails the follow-up (some router providers do) fails preflight, with a hint
 at the likely cause (another `hf_router.provider`, or the server's tool-calling flags). A server
-that reports zero token usage passes with a warning, since flock then cannot count cost. `flock
+that reports zero token usage passes with a warning, since legion then cannot count cost. `legion
 launch` runs preflight and refuses to apply on a failure; `--skip-preflight` bypasses it.
 
 Preflight never passes silently. A model that was not probed (its key is not in the
 controller's environment, or `--skip-preflight`) is reported as `unverified` with a warning
 line. `launch` blocks on definite problems (a failed probe) and proceeds on missing evidence
-(unverified), unless `--strict` is passed, which counts unverified as failure (`flock update
+(unverified), unless `--strict` is passed, which counts unverified as failure (`legion update
 --check --strict` exits 1 the same way).
 
 ## `max_working`
@@ -440,15 +440,15 @@ enforces it, on by default:
   not requests. Set the server's own concurrency limits (vLLM `--max-num-seqs`, a gateway
   rate limit) for a hard bound.
 
-`FLOCK_MAX_WORKING_ENFORCE=0` on the controller is an escape hatch: report only, no queueing.
+`LEGION_MAX_WORKING_ENFORCE=0` on the controller is an escape hatch: report only, no queueing.
 
 ## Status
 
-`flock status`, `GET /swarms/{swarm}` (`status.providers`) and the status page show each
+`legion status`, `GET /swarms/{swarm}` (`status.providers`) and the status page show each
 inference block by name (`inference`, or `types.<t>.inference` for a type's own): where it
 points, each model's context window, and `working / max_working`; with `hf_jobs`, each server
 job by model (`status.servers`). `GET /agents/{name}` and
-`flock status --agent` show an agent's block (`provider`) and the server it calls
+`legion status --agent` show an agent's block (`provider`) and the server it calls
 (`endpoint`); `session_started` events carry `provider` and `model_id`.
 
 ## Not verified yet

@@ -1,4 +1,4 @@
-"""The `flock` CLI retries 429 / 5xx with backoff honouring Retry-After (bounded), so 1,000
+"""The `legion` CLI retries 429 / 5xx with backoff honouring Retry-After (bounded), so 1,000
 agents calling it through the Space edge do not fail on throttling."""
 
 from __future__ import annotations
@@ -7,8 +7,8 @@ import httpx
 import pytest
 from typer.testing import CliRunner
 
-from flock import cli
-from flock import client as flock_client
+from legion import cli
+from legion import client as legion_client
 
 LEADER = "leader-0000"
 runner = CliRunner()
@@ -29,14 +29,14 @@ def _edge(replies):
 
 
 def _edge_client(monkeypatch, handler):
-    monkeypatch.setattr("flock.client.connect", lambda *_: httpx.Client(
+    monkeypatch.setattr("legion.client.connect", lambda *_: httpx.Client(
         base_url="http://c", transport=httpx.MockTransport(handler)))
 
 
 @pytest.fixture
 def sleeps(monkeypatch):
     out: list[float] = []
-    monkeypatch.setattr("flock.client._sleep", out.append)
+    monkeypatch.setattr("legion.client._sleep", out.append)
     return out
 
 
@@ -48,7 +48,7 @@ def test_cli_retries_429_then_succeeds(monkeypatch, sleeps):
     assert r.output.strip() == "leader-0000-analyst-0001"
     assert seen == ["POST"] * 4
     assert sleeps[0] >= 3 and len(sleeps) == 3
-    assert all(0 <= s <= flock_client.RETRY_CAP for s in sleeps)
+    assert all(0 <= s <= legion_client.RETRY_CAP for s in sleeps)
 
 
 def test_cli_gives_up_after_five_attempts(monkeypatch, sleeps):
@@ -56,7 +56,7 @@ def test_cli_gives_up_after_five_attempts(monkeypatch, sleeps):
     _edge_client(monkeypatch, handler)
     r = runner.invoke(cli.app, ["status", "--agent", "leader-0000"])
     assert r.exit_code == 1 and "error 429" in r.output
-    assert len(seen) == flock_client.RETRY_ATTEMPTS == 5 and len(sleeps) == 4
+    assert len(seen) == legion_client.RETRY_ATTEMPTS == 5 and len(sleeps) == 4
 
 
 def test_cli_does_not_retry_a_post_500(monkeypatch, sleeps):

@@ -6,8 +6,8 @@ from harbor.models.registry import DatasetMetadata
 from harbor.models.task.id import GitTaskId
 from pydantic import ValidationError
 
-from flock.harbor.config import BUILTIN, Config, TaskSettings
-from flock.harbor.sources import resolve_task
+from legion.harbor.config import BUILTIN, Config, TaskSettings
+from legion.harbor.sources import resolve_task
 
 EXAMPLES = Path(__file__).parent / "examples"
 
@@ -41,7 +41,7 @@ def test_config_defaults_and_hf_sandbox_board(tmp_path, monkeypatch):
     example = (EXAMPLES / "mini-swarm.yaml").resolve()
     monkeypatch.chdir(tmp_path)
     spec = Config.load(example)
-    # Defaults: Flock's own resources and tools, the board's tools, ./results.
+    # Defaults: Legion's own resources and tools, the board's tools, ./results.
     assert spec.resources_dir == BUILTIN / "resources"
     assert spec.tools_dir == BUILTIN / "tools"
     assert spec.output_dir == tmp_path / "results"
@@ -65,7 +65,7 @@ def test_config_defaults_and_hf_sandbox_board(tmp_path, monkeypatch):
 @pytest.mark.parametrize("count", [0, 2])
 @pytest.mark.parametrize("dataset", ["terminal-bench-2.1@2.1.0", None])
 async def test_selector_must_match_once(monkeypatch, count, dataset):
-    from flock.harbor import sources
+    from legion.harbor import sources
 
     task = Config.load(EXAMPLES / "pi-hf.yaml").task
     task.dataset = dataset
@@ -94,7 +94,7 @@ async def test_selector_must_match_once(monkeypatch, count, dataset):
 async def test_a_list_selector_gives_each_agent_its_own_task_by_position(monkeypatch):
     """A string glob matching one task is every agent's; a list gives names[k] the task its
     k-th entry matches, in the list's order: one entry per agent, each matching one task."""
-    from flock.harbor import sources
+    from legion.harbor import sources
 
     task = Config.load(EXAMPLES / "pi-hf.yaml").task
 
@@ -126,7 +126,7 @@ async def test_a_list_selector_gives_each_agent_its_own_task_by_position(monkeyp
 
 
 async def test_preserves_registry_and_separate_task_commit(monkeypatch):
-    from flock.harbor import sources
+    from legion.harbor import sources
 
     task = Config.load(EXAMPLES / "pi-hf.yaml").task
 
@@ -151,7 +151,7 @@ async def test_preserves_registry_and_separate_task_commit(monkeypatch):
 
 
 async def test_repository_discovery_preserves_identity_and_pinned_task(monkeypatch):
-    from flock.harbor import sources
+    from legion.harbor import sources
 
     task = Config.load(EXAMPLES / "pi-hf.yaml").task.model_copy(update={"dataset": None})
     identity = f"huggingface.co/harborframework/terminal-bench-2.1/tree/{task.revision}/tasks"

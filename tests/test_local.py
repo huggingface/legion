@@ -1,5 +1,5 @@
 """`compute: local` (docs/local.md): the spec field, the LocalJobsClient process backend, the
-controller's compute check, `.flock/current` discovery and the local run pieces. The end-to-end
+controller's compute check, `.legion/current` discovery and the local run pieces. The end-to-end
 runs are in test_local_run_e2e.py."""
 
 from __future__ import annotations
@@ -18,16 +18,16 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
-from flock import cli
-from flock.client import connect
-from flock.controller import local, localrun
-from flock.controller.api import create_app
-from flock.controller.local import LocalJobsClient
-from flock.controller.reconcile import Settings, reconcile
-from flock.controller.store import Store
-from flock.current import clear_current, read_current, write_current
-from flock.models import ComputeSpec, SwarmSpec
-from flock.worker.main import Worker, WorkerConfig
+from legion import cli
+from legion.client import connect
+from legion.controller import local, localrun
+from legion.controller.api import create_app
+from legion.controller.local import LocalJobsClient
+from legion.controller.reconcile import Settings, reconcile
+from legion.controller.store import Store
+from legion.current import clear_current, read_current, write_current
+from legion.models import ComputeSpec, SwarmSpec
+from legion.worker.main import Worker, WorkerConfig
 
 from .conftest import HB, TOKEN, make_spec
 
@@ -113,21 +113,21 @@ async def test_controller_accepts_only_its_compute(tmp_path):
 
     jobs_app = create_app(Store(tmp_path / "b"), TOKEN, compute="hf-jobs")
     r = await _put(jobs_app, local_spec())
-    assert r.status_code == 400 and "flock launch" in r.text
+    assert r.status_code == 400 and "legion launch" in r.text
     assert (await _put(jobs_app, make_spec())).status_code == 200
 
-    any_app = create_app(Store(tmp_path / "c"), TOKEN)  # tests and FLOCK_FAKE_JOBS: unchecked
+    any_app = create_app(Store(tmp_path / "c"), TOKEN)  # tests and LEGION_FAKE_JOBS: unchecked
     assert (await _put(any_app, local_spec())).status_code == 200
 
 
-def test_build_with_flock_compute_local(tmp_path):
-    from flock.controller.main import build
+def test_build_with_legion_compute_local(tmp_path):
+    from legion.controller.main import build
 
-    b = build({"FLOCK_TOKEN": "t", "FLOCK_COMPUTE": "local", "FLOCK_DATA": str(tmp_path)})
+    b = build({"LEGION_TOKEN": "t", "LEGION_COMPUTE": "local", "LEGION_DATA": str(tmp_path)})
     assert isinstance(b.jobs, LocalJobsClient) and b.jobs.root == tmp_path.resolve()
-    with pytest.raises(SystemExit, match="FLOCK_MODE=job"):
-        build({"FLOCK_TOKEN": "t", "FLOCK_COMPUTE": "local", "FLOCK_MODE": "job",
-               "FLOCK_NETWORK_GROUP": "g", "FLOCK_DATA": str(tmp_path)})
+    with pytest.raises(SystemExit, match="LEGION_MODE=job"):
+        build({"LEGION_TOKEN": "t", "LEGION_COMPUTE": "local", "LEGION_MODE": "job",
+               "LEGION_NETWORK_GROUP": "g", "LEGION_DATA": str(tmp_path)})
 
 
 # --------------------------------------------------------------------------- LocalJobsClient
@@ -151,22 +151,22 @@ def _wait(jobs: LocalJobsClient, job_id: str, stage: str, timeout: float = 10) -
 
 
 def test_local_jobs_env_contract_and_stages(tmp_path):
-    base = {"PATH": os.environ["PATH"], "FLOCK_URL": "http://elsewhere", "HOME": "/h",
-            "FLOCK_AGENT_TOKEN": "agent", "FLOCK_CURRENT": "/x", "FLOCK_PROMPTS_DIR": "/p"}
+    base = {"PATH": os.environ["PATH"], "LEGION_URL": "http://elsewhere", "HOME": "/h",
+            "LEGION_AGENT_TOKEN": "agent", "LEGION_CURRENT": "/x", "LEGION_PROMPTS_DIR": "/p"}
     jobs = LocalJobsClient(root=tmp_path, command=_script(DUMP_ENV), base_env=base)
-    env = {"FLOCK_URL": "http://127.0.0.1:1", "WORKER_ID": "s-w-w0000", "HEARTBEAT_INTERVAL": "1",
+    env = {"LEGION_URL": "http://127.0.0.1:1", "WORKER_ID": "s-w-w0000", "HEARTBEAT_INTERVAL": "1",
            "BUCKET_ID": "me/b"}
-    jid = jobs.launch("s-w-w0000", local_spec().types["w"], env, {"FLOCK_TOKEN": "tok",
+    jid = jobs.launch("s-w-w0000", local_spec().types["w"], env, {"LEGION_TOKEN": "tok",
                       "FAKE_KEY": "k"}, {"swarm": "s"}, 60, namespace="")
     _wait(jobs, jid, "COMPLETED")
     seen = json.loads((tmp_path / "s-w-w0000.env.json").read_text())
-    assert seen["FLOCK_URL"] == "http://127.0.0.1:1"  # the controller's, not the caller's
-    assert seen["FLOCK_TOKEN"] == "tok" and seen["FAKE_KEY"] == "k"  # secrets arrive as env
+    assert seen["LEGION_URL"] == "http://127.0.0.1:1"  # the controller's, not the caller's
+    assert seen["LEGION_TOKEN"] == "tok" and seen["FAKE_KEY"] == "k"  # secrets arrive as env
     assert seen["WORK_ROOT"] == str(tmp_path.resolve() / "agents")
-    assert seen["FLOCK_LOCAL_PARENT_PID"] == str(os.getpid())
+    assert seen["LEGION_LOCAL_PARENT_PID"] == str(os.getpid())
     assert seen["HEARTBEAT_INTERVAL"] == "1"  # the type's env wins over the local default
-    assert seen["HOME"] == "/h" and seen["FLOCK_PROMPTS_DIR"] == "/p"  # documented override
-    assert "FLOCK_AGENT_TOKEN" not in seen and "FLOCK_CURRENT" not in seen  # the caller's auth
+    assert seen["HOME"] == "/h" and seen["LEGION_PROMPTS_DIR"] == "/p"  # documented override
+    assert "LEGION_AGENT_TOKEN" not in seen and "LEGION_CURRENT" not in seen  # the caller's auth
     assert seen["BUCKET_ID"] == ""  # no bucket sync locally, whatever the spec says
     assert "hello from s-w-w0000" in "\n".join(jobs.logs_tail(jid, namespace=""))
     assert [j.job_id for j in jobs.list({"swarm": "s"}, namespace="")] == [jid]
@@ -225,10 +225,10 @@ def test_killed_local_worker_is_relaunched_within_seconds(tmp_path):
 
 
 def test_worker_reads_parent_pid_and_exits_when_it_is_gone(tmp_path):
-    env = {"FLOCK_URL": "http://x", "FLOCK_TOKEN": "t", "WORKER_ID": "w", "SWARM": "s",
+    env = {"LEGION_URL": "http://x", "LEGION_TOKEN": "t", "WORKER_ID": "w", "SWARM": "s",
            "TYPE": "a", "DEADLINE": "2030-01-01T00:00:00+00:00"}
     assert WorkerConfig.from_env(env).parent_pid is None
-    cfg = WorkerConfig.from_env({**env, "FLOCK_LOCAL_PARENT_PID": "1234567"})
+    cfg = WorkerConfig.from_env({**env, "LEGION_LOCAL_PARENT_PID": "1234567"})
     assert cfg.parent_pid == 1234567
 
     w = Worker(cfg, client=None)  # never called: abandon only stops agents
@@ -252,25 +252,25 @@ def test_current_file_roundtrip_and_dead_pid(tmp_path):
     assert read_current(tmp_path / "missing") is None
 
 
-def test_cli_finds_a_live_run_without_flock_url(tmp_path, monkeypatch):
-    write_current(tmp_path / ".flock", {"url": "http://127.0.0.1:4321", "token": "run-tok",
+def test_cli_finds_a_live_run_without_legion_url(tmp_path, monkeypatch):
+    write_current(tmp_path / ".legion", {"url": "http://127.0.0.1:4321", "token": "run-tok",
                                          "pid": os.getpid()})
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("FLOCK_URL", raising=False)
-    monkeypatch.delenv("FLOCK_TOKEN", raising=False)
-    monkeypatch.delenv("FLOCK_AGENT_TOKEN", raising=False)
+    monkeypatch.delenv("LEGION_URL", raising=False)
+    monkeypatch.delenv("LEGION_TOKEN", raising=False)
+    monkeypatch.delenv("LEGION_AGENT_TOKEN", raising=False)
     with connect() as c:
         assert str(c.base_url).rstrip("/") == "http://127.0.0.1:4321"
-        assert c.headers["X-Flock-Token"] == "run-tok"
-    monkeypatch.setenv("FLOCK_URL", "http://other:1")  # explicit config wins
-    monkeypatch.setenv("FLOCK_TOKEN", "explicit")
+        assert c.headers["X-Legion-Token"] == "run-tok"
+    monkeypatch.setenv("LEGION_URL", "http://other:1")  # explicit config wins
+    monkeypatch.setenv("LEGION_TOKEN", "explicit")
     with connect() as c:
         assert str(c.base_url).rstrip("/") == "http://other:1"
-        assert c.headers["X-Flock-Token"] == "explicit"
-    monkeypatch.delenv("FLOCK_URL")
+        assert c.headers["X-Legion-Token"] == "explicit"
+    monkeypatch.delenv("LEGION_URL")
     elsewhere = tmp_path / "elsewhere"
     write_current(elsewhere, {"url": "http://127.0.0.1:99", "token": "t2", "pid": os.getpid()})
-    monkeypatch.setenv("FLOCK_CURRENT", str(elsewhere / "current"))
+    monkeypatch.setenv("LEGION_CURRENT", str(elsewhere / "current"))
     with connect() as c:
         assert str(c.base_url).rstrip("/") == "http://127.0.0.1:99"
 
@@ -290,7 +290,7 @@ def test_local_run_refuses_a_jobs_spec_and_a_bad_until(tmp_path):
 
 
 def _events(store: Store, agent: str, *kinds: str) -> None:
-    from flock.models import Event
+    from legion.models import Event
 
     store.append_events("loc", agent, [
         Event(type=k, ts=datetime.now(UTC), agent=agent, turn_id="t-1",
@@ -385,7 +385,7 @@ def test_write_bundle(tmp_path):
 
 
 def test_bundle_counts_a_removed_agents_interrupted_turn(tmp_path):
-    from flock.models import Event
+    from legion.models import Event
 
     store = Store(tmp_path / "data")
     spec = local_spec()
@@ -408,7 +408,7 @@ def test_bundle_counts_a_removed_agents_interrupted_turn(tmp_path):
 
 
 def _pid_dead(pid: int) -> bool:
-    from flock.controller.local import _alive
+    from legion.controller.local import _alive
 
     end = time.monotonic() + 30  # a loaded host reaps slowly; the tool sleeps 600 s
     while _alive(pid) and time.monotonic() < end:
@@ -449,7 +449,7 @@ async def test_live_budget_put_stops_the_run_and_lands_in_the_bundle(tmp_path):
         await asyncio.sleep(0.02)
     info = json.loads(current.read_text())
     async with httpx.AsyncClient(base_url=info["url"],
-                                 headers={"X-Flock-Token": info["token"]}) as c:
+                                 headers={"X-Legion-Token": info["token"]}) as c:
         while (await c.get("/swarms/budget")).status_code == 404:
             await asyncio.sleep(0.02)
         live = spec.model_copy(deep=True)
@@ -470,12 +470,12 @@ def test_launch_ends_the_local_run_it_started_on_ctrl_c(tmp_path, monkeypatch):
     (tmp_path / "spec.yaml").write_text(yaml.safe_dump(local_spec().model_dump(mode="json")))
     run = {"pid": 1, "run_dir": "x", "url": "http://127.0.0.1:1"}
     ended = []
-    monkeypatch.setattr("flock.ops.start_local", lambda *a: run)
-    monkeypatch.setattr("flock.ops.end_local", lambda r, env: ended.append(r))
+    monkeypatch.setattr("legion.ops.start_local", lambda *a: run)
+    monkeypatch.setattr("legion.ops.end_local", lambda r, env: ended.append(r))
 
     def interrupted(*a, **k):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr("flock.ops._launch", interrupted)
+    monkeypatch.setattr("legion.ops._launch", interrupted)
     runner.invoke(cli.app, ["launch", "spec.yaml", "--skip-preflight"])
     assert ended == [run]

@@ -5,9 +5,9 @@ from datetime import datetime, timedelta
 
 from pydantic import TypeAdapter
 
-from flock import status as fs
-from flock.controller.jobs import JobState
-from flock.controller.reconcile import (
+from legion import status as fs
+from legion.controller.jobs import JobState
+from legion.controller.reconcile import (
     LAUNCH_TIMEOUT,
     NUDGE_EVERY,
     NUDGE_MAX,
@@ -16,8 +16,8 @@ from flock.controller.reconcile import (
     reconcile,
     record_heartbeat,
 )
-from flock.controller.store import Store
-from flock.models import (
+from legion.controller.store import Store
+from legion.models import (
     CRASHLOOP_THRESHOLD,
     AgentHeartbeat,
     AssignCommand,
@@ -66,13 +66,13 @@ def test_apply_creates_agents_and_launches_workers(store, jobs, settings, clock,
     launch = jobs.launches[0]
     assert launch["labels"] == {"swarm": "demo", "type": "researcher", "worker": W0}
     assert launch["namespace"] == "ns"
-    assert launch["secrets"] == {"FLOCK_TOKEN": TOKEN, "ANTHROPIC_API_KEY": "sk-test"}
+    assert launch["secrets"] == {"LEGION_TOKEN": TOKEN, "ANTHROPIC_API_KEY": "sk-test"}
     env = launch["env"]
     assert env["WORKER_ID"] == W0 and env["SWARM"] == "demo" and env["TYPE"] == "researcher"
-    assert env["FLOCK_URL"] == "https://controller.invalid"
+    assert env["LEGION_URL"] == "https://controller.invalid"
     assert env["BUCKET_ID"] == "ns/sh" and env["MSGBOARD_URL"]
     assert env["DRAIN_WINDOW"] == "10m" and len(env["WORKER_INCARNATION"]) == 32
-    assert "FLOCK_TOKEN" not in env
+    assert "LEGION_TOKEN" not in env
     lifetime = parse_duration("24h").total_seconds()
     assert lifetime <= launch["timeout"] <= lifetime + parse_duration("4h").total_seconds()
     deadline = datetime.fromisoformat(env["DEADLINE"])
@@ -406,11 +406,11 @@ def test_hub_errors_do_not_break_the_pass(store, jobs, clock, tick, monkeypatch)
 
 
 def test_job_labels_from_settings_are_added_but_never_override(store, jobs, settings, tick):
-    settings.job_labels = {"experiment": "flock-m1", "swarm": "spoof"}
+    settings.job_labels = {"experiment": "legion-m1", "swarm": "spoof"}
     store.put_swarm(make_spec(researcher={"replicas": 1}), 0)
     tick()
     assert jobs.launches[0]["labels"] == {
-        "experiment": "flock-m1",
+        "experiment": "legion-m1",
         "swarm": "demo",
         "type": "researcher",
         "worker": W0,
@@ -426,7 +426,7 @@ class _HubError(Exception):
 
 
 def test_permanent_launch_error_stops_retrying_until_reapply(store, jobs, clock, tick):
-    from flock.controller.api import swarm_status
+    from legion.controller.api import swarm_status
 
     jobs.launch_error = _HubError(400, "Flavor 'cpu-basic' for arch 'amd64' is not available")
     store.put_swarm(make_spec(researcher={"replicas": 2, "agents_per_worker": 1}), 0)
@@ -471,7 +471,7 @@ def test_transient_launch_errors_back_off_with_a_cap(store, jobs, clock, tick):
 
 
 def test_launch_refused_classification():
-    from flock.controller.reconcile import launch_refused
+    from legion.controller.reconcile import launch_refused
 
     assert launch_refused(_HubError(400, "x")) and launch_refused(_HubError(422, "x"))
     BadRequestError = type("BadRequestError", (Exception,), {})
@@ -483,7 +483,7 @@ def test_launch_refused_classification():
 def test_resume_prompt_goes_through_max_working_admission(store, jobs, clock, tick):
     """A capped inference block's resume prompt is queued after the assign (pending_prompts),
     so the controller's max_working admission sees it like any API prompt."""
-    from flock.models import SwarmSpec
+    from legion.models import SwarmSpec
 
     spec = SwarmSpec.model_validate({
         "swarm": "demo", "namespace": "ns", "bucket_id": "ns/b",
@@ -505,8 +505,8 @@ def test_resume_prompt_goes_through_max_working_admission(store, jobs, clock, ti
 
 
 def test_memory_rotation_drains_smallest_eta_within_budget(store, jobs, settings, clock, tick):
-    from flock.controller.reconcile import swarm_stream
-    from flock.models import DrainCommand, WorkerMem
+    from legion.controller.reconcile import swarm_stream
+    from legion.models import DrainCommand, WorkerMem
 
     store.put_swarm(make_spec(researcher={"replicas": 6, "agents_per_worker": 2}), 0)
     tick()
@@ -548,8 +548,8 @@ def test_memory_rotation_drains_smallest_eta_within_budget(store, jobs, settings
 
 
 def test_a_stale_heartbeat_does_not_undo_a_rotation_drain(store, jobs, settings, clock, tick):
-    from flock.controller.reconcile import swarm_stream
-    from flock.models import DrainCommand, WorkerMem
+    from legion.controller.reconcile import swarm_stream
+    from legion.models import DrainCommand, WorkerMem
 
     store.put_swarm(make_spec(researcher={"replicas": 2, "agents_per_worker": 2}), 0)
     tick()

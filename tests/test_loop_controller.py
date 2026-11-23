@@ -11,8 +11,8 @@ from datetime import timedelta
 import httpx
 import pytest
 
-from flock.controller.api import create_app
-from flock.models import AgentHeartbeat, SwarmSpec, TokenUsage
+from legion.controller.api import create_app
+from legion.models import AgentHeartbeat, SwarmSpec, TokenUsage
 
 from .conftest import HB, PRICED, TOKEN, make_spec, wire
 from .test_api import W0, hb_body
@@ -409,8 +409,8 @@ async def test_hard_stopped_swarm_ignores_comms_wakes(sim):
 async def test_cli_loop_stop_start_and_status(sim, monkeypatch):
     from typer.testing import CliRunner
 
-    from flock import cli
-    from flock.client import Client
+    from legion import cli
+    from legion.client import Client
 
     await sim.apply({"prompt": "p", "every": "5s", "final": {"prompt": "fin"}})
     await sim.heartbeat()
@@ -610,7 +610,7 @@ async def test_handover_to_the_workers_rolls_back_dropped_rounds(store, clock, t
     """Capped turn_end with max_rounds 1, round 1 queued for both agents, then
     max_working removed before any command poll. The queued rounds are dropped, so they were
     never rounds: the workers start from round 0 and each sends exactly one prompt."""
-    from flock.models import LoopStartCommand
+    from legion.models import LoopStartCommand
 
     from .worker_fakes import runtime, until
 
@@ -692,8 +692,8 @@ async def test_until_idle_ignores_a_dormant_looping_type(sim):
     """`--until idle` (localrun.Tracker): a `replicas: 0` type with a loop and no
     agents never runs a round, so it must not hold a finished run open. A type whose replicas
     are not created yet, or one just spawned into, still counts."""
-    from flock.controller.api import swarm_status
-    from flock.controller.localrun import Tracker, loops_settled
+    from legion.controller.api import swarm_status
+    from legion.controller.localrun import Tracker, loops_settled
 
     lp = {"prompt": "work", "every": "30s", "while": {"max_rounds": 1}}
     spec = make_spec(researcher={"replicas": 2, "agents_per_worker": 2, "loop": lp},
@@ -731,7 +731,7 @@ async def test_until_idle_ignores_a_dormant_looping_type(sim):
 async def test_until_idle_ends_after_a_turn_timeout(sim, every):
     """`--until idle` (localrun.Tracker): one round per agent, A0's turn hits turn_timeout and
     A0 stays stuck. Its loop is over, so no resume_prompt comes, and the run is idle."""
-    from flock.controller.localrun import Tracker
+    from legion.controller.localrun import Tracker
 
     await sim.apply({"prompt": "work", "every": every, "while": {"max_rounds": 1}},
                     resume_prompt="go on")
@@ -882,7 +882,7 @@ async def test_a_loop_hashed_before_the_field_deletions_resumes_quietly(sim):
 
 @pytest.mark.parametrize("enabled", [False, True])
 async def test_success_heartbeat_stops_once_and_survives_restart(sim, enabled):
-    from flock.controller.loop import LoopEngine
+    from legion.controller.loop import LoopEngine
 
     await sim.apply({"prompt": "work", "while": {"max_rounds": 3}})
     spec = sim.store.get_swarm("demo")["spec"]

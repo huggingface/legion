@@ -1,6 +1,6 @@
 import pytest
 
-from flock.harbor.resources import Resources
+from legion.harbor.resources import Resources
 
 
 @pytest.mark.parametrize(

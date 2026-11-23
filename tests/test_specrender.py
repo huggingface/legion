@@ -1,4 +1,4 @@
-"""Spec rendering: ${VAR} substitution, value sources and --ref (flock.specrender)."""
+"""Spec rendering: ${VAR} substitution, value sources and --ref (legion.specrender)."""
 from __future__ import annotations
 
 import json
@@ -7,8 +7,8 @@ import subprocess
 import pytest
 import yaml
 
-from flock import cli, ops
-from flock.specrender import read_env_file, render, substitute
+from legion import cli, ops
+from legion.specrender import read_env_file, render, substitute
 
 from .conftest import make_spec, wire
 from .test_cli import runner
@@ -84,7 +84,7 @@ def test_cli_apply_with_env_files_and_no_overlay(tmp_path, monkeypatch, app, sto
 
 
 def test_value_sources_lines_env_files_defaults(tmp_path, monkeypatch):
-    from flock.specrender import source_of
+    from legion.specrender import source_of
 
     monkeypatch.setenv("MEM", "shell")
     monkeypatch.delenv("CPUS", raising=False)
@@ -137,12 +137,12 @@ def test_update_ref_applies_the_committed_folder(tmp_path, monkeypatch, app, sto
     assert len(store.spec_history("demo")) == 1
     r = runner.invoke(cli.app, ["update", str(exp), "--ref", "nope"])
     assert r.exit_code == 1 and "--ref nope" in r.output
-    hdr = ops.source_header(exp / "spec.yaml")["X-Flock-Source"]
+    hdr = ops.source_header(exp / "spec.yaml")["X-Legion-Source"]
     assert json.loads(hdr)["dirty"] is True  # without --ref: the working tree
 
 
 def test_urls_take_a_comma_separated_string():
-    from flock.models import Inference
+    from legion.models import Inference
 
     i = Inference(urls="http://a/v1, http://b/v1/")  # `urls: ${VLLM_URLS}`
     assert i.urls == i.endpoints == ["http://a/v1", "http://b/v1"]

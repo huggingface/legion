@@ -1,5 +1,5 @@
 """A world whose host moves (Slurm requeue, docs/slurm.md): world.url with ${WORLD_HOST},
-FLOCK_WORLD_HOST_FILE on the controller. The controller follows the file and republishes the
+LEGION_WORLD_HOST_FILE on the controller. The controller follows the file and republishes the
 endpoint; workers keep their credential (no relaunch) and call the new host."""
 
 from __future__ import annotations
@@ -7,10 +7,10 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from flock.controller.api import create_app
-from flock.models import SwarmSpec
-from flock.world.host import WorldError, follow_world_host, world_endpoint
-from flock.world.protocol import origin_matches
+from legion.controller.api import create_app
+from legion.models import SwarmSpec
+from legion.world.host import WorldError, follow_world_host, world_endpoint
+from legion.world.protocol import origin_matches
 
 from .conftest import FAKE_INFERENCE, HB, TOKEN
 from .test_world import SECRET, Recorder, Served
@@ -38,19 +38,19 @@ def test_origin_matches():
 
 
 def test_world_endpoint_needs_the_host_file(tmp_path):
-    with pytest.raises(WorldError, match="FLOCK_WORLD_HOST_FILE"):
+    with pytest.raises(WorldError, match="LEGION_WORLD_HOST_FILE"):
         world_endpoint(TEMPLATE + ":7860", {})
     f = tmp_path / "world.host"
     f.write_text("")
     with pytest.raises(WorldError, match="empty"):
-        world_endpoint(TEMPLATE, {"FLOCK_WORLD_HOST_FILE": str(f)})
+        world_endpoint(TEMPLATE, {"LEGION_WORLD_HOST_FILE": str(f)})
     f.write_text("node-3\n")
-    assert world_endpoint(TEMPLATE + ":7860", {"FLOCK_WORLD_HOST_FILE": str(f)}) == \
+    assert world_endpoint(TEMPLATE + ":7860", {"LEGION_WORLD_HOST_FILE": str(f)}) == \
         "http://node-3:7860"  # an old host-only file: the url's port
     f.write_text("node-3:41234\n")  # host:port: the job bound a free port
-    assert world_endpoint(TEMPLATE + ":7860/x", {"FLOCK_WORLD_HOST_FILE": str(f)}) == \
+    assert world_endpoint(TEMPLATE + ":7860/x", {"LEGION_WORLD_HOST_FILE": str(f)}) == \
         "http://node-3:41234/x"
-    assert world_endpoint(TEMPLATE, {"FLOCK_WORLD_HOST_FILE": str(f)}) == "http://node-3:41234"
+    assert world_endpoint(TEMPLATE, {"LEGION_WORLD_HOST_FILE": str(f)}) == "http://node-3:41234"
     assert world_endpoint("http://fixed:1", {}) == "http://fixed:1"
 
 
@@ -59,7 +59,7 @@ async def test_moved_world_is_republished_without_a_relaunch(tmp_path, store, cl
     first, second = Served(Recorder()), Served(Recorder())
     try:
         host_file.write_text(first.url.removeprefix("http://") + "\n")
-        monkeypatch.setenv("FLOCK_WORLD_HOST_FILE", str(host_file))
+        monkeypatch.setenv("LEGION_WORLD_HOST_FILE", str(host_file))
         monkeypatch.setenv("WORLD_TOKEN", SECRET)
         spec = SwarmSpec.model_validate({
             "swarm": "demo", "namespace": "ns", "bucket_id": "ns/sh",
@@ -76,7 +76,7 @@ async def test_moved_world_is_republished_without_a_relaunch(tmp_path, store, cl
             assert r.status_code == 200, r.text
             stored = store.get_swarm("demo")["spec"].world
             assert stored.endpoint == first.url and stored.credential_origin == TEMPLATE
-            env = {"FLOCK_WORLD_HOST_FILE": str(host_file)}
+            env = {"LEGION_WORLD_HOST_FILE": str(host_file)}
             assert follow_world_host(store.get_swarm("demo")["spec"], TOKEN,
                                      {"WORLD_TOKEN": SECRET}, env=env) is None  # unchanged
 

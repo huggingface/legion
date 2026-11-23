@@ -8,9 +8,9 @@ from harbor.models.task.id import GitTaskId
 from harbor.models.trial.result import AgentInfo, TrialResult
 from msgboard.client import Client
 
-from flock.harbor import launch
-from flock.harbor.config import AgentSettings, Config
-from flock.harbor.sources import ResolvedTask
+from legion.harbor import launch
+from legion.harbor.config import AgentSettings, Config
+from legion.harbor.sources import ResolvedTask
 
 EXAMPLES = Path(__file__).parent / "examples"
 
@@ -440,8 +440,8 @@ async def test_resource_failure_cancels_peers_and_retains_state(
 async def test_preflight_failure_preserves_sigterm_handler(monkeypatch, handler_kind):
     spec = Config.load(EXAMPLES / "pi-hf.yaml")
     # HF_TOKEN would fall back to a logged-in token, so use a key with no fallback.
-    spec.inference.api_key_env = "FLOCK_TEST_MISSING_KEY"
-    monkeypatch.delenv("FLOCK_TEST_MISSING_KEY", raising=False)
+    spec.inference.api_key_env = "LEGION_TEST_MISSING_KEY"
+    monkeypatch.delenv("LEGION_TEST_MISSING_KEY", raising=False)
     previous_handler = signal.getsignal(signal.SIGTERM)
     loop = asyncio.get_running_loop()
     called = asyncio.Event()
@@ -451,7 +451,7 @@ async def test_preflight_failure_preserves_sigterm_handler(monkeypatch, handler_
         loop.add_signal_handler(signal.SIGTERM, called.set)
     expected_handler = signal.getsignal(signal.SIGTERM)
     try:
-        with pytest.raises(ValueError, match="Set FLOCK_TEST_MISSING_KEY"):
+        with pytest.raises(ValueError, match="Set LEGION_TEST_MISSING_KEY"):
             await launch.run_experiment(spec)
         assert signal.getsignal(signal.SIGTERM) == expected_handler
         if handler_kind != "default":
@@ -546,7 +546,7 @@ async def test_partial_network_setup_waits_for_trial_cleanup(prepared, monkeypat
     monkeypatch.setattr(launch, "TrialNetworks", FailingNetworks)
 
     async def factory(config):
-        assert config.agent.env["MSGBOARD_SOCKET"] == "/run/flock-board.sock"
+        assert config.agent.env["MSGBOARD_SOCKET"] == "/run/legion-board.sock"
         assert config.environment.mounts[0]["read_only"]
         return FakeTrial(config, events, mode="wait")
 
@@ -574,7 +574,7 @@ async def test_no_resources_or_tools_runs_independently(
     class IndependentTrial(FakeTrial):
         async def run(self):
             assert set(self.hooks) == ({TrialEvent.AGENT_START} if reasoning else set())
-            assert set(self.config.agent.env) == {"HF_TOKEN", "FLOCK_TOOLS_MANIFEST"}
+            assert set(self.config.agent.env) == {"HF_TOKEN", "LEGION_TOOLS_MANIFEST"}
             assert not self.config.environment.mounts
             from harbor.models.verifier.result import VerifierResult
 

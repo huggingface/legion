@@ -6,7 +6,7 @@ solution. A merged collaboration PR is not a successful benchmark submission.
 
 ## Setup
 
-- Install Flock (`uv sync`) and Docker with Compose.
+- Install Legion (`uv sync`) and Docker with Compose.
 - Create a private HF dataset in your personal account with an initial README commit on `main`.
 - Set `HF_REPO_ID` to its `<your-username>/<name>`, `HF_REPO_TOKEN` to a credential with
   write access to it, and `HF_INFERENCE_TOKEN` to a model credential with Inference Providers
@@ -15,9 +15,9 @@ solution. A merged collaboration PR is not a successful benchmark submission.
   your task dataset requires it.
 
 ```sh
-uv run flock launch experiments/programbench/spec.yaml
-uv run flock status programbench-repo
-uv run flock stop programbench-repo --delete --yes
+uv run legion launch experiments/programbench/spec.yaml
+uv run legion status programbench-repo
+uv run legion stop programbench-repo --delete --yes
 ```
 
 The example starts a local board and one worker with two agents. Both receive one

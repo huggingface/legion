@@ -5,8 +5,8 @@ from __future__ import annotations
 import itertools
 import json
 
-from flock.models import Event, EventBatch
-from flock.worker.events import Outbox, SessionLog, event_to_entry, read_session
+from legion.models import Event, EventBatch
+from legion.worker.events import Outbox, SessionLog, event_to_entry, read_session
 
 
 def test_session_file_round_trip(tmp_path):

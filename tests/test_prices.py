@@ -4,9 +4,9 @@ import json
 
 import pytest
 
-from flock.controller import prices
-from flock.controller.store import agent_tokens
-from flock.models import TokenUsage
+from legion.controller import prices
+from legion.controller.store import agent_tokens
+from legion.models import TokenUsage
 
 BIG, MID, SMALL = prices.Price(4.0, 20.0, 0.2, 5.0), prices.Price(2.0, 10.0, 0.2, 2.5), \
     prices.Price(0.10, 0.50, 0.01, 0.125)
@@ -29,12 +29,12 @@ def test_override_file(tmp_path, monkeypatch):
     path.write_text(
         json.dumps({"tiny": {"input": 1, "output": 2, "cache_read": 0, "cache_write": 0}})
     )
-    monkeypatch.setenv("FLOCK_PRICES", str(path))
+    monkeypatch.setenv("LEGION_PRICES", str(path))
     prices.price_table.cache_clear()
     try:
         assert prices.cost_usd({"tiny": TokenUsage(input=1_000_000, output=500_000)}) == 2.0
     finally:
-        monkeypatch.delenv("FLOCK_PRICES")
+        monkeypatch.delenv("LEGION_PRICES")
         prices.price_table.cache_clear()
 
 
@@ -71,6 +71,6 @@ def test_pinned_price_wins_for_the_qualified_id():
     global row and the default, also when the model id itself contains '/'."""
     pinned = prices.Price(0.2, 0.8, 0.02, 0.2)
     table = {**TABLE, "small-model": pinned, "Qwen/Qwen3-Coder": pinned}
-    assert prices.price_for("flock/small-model", table) == pinned
-    assert prices.price_for("flock/Qwen/Qwen3-Coder", table) == pinned
+    assert prices.price_for("legion/small-model", table) == pinned
+    assert prices.price_for("legion/Qwen/Qwen3-Coder", table) == pinned
     assert prices.price_for("Qwen/Qwen3-Coder", table) == pinned

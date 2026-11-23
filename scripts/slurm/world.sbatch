@@ -1,17 +1,17 @@
 #!/bin/bash
 # world.sbatch <run dir>: the run's world (the spec's `world.command`, run in `world.dir`) as one
-# CPU Slurm job. `flock launch` submits it with the controller when the spec has a world command;
-# `flock stop --release` stops it before it cancels the controller (docs/slurm.md "Deploying").
-# By hand: sbatch -J flock-world-<run> -o <run dir>/logs/%x-%j.out <run dir>/slurm/world.sbatch <run dir>
-# Size: sbatch -c / --mem (`flock launch` passes WORLD_CPUS / WORLD_MEM from run.env).
+# CPU Slurm job. `legion launch` submits it with the controller when the spec has a world command;
+# `legion stop --release` stops it before it cancels the controller (docs/slurm.md "Deploying").
+# By hand: sbatch -J legion-world-<run> -o <run dir>/logs/%x-%j.out <run dir>/slurm/world.sbatch <run dir>
+# Size: sbatch -c / --mem (`legion launch` passes WORLD_CPUS / WORLD_MEM from run.env).
 #
 # - The command runs on this node, as `compute: local` starts it (docs/world.md): {port} is a free
-#   port, {python} the venv's python; FLOCK_WORLD_PORT, FLOCK_WORLD_HOST=0.0.0.0, FLOCK_SWARM and
-#   FLOCK_WORLD_TOKEN (run.env) are set, every other FLOCK_* variable is dropped. Its output goes
+#   port, {python} the venv's python; LEGION_WORLD_PORT, LEGION_WORLD_HOST=0.0.0.0, LEGION_SWARM and
+#   LEGION_WORLD_TOKEN (run.env) are set, every other LEGION_* variable is dropped. Its output goes
 #   to <run>/logs/world-<run>.log.
 # - hosts/world.host = host:port once the world answers GET /manifest (every start: a requeue may land on another node). The controller follows the
-#   file (FLOCK_WORLD_HOST_FILE; the spec's world.url uses ${WORLD_HOST}).
-# - The world keeps its own state (flock never reads it). A clean stop (`flock stop --release`
+#   file (LEGION_WORLD_HOST_FILE; the spec's world.url uses ${WORLD_HOST}).
+# - The world keeps its own state (legion never reads it). A clean stop (`legion stop --release`
 #   sends `scancel --signal=TERM --batch`: this shell only) sends it SIGTERM and waits for it to
 #   exit, so a world that saves on SIGTERM gets the time it needs; the job ends with it. A plain
 #   `scancel` gives it KillWait (30 s) before the SIGKILL.
@@ -21,14 +21,14 @@
 #   WORLD_RETRY_MAX_S) and starts again, so a transient problem heals without a person.
 # No `--export`: everything comes from common.sh (cluster.env, run.env) inside the job.
 #
-#SBATCH --job-name=flock-world
+#SBATCH --job-name=legion-world
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=3800M
 #SBATCH --time=60:00:00
 #SBATCH --requeue
-#SBATCH --dependency=singleton  # one world per run (the job name flock-world-<run> is per run)
+#SBATCH --dependency=singleton  # one world per run (the job name legion-world-<run> is per run)
 #SBATCH --open-mode=append
 #SBATCH --signal=B:TERM@120   # 120 s before the time limit: SIGTERM to the batch shell -> clean stop
 
@@ -72,19 +72,19 @@ WORLD_PORT=$(free_port) || die "no free port on $(hostname)"   # the controller 
 WORLD_HOST=$(hostname)
 [ "$STOPPING" = 0 ] || exit 0  # a signal during the start-up (already requeued on USR1)
 log "world: $SPEC world.command on port $WORLD_PORT; log $RUN_DIR/logs/world-$RUN.log; restarts=${SLURM_RESTART_COUNT:-0}"
-# Started while USR1 is ignored (see controller.sbatch); a flock world installs its own USR1 handler.
+# Started while USR1 is ignored (see controller.sbatch); a legion world installs its own USR1 handler.
 trap '' USR1
 "$VENV/bin/python" -I - "$SPEC" "$WORLD_PORT" >> "$RUN_DIR/logs/world-$RUN.log" 2>&1 <<'PY' &
 import os, sys
-from flock.ops import read_spec
+from legion.ops import read_spec
 spec = read_spec(sys.argv[1])  # ${VAR}s from the job env; world.dir made absolute
 w = spec.world
 if w is None or not w.command:
     sys.exit(f"{sys.argv[1]}: no world.command to run")
 argv = [x.replace("{port}", sys.argv[2]).replace("{python}", sys.executable) for x in w.command]
 env = {k: v for k, v in os.environ.items()
-       if not k.startswith("FLOCK_") or k in ("FLOCK_WORLD_TOKEN", "FLOCK_WORLD_ADMIN_TOKEN")}
-env.update(FLOCK_WORLD_PORT=sys.argv[2], FLOCK_WORLD_HOST="0.0.0.0", FLOCK_SWARM=spec.swarm)
+       if not k.startswith("LEGION_") or k in ("LEGION_WORLD_TOKEN", "LEGION_WORLD_ADMIN_TOKEN")}
+env.update(LEGION_WORLD_PORT=sys.argv[2], LEGION_WORLD_HOST="0.0.0.0", LEGION_SWARM=spec.swarm)
 print(f"world: {' '.join(argv)} in {w.dir}", flush=True)
 os.chdir(w.dir)
 os.execvpe(argv[0], argv, env)
@@ -93,7 +93,7 @@ WORLD_PID=$!
 STARTED_AT=$(date +%s)
 trap on_usr1 USR1
 
-until [ "$(http_status "http://127.0.0.1:$WORLD_PORT/manifest" X-World-Token FLOCK_WORLD_TOKEN)" = 200 ]; do
+until [ "$(http_status "http://127.0.0.1:$WORLD_PORT/manifest" X-World-Token LEGION_WORLD_TOKEN)" = 200 ]; do
   kill -0 "$WORLD_PID" 2>/dev/null || break
   [ "$STOPPING" = 1 ] && break
   sleep 2

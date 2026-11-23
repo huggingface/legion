@@ -1,9 +1,9 @@
 """One end-to-end test of the board resource on a real Hugging Face Space.
 
-Skipped unless FLOCK_LIVE_SPACES says where test Spaces go, as <namespace>/<name-prefix>
-(for example your-name/flock-test), and a Hugging Face token is available:
+Skipped unless LEGION_LIVE_SPACES says where test Spaces go, as <namespace>/<name-prefix>
+(for example your-name/legion-test), and a Hugging Face token is available:
 
-    FLOCK_LIVE_SPACES=your-name/flock-test uv run pytest -m live
+    LEGION_LIVE_SPACES=your-name/legion-test uv run pytest -m live
 
 It deploys a CPU Basic Space, takes a few minutes, and deletes the Space and its
 bucket afterwards. Its output never shows a secret. pytest's report shows the
@@ -28,18 +28,18 @@ import pytest
 from huggingface_hub import HfApi, get_token
 from msgboard.client import BoardError, Client
 
-from flock.harbor.config import BUILTIN
-from flock.harbor.resources import load_module
+from legion.harbor.config import BUILTIN
+from legion.harbor.resources import load_module
 
 board = load_module(BUILTIN / "resources/message_board.py")
 board_tools = load_module(BUILTIN / "tools/message_board.py")
-PREFIX = os.environ.get("FLOCK_LIVE_SPACES")
+PREFIX = os.environ.get("LEGION_LIVE_SPACES")
 
 pytestmark = [
     pytest.mark.live,
     pytest.mark.skipif(
         not (PREFIX and get_token()),
-        reason="set FLOCK_LIVE_SPACES=<namespace>/<name-prefix> and log in to the Hub",
+        reason="set LEGION_LIVE_SPACES=<namespace>/<name-prefix> and log in to the Hub",
     ),
 ]
 
@@ -95,7 +95,7 @@ def new_space():
 
 
 def as_agent(monkeypatch, resource, name):
-    """Give the bundled tool functions the environment Flock gives this agent."""
+    """Give the bundled tool functions the environment Legion gives this agent."""
     for key, value in resource.bind(name)["env"].items():
         monkeypatch.setenv(key, value)
 
@@ -200,7 +200,7 @@ async def test_a_space_board_through_restart_relaunch_and_outage(
         assert statuses == [401, 401]
         # A person takes the admin invite, as "Join with Hugging Face" does.
         with Client.join(
-            url, invite, name="flock-test-admin", max_retries=5, **gate
+            url, invite, name="legion-test-admin", max_retries=5, **gate
         ) as person:
             secrets.append(person.token)
             person_token = person.token

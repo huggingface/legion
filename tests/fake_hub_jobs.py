@@ -1,5 +1,5 @@
 """A fake of the HF Jobs part of `huggingface_hub.HfApi`, for the `hf_jobs` servers
-(flock.controller.hf_jobs_servers): it keeps jobs in memory and answers with the real
+(legion.controller.hf_jobs_servers): it keeps jobs in memory and answers with the real
 `JobInfo` / `JobHardwareInfo`, built from the JSON the Jobs API returns. Tests move a job's
 stage with `set_stage`, and make the Hub fail with `runs_left` (run_job calls that succeed,
 then a quota error), `list_errors`, `inspect_errors` and `cancel_errors` (the next N such calls

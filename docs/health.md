@@ -1,6 +1,6 @@
 # Health: snapshots, usage, rollups
 
-The controller samples each swarm every 30 s (`FLOCK_HEALTH_INTERVAL`, 0 = off). Agent event
+The controller samples each swarm every 30 s (`LEGION_HEALTH_INTERVAL`, 0 = off). Agent event
 files are never read: counters are fed by the event batches as they arrive, and the swarm
 stream is tailed by byte offset.
 
@@ -10,7 +10,7 @@ stream is tailed by byte offset.
   manifest lists the `metrics-v1` capability, `GET /metrics` is stored as-is under
   `world.metrics`. Two failed probes in a row write `world_down` to the swarm stream; the next
   success writes `world_up`.
-- **World down: pause.** When the world has been down for `world.down_pause_s` seconds (default `FLOCK_WORLD_DOWN_PAUSE_S`,
+- **World down: pause.** When the world has been down for `world.down_pause_s` seconds (default `LEGION_WORLD_DOWN_PAUSE_S`,
   1800; `0` turns it off) the controller holds every type that has world tools (docs/loop.md
   "Pause and resume"): `paused {reason: world_down, by: controller, auto: true}`. The first
   successful probe lifts those automatic holds (`resumed {auto: true}`), also ones left by a
@@ -30,7 +30,7 @@ stream is tailed by byte offset.
   scrapes in a row; `dead` from 2 on). Each agent's heartbeat names the server it is pinned to
   (`endpoint`, `Inference.endpoint_for`), so a server counts its `agents`; a dead one lists them
   (`dead_agents`, first 20) and raises `dead_server` (`provider_down` when every server of the
-  block is dead). Moving agents off a dead server is manual: drop it from `urls` and `flock update`.
+  block is dead). Moving agents off a dead server is manual: drop it from `urls` and `legion update`.
 
 ## Snapshot body
 
@@ -51,7 +51,7 @@ stream is tailed by byte offset.
   seen for the first time has no rate yet; a restarted worker's counters start over).
 - `relaunches`: `crash` and `planned_restart` events of that worker on the swarm stream.
 - `stuck`: agents in `stuck`, or in `working` with no event for more than 30 min
-  (`FLOCK_STUCK_MIN`). After a controller restart the clock starts at its first sample.
+  (`LEGION_STUCK_MIN`). After a controller restart the clock starts at its first sample.
 - `gens`: agents by the type spec revision they run (`rev` in the agent heartbeat).
 - `hb` is the worker's last heartbeat time and `ts` the world probe's time.
 - `ramps`: per `replicas_ramp` type, its step (`ramp:<type>`), the next step's size and time
@@ -78,7 +78,7 @@ is not counted. Hours are by the time the controller received the events.
 
 ## Files (mirrored by the state sync)
 
-Under the controller's data dir (with `FLOCK_STATE_URL` also in the bucket; `flock launch`:
+Under the controller's data dir (with `LEGION_STATE_URL` also in the bucket; `legion launch`:
 `<run dir>/controller/`):
 
 ```
@@ -94,7 +94,7 @@ states/<swarm>/latest.json               {ts, states: {agent: working|pending|id
 states/<swarm>/<YYYY-MM-DDTHH>.jsonl     one line per agent per 5-min bucket of that hour
 ```
 
-`ts` is epoch seconds. `run` is `FLOCK_RUN`, else the last part of `FLOCK_STATE_URL`, else the
+`ts` is epoch seconds. `run` is `LEGION_RUN`, else the last part of `LEGION_STATE_URL`, else the
 data dir name. `run.json` is written at the first sample, on each new generation and at
 shutdown.
 
@@ -129,11 +129,11 @@ with a prompt queued).
   from memory (full bodies), `5m` from the store (slim).
 - The `/` status page has one health line per swarm: aggregates only, no agent names.
 
-## `flock status`
+## `legion status`
 
-One operator view per swarm, built by `flock.status.view` (the Python API uses the same
+One operator view per swarm, built by `legion.status.view` (the Python API uses the same
 function) from `GET /swarms/{s}`, the newest snapshot, `GET /workers` and, with a filter, the
-agents. The first line is the verdict (`flock.status.verdict`):
+agents. The first line is the verdict (`legion.status.verdict`):
 
 - `FAILING`: the world is down, every server of a provider is down under its agents, or a
   type's launches are refused. Exit 1.
@@ -153,25 +153,25 @@ the last control-plane events.
 
 - `--type T`, `--state S`, `--parent P` list the matching agents (with their server, `DEAD`
   when it is down); `--type` adds the type's per-agent loop rows. `--state idle` means what
-  `flock prompt --state idle` means (the controller's `turn_state`: a prompt just handed out
+  `legion prompt --state idle` means (the controller's `turn_state`: a prompt just handed out
   is working, a turn just ended is idle, without waiting for a heartbeat).
 - `--agent A` (or an agent's name as the argument): that agent's status as JSON.
 - `--watch` reprints every 10 s; `--json` prints the whole view (`verdict`, `status`,
   `health`, every worker row, `agents`, `loop`).
 - A controller that does not answer: `controller unreachable at URL; hosts/controller.host
   says HOST, written at T` (T is the file's time, i.e. the controller's last start; the host
-  file part needs `--run` or FLOCK_RUN_DIR). Exit 1.
-- Inside an agent: `flock status` is your own status; `flock status [SWARM] --parent P` lists
+  file part needs `--run` or LEGION_RUN_DIR). Exit 1.
+- Inside an agent: `legion status` is your own status; `legion status [SWARM] --parent P` lists
   your (or a descendant's) children.
 
 ## Events
 
-`flock status SWARM --events` prints the swarm stream, `flock status AGENT --events` (or
+`legion status SWARM --events` prints the swarm stream, `legion status AGENT --events` (or
 `--agent A --events`) an agent's; `--only PREFIX` keeps the names starting with it (`--only
 agent.`), `--after N` starts after a cursor, `--follow` keeps long-polling, `--wait` returns
 once something new arrived (the next cursor on stderr), `--json` prints JSONL.
-`flock.status.events` yields the same pages (a removed agent's stored events too). Stored events
-are never rewritten (resume reads them); `flock.status.normalise` maps each to one schema:
+`legion.status.events` yields the same pages (a removed agent's stored events too). Stored events
+are never rewritten (resume reads them); `legion.status.normalise` maps each to one schema:
 
 `{name, ts, swarm, agent?, type?, worker?, data}`; `data` is the event's payload, with
 `turn_id` when it has one.
@@ -196,5 +196,5 @@ are never rewritten (resume reads them); `flock.status.normalise` maps each to o
 | `ramp.step`, `ramp.held` | `ramp_step`, `ramp_held` | swarm | a ramp step, a capacity hold |
 | `world.down`, `world.up`, `world.knob` | `world_down`, `world_up`, `world_knob` | swarm | the world probe; a knob changed |
 | `budget.stop`, `budget.cleared` | `budget_stop`, `budget_cleared` | swarm | `limits.budget_usd` |
-| `swarm.stopped`, `swarm.resumed`, `swarm.released`, `swarm.unreleased` | `paused`, `resumed`, `released`, `unreleased` | swarm | `flock stop` / `flock launch` |
+| `swarm.stopped`, `swarm.resumed`, `swarm.released`, `swarm.unreleased` | `paused`, `resumed`, `released`, `unreleased` | swarm | `legion stop` / `legion launch` |
 | `swarm.spec_applied`, `swarm.removed` | `spec_applied`, `remove_swarm` | swarm | the stored spec; `--delete` done |

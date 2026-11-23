@@ -10,9 +10,9 @@ from datetime import timedelta
 
 import httpx
 
-from flock.controller.api import create_app
-from flock.controller.reconcile import agent_state
-from flock.models import AgentHeartbeat, AgentState, Event, PromptCommand, WorkerHeartbeat
+from legion.controller.api import create_app
+from legion.controller.reconcile import agent_state
+from legion.models import AgentHeartbeat, AgentState, Event, PromptCommand, WorkerHeartbeat
 
 from .conftest import HB, TOKEN
 from .test_inference_controller import CAP, pspec, put

@@ -12,11 +12,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
-from flock.controller.api import create_app
-from flock.controller.jobs import FakeJobsClient
-from flock.controller.reconcile import rebuild_from_jobs, reconcile
-from flock.controller.store import Store
-from flock.models import AgentHeartbeat, SwarmSpec, TokenUsage, WorkerHeartbeat
+from legion.controller.api import create_app
+from legion.controller.jobs import FakeJobsClient
+from legion.controller.reconcile import rebuild_from_jobs, reconcile
+from legion.controller.store import Store
+from legion.models import AgentHeartbeat, SwarmSpec, TokenUsage, WorkerHeartbeat
 
 from . import fake_models
 from .conftest import HB, TOKEN
@@ -49,8 +49,8 @@ async def test_the_key_is_added_to_job_secrets(client, jobs, settings, tick):
     assert (await put(client, pspec())).status_code == 200
     tick()
     by_type = {x["labels"]["type"]: x for x in jobs.launches}
-    assert by_type["worker"]["secrets"] == {"FLOCK_TOKEN": TOKEN, "HF_TOKEN": "hf-x"}  # deduped
-    assert by_type["local"]["secrets"] == {"FLOCK_TOKEN": TOKEN, "VLLM_API_KEY": "v-x"}
+    assert by_type["worker"]["secrets"] == {"LEGION_TOKEN": TOKEN, "HF_TOKEN": "hf-x"}  # deduped
+    assert by_type["local"]["secrets"] == {"LEGION_TOKEN": TOKEN, "VLLM_API_KEY": "v-x"}
     assert by_type["worker"]["spec"].resolved_model.inference.key_env == "HF_TOKEN"
 
 
@@ -661,9 +661,9 @@ async def _delivered(c, wid) -> list[str]:
 async def test_max_working_holds_prompts_for_idle_agents(store, clock, tick, monkeypatch, env,
                                                          enforced):
     if env is None:
-        monkeypatch.delenv("FLOCK_MAX_WORKING_ENFORCE", raising=False)
+        monkeypatch.delenv("LEGION_MAX_WORKING_ENFORCE", raising=False)
     else:
-        monkeypatch.setenv("FLOCK_MAX_WORKING_ENFORCE", env)
+        monkeypatch.setenv("LEGION_MAX_WORKING_ENFORCE", env)
     spec = pspec(CAP, worker={**HB, "model": "m", "replicas": 2})
     wid = "p-worker-w0000"
     async with await _cap_client(store, clock, None) as c:
@@ -677,7 +677,7 @@ async def test_max_working_holds_prompts_for_idle_agents(store, clock, tick, mon
         assert st["working"] == st["max_working"] == 1
         ack = (await c.post("/agents/worker-0001/prompt", json={"text": "start"})).json()
         assert ack["status"] == "queued"  # accepted, never rejected
-        if not enforced:  # FLOCK_MAX_WORKING_ENFORCE=0: report only
+        if not enforced:  # LEGION_MAX_WORKING_ENFORCE=0: report only
             assert await _delivered(c, wid) == ["worker-0001"]
             return
         assert await _delivered(c, wid) == []  # provider full: held in the controller

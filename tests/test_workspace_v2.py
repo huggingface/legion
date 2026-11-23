@@ -7,7 +7,7 @@ import subprocess
 
 import pytest
 
-from flock.world.workspace import apply_patch, capture, capture_v2
+from legion.world.workspace import apply_patch, capture, capture_v2
 
 
 def git(path, *args):
@@ -148,8 +148,8 @@ NEED_FULL = {"ok": False, "error": {"code": "need_full", "message": "no base"}}
 def test_server_counts_uploads_and_answers_need_full_without_v2():
     from fastapi.testclient import TestClient
 
-    from flock.world import World, tool
-    from flock.world.server import create_app
+    from legion.world import World, tool
+    from legion.world.server import create_app
 
     class Up(World):
         name, version = "up", "1"
@@ -165,7 +165,7 @@ def test_server_counts_uploads_and_answers_need_full_without_v2():
 
     world = Up()
     c = TestClient(create_app(world, None))
-    h = {"X-Flock-Agent": "a"}
+    h = {"X-Legion-Agent": "a"}
     v1 = {"args": {}, "workspace": {"base_sha": "b", "files": {}}}
     v2 = {"args": {}, "workspace": {"base_sha": "b", "patch": ""}}
     assert c.post("/tools/put", json=v1, headers=h).json()["ok"]

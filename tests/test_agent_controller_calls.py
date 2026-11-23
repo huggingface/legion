@@ -7,7 +7,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from flock.worker import main as wmain
+from legion.worker import main as wmain
 
 from .test_worker_main import FakeController, make_worker
 
@@ -70,13 +70,13 @@ class AgentRoutes(Moving):
 
 
 async def gateway_worker(tmp_path, ctrl):
-    from flock.models import AssignCommand
+    from legion.models import AssignCommand
 
     from .worker_fakes import spec
 
     worker, _ = make_worker(tmp_path, ctrl)
     await worker.dispatch(AssignCommand(agent=AGENT, type="researcher", spec=spec(),
-                                        restore=False, agent_token="flock_at_leader"))
+                                        restore=False, agent_token="legion_at_leader"))
     return worker
 
 
@@ -101,7 +101,7 @@ async def test_gateway_forwards_with_the_agent_token_and_follows_a_move(tmp_path
     assert not err and out == {"status": 201, "body": {"name": f"{AGENT}-analyst-0001",
                                                        "created": True}}
     assert ctrl.seen == ["old-node", "new-node"]  # failed once, re-resolved, succeeded
-    assert ctrl.agent_calls == [("POST", f"/agents/{AGENT}/spawn", "Bearer flock_at_leader", {})]
+    assert ctrl.agent_calls == [("POST", f"/agents/{AGENT}/spawn", "Bearer legion_at_leader", {})]
 
     err, out = await call(worker, {"method": "GET", "path": f"/agents/{AGENT}/events",
                                    "params": {"after": 3, "wait": 0}})

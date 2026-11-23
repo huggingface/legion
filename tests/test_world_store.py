@@ -1,4 +1,4 @@
-"""flock.world.store: dirty-row flushes, atomic commits, cold rows, backup under writes."""
+"""legion.world.store: dirty-row flushes, atomic commits, cold rows, backup under writes."""
 from __future__ import annotations
 
 import sqlite3
@@ -6,7 +6,7 @@ import threading
 
 import pytest
 
-from flock.world.store import Store
+from legion.world.store import Store
 
 
 def test_flush_writes_only_dirty_rows_and_deletes_gone_ones(tmp_path):

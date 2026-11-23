@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from flock.controller.reconcile import vllm_busy
-from flock.models import RampHold, RampSpec
+from legion.controller.reconcile import vllm_busy
+from legion.models import RampHold, RampSpec
 
 from .conftest import make_spec
 

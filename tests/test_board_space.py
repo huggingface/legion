@@ -1,4 +1,4 @@
-"""`comms.board: space` (flock init duplicates a board Space, fakes only) and `dashboard:` (the
+"""`comms.board: space` (legion init duplicates a board Space, fakes only) and `dashboard:` (the
 run's flock-overview row written to a registry bucket)."""
 
 from __future__ import annotations
@@ -10,10 +10,10 @@ from datetime import datetime, timedelta
 import pytest
 import yaml
 
-from flock import rundir
-from flock.models import SwarmSpec
-from flock.ops import SpecError, read_spec
-from flock.specrender import read_env_file
+from legion import rundir
+from legion.models import SwarmSpec
+from legion.ops import SpecError, read_spec
+from legion.specrender import read_env_file
 from tests.fake_msgboard import Board, serve
 
 from .conftest import FAKE_INFERENCE, HB
@@ -80,7 +80,7 @@ def test_init_creates_the_board_once_then_reuses_it(tmp_path, space):
     assert secrets["HF_TOKEN"] == "hf_scoped"  # the mapped, bucket-scoped token, not the operator's
     variables = {v["key"]: v["value"] for v in kw["space_variables"]}
     assert kw["space_hardware"] == "cpu-basic"
-    # flock's only: none of the template's
+    # legion's only: none of the template's
     assert variables == {"MSGBOARD_REPLICA": "hf://buckets/acme/runs/board/demo"}
     assert "general" in board.channels.values()
     values = read_env_file(run / "run.env")
@@ -139,7 +139,7 @@ def test_swarms_sharing_a_bucket_get_their_own_replica(tmp_path, space):
 
 
 def test_board_space_needs_a_template(tmp_path, space):
-    from flock.models import CommsSpec
+    from legion.models import CommsSpec
 
     comms = {k: v for k, v in SPEC["comms"].items() if k != "template"}
     with pytest.raises(ValueError, match="template"):
@@ -194,7 +194,7 @@ def test_health_wait_reports_a_board_that_never_starts(tmp_path, space, monkeypa
 
 
 def test_board_auth_uses_the_hf_token_on_hf_spaces(monkeypatch):
-    from flock.comms.board import _auth
+    from legion.comms.board import _auth
 
     monkeypatch.setenv("HF_TOKEN", "hf_x")
     space = "https://acme-board-demo.hf.space"

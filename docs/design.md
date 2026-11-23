@@ -1,13 +1,13 @@
-# flock: design
+# legion: design
 
-How flock works today. The contract in code is `src/flock/models.py`; the user guides are the
+How legion works today. The contract in code is `src/legion/models.py`; the user guides are the
 other files in docs/.
 
-## What flock is
+## What legion is
 
-flock hosts agent swarms and keeps them running: it places agents on workers, prompts them,
+legion hosts agent swarms and keeps them running: it places agents on workers, prompts them,
 syncs their sessions and workdirs, restarts what fails and reports health and cost. Each agent
-is one long-lived Harbor Trial in which Harbor's Pi runs one turn per prompt. flock never
+is one long-lived Harbor Trial in which Harbor's Pi runs one turn per prompt. legion never
 decides what an agent should see: whoever calls `prompt` has decided that. Messaging belongs to
 [msgboard](https://github.com/huggingface/msgboard) (the `message_board` resource), shared
 state to a world (the `world` resource, docs/world.md).
@@ -58,31 +58,31 @@ agent's workdir and Pi sessions to the bucket, and drains `drain_window` before 
 ### Agent
 
 A name, a workdir and a Pi session, on whichever worker holds it. Its Trial (an environment on
-docker, podman, hf-sandbox or e2b: `flock.worker.adapters.harbor`) starts on the first prompt and
+docker, podman, hf-sandbox or e2b: `legion.worker.adapters.harbor`) starts on the first prompt and
 stays up; each prompt is one Pi turn in it, and prompts that arrive during a turn join the next
 one. A Trial that fails is reported and the next prompt starts a new one on the same session.
 
 ### CLI and library
 
-One package with three entry points: `flock` (CLI and library: `init`, `launch`, `update`,
-`stop`, `prompt`, `status`), `flock-controller` and `flock-worker`. `flock launch` compiles a
-Harbor spec (`flock.harbor.spec`) into a swarm spec with one type per role, packs the run's
+One package with three entry points: `legion` (CLI and library: `init`, `launch`, `update`,
+`stop`, `prompt`, `status`), `legion-controller` and `legion-worker`. `legion launch` compiles a
+Harbor spec (`legion.harbor.spec`) into a swarm spec with one type per role, packs the run's
 tools and resources folders and applies it.
 
 ### Adding a harness, a compute backend or a server starter
 
-Each is one module plus one entry in `src/flock/registry.py`; the spec loader, controller,
+Each is one module plus one entry in `src/legion/registry.py`; the spec loader, controller,
 worker and CLI read nothing else, and `tests/test_registry.py` checks every entry.
 
-- **Harness**: write `src/flock/worker/adapters/<name>.py` with a class implementing
+- **Harness**: write `src/legion/worker/adapters/<name>.py` with a class implementing
   `HarnessAdapter` (`adapters/base.py`) and a `make_adapter(workdir, name, spec)` function, and
   add a `HARNESSES` entry (its import path and the wire API preflight probes).
-- **Compute backend**: write `src/flock/controller/<name>.py` with a `JobsClient`
+- **Compute backend**: write `src/legion/controller/<name>.py` with a `JobsClient`
   (`controller/jobs.py`) and a `<name>_jobs_client(env, dep, data_dir)` function, and add a
-  `COMPUTE` entry (`compute.kind` / `FLOCK_COMPUTE` name -> that function). Every kind but
+  `COMPUTE` entry (`compute.kind` / `LEGION_COMPUTE` name -> that function). Every kind but
   `local` needs `bucket_id` and `world.url` in the spec.
-- **Server starter** (inference servers flock starts itself, like `hf_jobs`): add the block as a
-  field of `Inference`, write `src/flock/controller/<name>.py` with a `Starter`
+- **Server starter** (inference servers legion starts itself, like `hf_jobs`): add the block as a
+  field of `Inference`, write `src/legion/controller/<name>.py` with a `Starter`
   (`controller/servers.py`: start or reattach, list, check readiness, logs, cancel, set a
   job's deadline) and a
   `<name>(env)` function, and add a `SERVERS` entry (the block's key -> that function).
@@ -94,7 +94,7 @@ worker and CLI read nothing else, and `tests/test_registry.py` checks every entr
 `persist_workdir` (default true): the worker syncs each agent's workdir and Pi sessions to
 `<bucket>/<swarm>/<type>/<agent>/` while it works and once more when it leaves, and a new worker
 restores both before the agent's first turn there. File modes travel in
-`<workdir>/.flock-modes.json`, since buckets keep only bytes. When a session cannot be resumed
+`<workdir>/.legion-modes.json`, since buckets keep only bytes. When a session cannot be resumed
 the worker starts a fresh one under the same name, writes `session_restarted` and status shows
 `resumed: false`.
 
@@ -105,7 +105,7 @@ The workdir's size is restore time. Regenerable trees (`node_modules/`, `.venv/`
 restored. Above `workdir.soft_files` / `soft_mb` the agent's next prompt starts with a size
 note (at most hourly); above `max_files` / `max_mb` a `workdir_over_quota` event follows too.
 With `workdir.base: true` a restore downloads one tar plus the files changed since it instead of
-every file. Details: `flock.worker.sync`.
+every file. Details: `legion.worker.sync`.
 
 ### Worker lifetime
 
@@ -123,7 +123,7 @@ sends it after the restore.
 ## Resources
 
 A run's `resources:` are started by each worker and shared by its agents' Trials; their tools
-reach the agents through `flock-tool` inside the Trial (`flock.harbor.builtin`).
+reach the agents through `legion-tool` inside the Trial (`legion.harbor.builtin`).
 
 - `message_board`: a msgboard board (local, a Space, or a `url`), its `message_board.*` tools
   with the posting rules checked before the board is called, and its mentions as `resource`
@@ -140,7 +140,7 @@ is an ordinary agent with `parent` set and no replica slot, placed on its own ty
 cycles. Each spawnable type declares `workers: {initial, max_extra}`; `limits` caps the swarm
 (`alive`, `spawned_total`, `budget_usd`). A refusal is a 409 with a `reason`.
 
-Each agent gets `FLOCK_AGENT_TOKEN`, an HMAC of its name and a nonce under a key derived from the
+Each agent gets `LEGION_AGENT_TOKEN`, an HMAC of its name and a nonce under a key derived from the
 controller token; the controller stores only its hash. It may act on the agent, its subtree, and
 prompt its parent. The worker holds it and makes the agent's controller calls with it (the
 `spawn` resource).
@@ -157,22 +157,22 @@ loops stop and final rounds run; at the budget every agent is stopped and prompt
 ## Health
 
 The controller samples each swarm every 30 s (docs/health.md): agent and worker states,
-provider and world probes, usage, rollups and alerts, read by `flock status` and the status
+provider and world probes, usage, rollups and alerts, read by `legion status` and the status
 page.
 
 ## Checkpoint and resume
 
 The controller's SQLite and the agents' event files are its state. Where its disk does not
-survive a restart (job mode), it syncs them to `FLOCK_STATE_URL` in a bucket every 60 s and once
+survive a restart (job mode), it syncs them to `LEGION_STATE_URL` in a bucket every 60 s and once
 more on SIGTERM, and a new controller restores them before it opens the store
-(`flock.controller.state`). Agents resume from their own bucket prefix (Resume across workers).
+(`legion.controller.state`). Agents resume from their own bucket prefix (Resume across workers).
 
 ## Contracts
 
 ### Spec
 
 A swarm spec (`SwarmSpec`) names the swarm, its compute, optional billing `namespace` and `bucket_id`, its `inference:`
-block and its `types:`; `flock launch` writes it from a Harbor spec (README, docs/local.md).
+block and its `types:`; `legion launch` writes it from a Harbor spec (README, docs/local.md).
 Each type sets `harness: harbor`, its `harbor:` block (written by the compile step), its model
 (and optionally its own `inference` and its `pricing`), `replicas`, packing (`agents_per_worker` 50, `max_working_per_worker` 20), lifetime, `workdir`,
 `worker` knobs, `loop`, `spawn` and `resume_prompt`. The blocks inside the spec are `extra: forbid`
@@ -188,11 +188,11 @@ controller job's namespace to join its network group. A manually org-deployed co
 refuses a blank spec namespace if the accounts differ and asks for an explicit namespace.
 Matching-account runs keep the stored namespace empty and send no router bill-to header.
 
-`bucket_id` is `[namespace/]name`, with no URL or path prefix. `flock launch` qualifies a bare
+`bucket_id` is `[namespace/]name`, with no URL or path prefix. `legion launch` qualifies a bare
 name using the explicit namespace, else `HF_TOKEN`'s account, and creates the bucket with
 `private=True, exist_ok=True` before starting jobs. Existing visibility is retained. Only the
 qualified ID is stored and sent to workers (`BUCKET_ID`); controllers and workers never
-resolve it again. Flock still adds its checkpoint and per-agent prefixes internally. Init
+resolve it again. Legion still adds its checkpoint and per-agent prefixes internally. Init
 reports a missing bucket as one launch will create. See [billing and storage](billing.md).
 Bucket preparation also applies to local compute and the foreground `localrun` launch
 entry point. Disabling controller checkpointing does not skip an explicitly configured
@@ -201,9 +201,9 @@ bucket's initialization or its credentials check.
 ### Inference
 
 `types.<t>.model` is a Hub id (with `urls`, the name the servers serve) and one `inference` block
-(`Inference`) says where it runs: the HF router (`hf_router`, the default; flock sends
+(`Inference`) says where it runs: the HF router (`hf_router`, the default; legion sends
 `<model>:<provider>`), OpenAI-compatible servers you run (`urls`, each agent calling one by
-rendezvous hashing on its swarm and name) or vLLM servers flock starts on HF Jobs (`hf_jobs`).
+rendezvous hashing on its swarm and name) or vLLM servers legion starts on HF Jobs (`hf_jobs`).
 The swarm's block serves every type that does not set its own. For `hf_jobs` the controller
 starts one group of jobs per model before preflight (`POST /swarms/{swarm}/servers`,
 `controller/servers.py`), waits until each answers, pins their URLs into the resolved block as
@@ -213,10 +213,10 @@ goes once the deadline in its `retire` label has passed. Validation
 pins each type's block and `[input, output, cached]` price into the spec
 (`types.<t>.resolved_model`, under the block's name: `inference` or `types.<t>.inference`), and
 the apply checks the model against each endpoint's `GET /models` and pins the context window it
-is served with (`controller/inference.py`), which Pi's model config and `flock status` get. The
+is served with (`controller/inference.py`), which Pi's model config and `legion status` get. The
 block's key goes into the type's job secrets, preflight probes each model with a tool call, and
 `max_working` caps the agents of the swarm in a turn on the block, enforced at prompt admission.
-`flock update` may change a running Harbor type's block: anything but `max_working` restarts the
+`legion update` may change a running Harbor type's block: anything but `max_working` restarts the
 type's workers (they hold the key, their Trials the endpoints and allowlist). How-to and
 fields: docs/open-models.md.
 
@@ -237,7 +237,7 @@ launch (a 4xx); either pauses launching until the next apply.
 
 ### API (controller)
 
-Direct calls use `Authorization: Bearer $FLOCK_TOKEN`. Through the HF Jobs proxy,
+Direct calls use `Authorization: Bearer $LEGION_TOKEN`. Through the HF Jobs proxy,
 use the [deployment guide's authentication headers](deploy-job.md#two-urls-two-auth-paths).
 The status page and `/healthz` do not require controller authentication; a hosting
 proxy may still require its own authentication.

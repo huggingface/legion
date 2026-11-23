@@ -720,7 +720,7 @@ wheels = [
 ]
 
 [[package]]
-name = "flock"
+name = "legion"
 version = "0.0.1"
 source = { editable = "." }
 dependencies = [

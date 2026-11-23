@@ -12,18 +12,18 @@ from pathlib import Path
 
 import pytest
 
-from flock.controller.jobs import (
+from legion.controller.jobs import (
     BOOTSTRAP_IMAGE,
     WORKER_COMMAND,
     HubJobsClient,
     bootstrap_command,
 )
-from flock.controller.main import parse_labels
-from flock.models import TypeSpec
+from legion.controller.main import parse_labels
+from legion.models import TypeSpec
 
 from .conftest import HB
 
-WHEEL = "hf://buckets/ns/sh/dist/abc/flock-0.0.1-py3-none-any.whl"
+WHEEL = "hf://buckets/ns/sh/dist/abc/legion-0.0.1-py3-none-any.whl"
 
 
 def _spec(**kw) -> TypeSpec:
@@ -32,9 +32,9 @@ def _spec(**kw) -> TypeSpec:
 
 def _client(monkeypatch, image, bootstrap_env=None, wheel=WHEEL) -> HubJobsClient:
     if bootstrap_env is None:
-        monkeypatch.delenv("FLOCK_WORKER_BOOTSTRAP", raising=False)
+        monkeypatch.delenv("LEGION_WORKER_BOOTSTRAP", raising=False)
     else:
-        monkeypatch.setenv("FLOCK_WORKER_BOOTSTRAP", bootstrap_env)
+        monkeypatch.setenv("LEGION_WORKER_BOOTSTRAP", bootstrap_env)
     return HubJobsClient(token="x", image=image, wheel_url=wheel)
 
 
@@ -56,10 +56,10 @@ def fake_wheel(path: Path, requires: tuple[str, ...] = ()) -> Path:
     return path
 
 
-def test_bootstrap_installs_flock_with_the_shipped_pins(tmp_path):
-    """The bootstrap script on stubs (uv, hf from a local bucket, curl, mkdir, flock,
-    flock-worker). A worker installs flock on Python 3.12 with uv.lock's versions
-    as constraints and msgboard overridden to the wheel shipped next to flock's (never its
+def test_bootstrap_installs_legion_with_the_shipped_pins(tmp_path):
+    """The bootstrap script on stubs (uv, hf from a local bucket, curl, mkdir, legion,
+    legion-worker). A worker installs legion on Python 3.12 with uv.lock's versions
+    as constraints and msgboard overridden to the wheel shipped next to legion's (never its
     private git source) and gets the upstream git credential helper for huggingface.co."""
     stubs, log, bucket = tmp_path / "stubs", tmp_path / "calls.log", tmp_path / "bucket"
     wheels = tmp_path / "wheels"  # the script's /opt/wheels
@@ -76,14 +76,14 @@ def test_bootstrap_installs_flock_with_the_shipped_pins(tmp_path):
     for name, body in [
         ("uv", 'for a; do [ "${prev:-}" = --overrides ] && cat "$a" >> LOG; prev=$a; done'),
         ("hf", f'cp "{bucket}/${{3#hf://buckets/}}" "$4"'),
-        ("flock-worker", FILL),
-        *((name, "") for name in ("curl", "mkdir", "flock")),
+        ("legion-worker", FILL),
+        *((name, "") for name in ("curl", "mkdir", "legion")),
     ]:
         (stubs / name).write_text(f'#!/bin/sh\necho "{name} $*" >> {log}\n'
                                   + body.replace("LOG", str(log)) + "\n")
         (stubs / name).chmod(0o755)
-    env = {"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(tmp_path), "FLOCK_HARNESS": "harbor",
-           "FLOCK_WHEEL_URL": "hf://buckets/ns/sh/dist/w.whl", "HF_TOKEN": "hf_test_token"}
+    env = {"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(tmp_path), "LEGION_HARNESS": "harbor",
+           "LEGION_WHEEL_URL": "hf://buckets/ns/sh/dist/w.whl", "HF_TOKEN": "hf_test_token"}
     cmd = bootstrap_command()
     assert "{" + "hub}" not in cmd[2]  # the pin is filled in (the stubbed uv cannot tell)
     r = subprocess.run([*cmd[:2], cmd[2].replace("/opt/wheels", str(wheels))], env=env,
@@ -94,19 +94,19 @@ def test_bootstrap_installs_flock_with_the_shipped_pins(tmp_path):
                     f"{wheels}/constraints.txt --overrides {wheels}/overrides.txt")
     assert calls[i + 1] == f"msgboard @ file://{wheels}/{MSGBOARD}"  # the overrides file
     assert (wheels / "constraints.txt").read_text().startswith("harbor==0.25.0")
-    assert calls[-2:] == ["flock-worker ", "password=hf_test_token"]
+    assert calls[-2:] == ["legion-worker ", "password=hf_test_token"]
 
 
 @pytest.mark.skipif(shutil.which("uv") is None, reason="uv not installed")
 def test_the_override_replaces_msgboards_git_source(tmp_path):
-    """What the bootstrap relies on: uv's --overrides replaces flock's `msgboard @ git+`
-    requirement (pyproject's, in flock's wheel metadata) with the shipped wheel. Offline and
+    """What the bootstrap relies on: uv's --overrides replaces legion's `msgboard @ git+`
+    requirement (pyproject's, in legion's wheel metadata) with the shipped wheel. Offline and
     without the override, uv cannot resolve it."""
     deps = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())[
         "project"]["dependencies"]
     (git,) = [r for r in deps if r.startswith(("msgboard @ git+", "msgboard[hf] @ git+"))]
-    flock = fake_wheel(tmp_path / "flock-0.0.1-py3-none-any.whl", (git,))
-    (tmp_path / "req.in").write_text(f"flock @ file://{flock}\n")
+    legion = fake_wheel(tmp_path / "legion-0.0.1-py3-none-any.whl", (git,))
+    (tmp_path / "req.in").write_text(f"legion @ file://{legion}\n")
     (tmp_path / "overrides.txt").write_text(f"msgboard @ file://{fake_wheel(tmp_path / MSGBOARD)}\n")
 
     def compile_(*extra):
@@ -136,14 +136,14 @@ def test_launch_args_prebuilt_image(monkeypatch):
 
 
 def test_bootstrap_without_wheel_url_fails_fast(monkeypatch):
-    monkeypatch.delenv("FLOCK_WHEEL_URL", raising=False)
-    with pytest.raises(ValueError, match="FLOCK_WHEEL_URL"):
+    monkeypatch.delenv("LEGION_WHEEL_URL", raising=False)
+    with pytest.raises(ValueError, match="LEGION_WHEEL_URL"):
         _client(monkeypatch, image=None, wheel=None)
 
 
 def test_parse_job_labels():
-    assert parse_labels("experiment=flock-m1, team = eval") == {
-        "experiment": "flock-m1",
+    assert parse_labels("experiment=legion-m1, team = eval") == {
+        "experiment": "legion-m1",
         "team": "eval",
     }
     assert parse_labels("") == {}

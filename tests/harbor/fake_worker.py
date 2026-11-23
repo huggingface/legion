@@ -1,4 +1,4 @@
-"""Harbor faked for a `flock-worker` process: its Trials are test_adapter.py's (the real FlockPi
+"""Harbor faked for a `legion-worker` process: its Trials are test_adapter.py's (the real LegionPi
 on a fake environment), container networks are faked at their command, the task download writes
 an empty folder, and the controller's model check asks tests/fake_models.py. `fake_harbor()`
 (also the task pin) is what tests/harbor/site/sitecustomize.py installs in every tiny run
@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # `tests` importab
 
 from harbor.models.task.id import GitTaskId
 
-from flock.harbor import sources
+from legion.harbor import sources
 from tests.harbor.test_adapter import install
 
 
@@ -29,7 +29,7 @@ async def resolve(settings):
 
 
 def fake_harbor():
-    from flock.controller import inference
+    from legion.controller import inference
     from tests import fake_models
 
     install(setattr)

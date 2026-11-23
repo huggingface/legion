@@ -9,11 +9,11 @@ import threading
 import time
 from pathlib import Path
 
-from flock.models import TokenUsage, TypeSpec
-from flock.worker.adapters.base import AdapterEvent, EventQueue, ResumeError
-from flock.worker.agents import AgentRuntime
-from flock.worker.events import Outbox
-from flock.worker.sync import BucketSync
+from legion.models import TokenUsage, TypeSpec
+from legion.worker.adapters.base import AdapterEvent, EventQueue, ResumeError
+from legion.worker.agents import AgentRuntime
+from legion.worker.events import Outbox
+from legion.worker.sync import BucketSync
 
 
 def spec(**kw) -> TypeSpec:

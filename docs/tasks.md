@@ -1,8 +1,8 @@
 # Adding Harbor tasks
 
-Flock runs tasks from Hugging Face dataset repositories through Harbor. Each agent
+Legion runs tasks from Hugging Face dataset repositories through Harbor. Each agent
 gets its own task environment. A shared board or world is configured separately in
-the Flock spec.
+the Legion spec.
 
 ## Format references
 
@@ -16,7 +16,7 @@ Use the upstream documentation for the format and Hub conventions:
   the `tasks/<task_id>/` layout in a Hugging Face dataset repository.
 
 These are shared conventions; the sections below cover selecting and running a
-task with Flock. Check compatibility with Flock's pinned Harbor version when using
+task with Legion. Check compatibility with Legion's pinned Harbor version when using
 features from newer upstream documentation.
 
 ## Publish a task
@@ -57,7 +57,7 @@ paths from the publishing machine. Build and verify it with Harbor before
 publishing, including a known successful submission and an incorrect submission.
 Commit the task to the dataset and record the full commit SHA.
 
-## Select it in Flock
+## Select it in Legion
 
 Add this block to a working experiment spec:
 
@@ -113,7 +113,7 @@ or commit them in the spec.
   task environments run.
 
 Start with one agent and the smallest useful task before scaling up. Check task
-startup, a model turn, tool access, and the task's verifier output. Flock keeps a
+startup, a model turn, tool access, and the task's verifier output. Legion keeps a
 Trial alive across prompts; task completion and grading follow the task and Trial
 lifecycle, while a spec's loop controls when agents receive more prompts.
 
@@ -141,13 +141,13 @@ required: choose a fresh bare name for each independent run; it resolves under `
 account. Dataset read access to `HuggingFaceSwarms/s3-aggregation` is separate from personal
 Jobs, Space and bucket permissions. See [billing and storage](billing.md).
 The default local workers do not need a run bucket. For HF Jobs or Slurm workers, set
-`bucket_id: flock-runs`: launch qualifies it as `<your-username>/flock-runs` and creates
+`bucket_id: legion-runs`: launch qualifies it as `<your-username>/legion-runs` and creates
 the bucket private if missing. A qualified ID selects storage explicitly. Use
 `[namespace/]name`, without a bucket URL or path prefix.
 
 ```sh
 export BOARD_SPACE="s3-aggregation-$(uv run python -c 'import uuid; print(uuid.uuid4().hex[:12])')"
-uv run flock launch experiments/s3-aggregation/spec.yaml
+uv run legion launch experiments/s3-aggregation/spec.yaml
 ```
 
 Retain that value when resuming the same run. After all its workers have stopped, you may
@@ -175,7 +175,7 @@ the Git credential helper for a private task repo ([Slurm](slurm.md), "Container
 
 The example omits `namespace`, so router calls use the inference key's default personal
 billing account with no org bill-to header. Set `BUCKET_ID` to a bare name such as
-`flock-runs` (resolved under `HF_TOKEN`'s account) or a qualified `<your-username>/<name>`.
+`legion-runs` (resolved under `HF_TOKEN`'s account) or a qualified `<your-username>/<name>`.
 Launch creates a missing bucket private and retains an existing bucket's visibility.
 See [billing and storage](billing.md) for personal permissions and optional org billing.
 
@@ -183,15 +183,15 @@ See [billing and storage](billing.md) for personal permissions and optional org 
 DS=/fsx/$USER/s3-maze
 hf download HuggingFaceSwarms/s3-maze --repo-type dataset --revision 3b6c363d92626bd4d97a7ca89964fb850982d9ab --local-dir $DS
 printf 'SLURM_PARTITION=hopper-cpu\nSLURM_MAX_MEM_PER_CPU_MB=2000\nVENV=%s\nCONTAINERS_REGISTRIES_CONF=%s\n' \
-  "$PWD/.venv" "$DS/flock/registries.conf" > cluster.env
+  "$PWD/.venv" "$DS/legion/registries.conf" > cluster.env
 # secrets.env (mode 600): HF_TOKEN, HF_INFERENCE_TOKEN, BUCKET_ID
-uv run flock init $PWD/runs/maze-t01-n04 --from experiments/s3-maze --profile cluster.env --secrets secrets.env
+uv run legion init $PWD/runs/maze-t01-n04 --from experiments/s3-maze --profile cluster.env --secrets secrets.env
 echo RUN_NAME=maze-t01-n04 >> runs/maze-t01-n04/run.env
-export FLOCK_RUN_DIR=$PWD/runs/maze-t01-n04
-uv run flock launch $FLOCK_RUN_DIR/experiment
-uv run flock status maze-t01-n04            # STOPPED ON SUCCESS once an agent is out
-uv run flock stop maze-t01-n04 --release    # ends the controller, or a run nobody won
-uv run python $DS/eval/metrics.py $FLOCK_RUN_DIR
+export LEGION_RUN_DIR=$PWD/runs/maze-t01-n04
+uv run legion launch $LEGION_RUN_DIR/experiment
+uv run legion status maze-t01-n04            # STOPPED ON SUCCESS once an agent is out
+uv run legion stop maze-t01-n04 --release    # ends the controller, or a run nobody won
+uv run python $DS/eval/metrics.py $LEGION_RUN_DIR
 ```
 
 The worker copies each agent's grading, with its move log, and the board export to

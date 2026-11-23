@@ -1,4 +1,4 @@
-"""`flock status` and `flock.status`: verdict, model servers per server and dead ones, Slurm
+"""`legion status` and `legion.status`: verdict, model servers per server and dead ones, Slurm
 pending reasons, filters and one `idle`, normalised events, the unreachable line."""
 
 from __future__ import annotations
@@ -13,13 +13,13 @@ from datetime import UTC, datetime, timedelta
 import httpx
 from typer.testing import CliRunner
 
-from flock import cli
-from flock import status as fs
-from flock.client import Client
-from flock.controller.health import Health
-from flock.controller.reconcile import record_heartbeat, swarm_stream
-from flock.controller.slurm import SlurmJobsClient
-from flock.models import AgentHeartbeat, SwarmSpec, WorkerHeartbeat
+from legion import cli
+from legion import status as fs
+from legion.client import Client
+from legion.controller.health import Health
+from legion.controller.reconcile import record_heartbeat, swarm_stream
+from legion.controller.slurm import SlurmJobsClient
+from legion.models import AgentHeartbeat, SwarmSpec, WorkerHeartbeat
 
 from .conftest import make_spec, wire
 from .test_api import W0, apply, hb_body
@@ -222,21 +222,21 @@ def test_stuck_agent_writes_one_agent_stuck_event(store, jobs, clock, tick):
 
 
 def test_unreachable_names_the_host_file(tmp_path, monkeypatch):
-    monkeypatch.setattr("flock.client._sleep", lambda _: None)
+    monkeypatch.setattr("legion.client._sleep", lambda _: None)
     run = tmp_path / "run"
     (run / "hosts").mkdir(parents=True)
     host = run / "hosts" / "controller.host"
     host.write_text("node9:7999\n")
     os.utime(host, (1_790_000_000, 1_790_000_000))
-    monkeypatch.setattr("flock.client.connect", lambda *_: httpx.Client(
+    monkeypatch.setattr("legion.client.connect", lambda *_: httpx.Client(
         base_url="http://node9:7999", transport=httpx.MockTransport(_refuse)))
     r = runner.invoke(cli.app, ["--run", str(run), "status", "demo"])
     assert r.exit_code == 1 and r.output.strip() == (
         "controller unreachable at http://node9:7999; hosts/controller.host says node9:7999, "
         "written at 2026-09-21 14:13:20Z")
     assert "Traceback" not in r.output
-    monkeypatch.delenv("FLOCK_RUN_DIR", raising=False)
-    r = runner.invoke(cli.app, ["status", "demo"], env={"FLOCK_URL": "http://node9:7999"})
+    monkeypatch.delenv("LEGION_RUN_DIR", raising=False)
+    r = runner.invoke(cli.app, ["status", "demo"], env={"LEGION_URL": "http://node9:7999"})
     assert r.output.strip() == "controller unreachable at http://node9:7999"
 
 
@@ -257,7 +257,7 @@ def test_status_json_carries_the_verdict(monkeypatch):
 
 
 def test_world_alerts_wait_for_two_misses_and_pending_is_degraded():
-    from flock.controller.health import alerts
+    from legion.controller.health import alerts
 
     def kinds(**w):
         body = {"world": {"up": False, **w}, "workers": {}, "types": {}, "tools": {}}
@@ -295,7 +295,7 @@ def test_events_of_a_removed_agent(monkeypatch):
 
     def call(_, method, path, **kw):
         if path == "/agents/w-0001":
-            from flock.client import ClientError
+            from legion.client import ClientError
             raise ClientError("error 404", 404, "{}")
         return {"events": evs, "next": 1}
 

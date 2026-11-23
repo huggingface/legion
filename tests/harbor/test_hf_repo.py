@@ -10,13 +10,13 @@ import pytest
 @pytest.fixture
 def tool(monkeypatch):
     spec = importlib.util.spec_from_file_location(
-        "repo_tool", Path(__file__).parents[2] / "src/flock/harbor/builtin/tools/hf_repo.py"
+        "repo_tool", Path(__file__).parents[2] / "src/legion/harbor/builtin/tools/hf_repo.py"
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    monkeypatch.setenv("FLOCK_HF_REPO", "example/collaboration")
-    monkeypatch.setenv("FLOCK_HF_REPO_AGENT", "agent-001")
-    monkeypatch.setenv("FLOCK_HF_REPO_TOKEN", "secret-test-token")
+    monkeypatch.setenv("LEGION_HF_REPO", "example/collaboration")
+    monkeypatch.setenv("LEGION_HF_REPO_AGENT", "agent-001")
+    monkeypatch.setenv("LEGION_HF_REPO_TOKEN", "secret-test-token")
     return module
 
 
@@ -102,9 +102,9 @@ async def test_shared_resource_across_workers_and_restart(tmp_path, monkeypatch,
     import httpx
     from harbor.models.trial.config import TrialConfig
 
-    from flock.harbor.config import BUILTIN
-    from flock.harbor.resources import Resources
-    from flock.harbor.spec import Spec, resource_secrets
+    from legion.harbor.config import BUILTIN
+    from legion.harbor.resources import Resources
+    from legion.harbor.spec import Spec, resource_secrets
 
     monkeypatch.setenv("TEAM_REPO_TOKEN", "test-resource-credential")
     options = {"hf_repo": {"repo_id": "example/team", "token_env": "TEAM_REPO_TOKEN"}}
@@ -126,9 +126,9 @@ async def test_shared_resource_across_workers_and_restart(tmp_path, monkeypatch,
             await resources.add(["amber-otter"])
             config = TrialConfig(task={"path": tmp_path / "task"})
             resources.bind("amber-otter", config)
-            assert config.agent.env["FLOCK_HF_REPO"] == "example/team"
-            assert config.agent.env["FLOCK_HF_REPO_AGENT"] == "amber-otter"
-            assert config.agent.env["FLOCK_HF_REPO_TOKEN"] == "test-resource-credential"
+            assert config.agent.env["LEGION_HF_REPO"] == "example/team"
+            assert config.agent.env["LEGION_HF_REPO_AGENT"] == "amber-otter"
+            assert config.agent.env["LEGION_HF_REPO_TOKEN"] == "test-resource-credential"
             assert "huggingface.co" in config.agent.extra_allowed_hosts
             await resources.remove(["amber-otter"])
         finally:
@@ -153,8 +153,8 @@ def test_repository_bundle_runs_without_host_site_packages(tmp_path):
     import sys
     import tarfile
 
-    from flock.harbor.config import BUILTIN
-    from flock.harbor.tools.bundle import build_tool_bundle
+    from legion.harbor.config import BUILTIN
+    from legion.harbor.tools.bundle import build_tool_bundle
 
     bundle = build_tool_bundle(BUILTIN / "tools", ["hf_repo.*", "message_board.*"],
                                tmp_path / "tools.tar.gz")
@@ -167,8 +167,8 @@ def test_repository_bundle_runs_without_host_site_packages(tmp_path):
             assert not any(n.endswith("/WHEEL") for n in metadata)
         archive.extractall(tmp_path / "bundle", filter="data")
     result = subprocess.run(
-        [sys.executable, "-S", str(tmp_path / "bundle/bin/flock-tool"), "--list"],
-        env={**os.environ, "FLOCK_TOOLS_MANIFEST": str(tmp_path / "bundle/manifest.json")},
+        [sys.executable, "-S", str(tmp_path / "bundle/bin/legion-tool"), "--list"],
+        env={**os.environ, "LEGION_TOOLS_MANIFEST": str(tmp_path / "bundle/manifest.json")},
         capture_output=True, text=True, check=False, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     tools = json.loads(result.stdout)
@@ -196,8 +196,8 @@ def test_git_errors_include_redacted_stderr(tool, checkout):
 
 
 def test_infrastructure_credentials_rejected(tmp_path, monkeypatch):
-    from flock.harbor.builtin.resources.hf_repo import Resource
-    from flock.harbor.spec import Spec, resource_secrets
+    from legion.harbor.builtin.resources.hf_repo import Resource
+    from legion.harbor.spec import Spec, resource_secrets
 
     spec = Spec.model_validate({
         'name': 'team', 'model': 'test-model',

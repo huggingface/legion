@@ -1,4 +1,4 @@
-"""flock's additions to the board resource against tests/fake_msgboard.py (a board under a
+"""legion's additions to the board resource against tests/fake_msgboard.py (a board under a
 path, as the multi-board Space serves them): the kickoff, the activity poller's per-agent
 events, and the rule proxy (rules, channel caps, routes, headers, size, calls in flight)."""
 
@@ -12,12 +12,12 @@ import httpx
 import pytest
 from msgboard.client import BoardError, Client
 
-import flock.harbor
-from flock.harbor.tools.runner import load_module
+import legion.harbor
+from legion.harbor.tools.runner import load_module
 
 from .. import fake_msgboard
 
-TOOLS_DIR = Path(flock.harbor.__file__).with_name("builtin") / "tools"
+TOOLS_DIR = Path(legion.harbor.__file__).with_name("builtin") / "tools"
 board_tools = load_module(TOOLS_DIR / "message_board.py")
 BoardResource = load_module(TOOLS_DIR.parent / "resources" / "message_board.py").Resource
 
@@ -32,7 +32,7 @@ def fake(monkeypatch):
 
 
 async def started(fake, state_dir, **options):
-    resource = BoardResource({"url": fake.url, "channels": ["flock-test"], **options},
+    resource = BoardResource({"url": fake.url, "channels": ["legion-test"], **options},
                              state_dir=state_dir, agents=[], secrets=[])
     await resource.start()
     return resource
@@ -120,15 +120,15 @@ async def test_rule_proxy_checks_posts_and_opens_only_the_board_tools_routes(
         env, (mount,) = bound["env"], bound["mounts"]
         assert env["MSGBOARD_TOKEN"] == "via-proxy" and bound["allowed_hosts"] == []
         assert env["MSGBOARD_URL"] == "http://board"  # the board's path is the proxy's to add
-        assert mount["target"] == env["MSGBOARD_SOCKET"] == "/run/flock-board.sock"
+        assert mount["target"] == env["MSGBOARD_SOCKET"] == "/run/legion-board.sock"
         for key, value in {**env, "MSGBOARD_SOCKET": mount["source"]}.items():
             monkeypatch.setenv(key, value)
         with pytest.raises(BoardError, match="refused: text is 21 chars; max_len is 20"):
-            board_tools.post("x" * 21, "flock-test")
+            board_tools.post("x" * 21, "legion-test")
         assert fake.msgs == []
-        assert board_tools.post("short", "flock-test")["sender"]["external_id"] == "x-0"
+        assert board_tools.post("short", "legion-test")["sender"]["external_id"] == "x-0"
         with pytest.raises(BoardError, match="refused: wait"):
-            board_tools.post("again", "flock-test")
+            board_tools.post("again", "legion-test")
         assert len(fake.msgs) == 1
         board_tools.create_channel("plans")  # x-0's one channel: 2 on the board now
         with pytest.raises(BoardError, match="refused: you reached your channel creation limit"):
@@ -142,7 +142,7 @@ async def test_rule_proxy_checks_posts_and_opens_only_the_board_tools_routes(
             assert calls_in_flight_are_capped(
                 mount["source"], lambda: x1.get("/v1/me").raise_for_status(),
                 b"GET /v1/me HTTP/1.1\r\n\r\n") == 200
-        assert sorted(fake.channels.values()) == ["flock-test", "plans"]
+        assert sorted(fake.channels.values()) == ["legion-test", "plans"]
 
         spoofed = {"Authorization": f"Bearer {fake.operator}", "X-Msgboard-Token": fake.operator}
         transport = httpx.HTTPTransport(uds=mount["source"])
