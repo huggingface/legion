@@ -13,6 +13,21 @@ concurrency:  # a new push to a PR cancels its older run; main runs every push
   cancel-in-progress: true
 
 jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.12"
+      - name: ruff check
+        run: |  # only ruff, at the version uv.lock pins; the project is not installed
+          ruff=$(uv export --frozen --all-extras --no-hashes --no-emit-project | grep '^ruff==')
+          uvx --from "$ruff" ruff check
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -24,14 +39,5 @@ jobs:
         with:
           python-version: "3.12"
           enable-cache: true
-      - name: Install
-        env:
-          # read-only access to the private msgboard dependency (pyproject.toml)
-          MSGBOARD_TOKEN: ${{ secrets.MSGBOARD_TOKEN }}
-        run: |
-          [ -n "$MSGBOARD_TOKEN" ] || { echo "::error::the MSGBOARD_TOKEN secret is not set"; exit 1; }
-          git config --global credential.https://github.com.helper \
-            '!f() { echo username=x-access-token; echo "password=$MSGBOARD_TOKEN"; }; f'
-          uv sync --all-extras --locked
-      - run: uv run --no-sync ruff check
+      - run: uv sync --all-extras --locked
       - run: uv run --no-sync pytest -q -n auto --durations=20
