@@ -108,9 +108,9 @@ async def test_every_exit_path_closes_the_trials_in_parallel(tmp_path, path):
     ctrl, order, adapters, closing = FakeController(), [], {}, {"now": 0, "peak": 0}
     sync = RecordingSync(MemoryStore(), log=order)
     names = ["researcher-0001", "researcher-0002"]
+    ts = spec(**HARBOR, worker={"sync_interval_s": 60})  # only the exit path's sync pushes
     ctrl.batches = [
-        [AssignCommand(agent=n, type="researcher", spec=spec(**HARBOR), restore=False)
-         for n in names],
+        [AssignCommand(agent=n, type="researcher", spec=ts, restore=False) for n in names],
         [PromptCommand(agent=n, prompt_id=f"p-{n}", text="go") for n in names],
     ]
     worker, _ = make_worker(tmp_path, ctrl, sync=sync)
