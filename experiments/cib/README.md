@@ -20,7 +20,8 @@ uv run --locked --with '../cib-harbor/adapter[hub]' collab-intel-harbor-run \
   --config experiments/cib/config.yaml
 ```
 
-This benchmark uses the dataset's launcher with Legion's native Harbor runner.
+The recipe pins a Legion-compatible revision of the dataset. This benchmark uses the dataset's launcher
+with Legion's native Harbor runner.
 Its native config has no Legion `namespace` field: model billing is configured at the
 benchmark's Gemini gateway, independently of HF Jobs and Inference Providers.
 Keep one evaluated agent; the task supplies its teammates. The benchmark launcher configures

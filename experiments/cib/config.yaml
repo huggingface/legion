@@ -8,7 +8,7 @@ inference:
   reasoning_effort: low
 task:
   repo: https://huggingface.co/datasets/HuggingFaceSwarms/collaborative-intelligence-benchmark
-  revision: 61bfd4fe1749264c291751e6dc02540398eb3e4d
+  revision: 2404577cc0b03402a86b7195ac62500664f3a75e
   selector: ci-sharing-h2-r-choosing-the-safe-field-station-solo-s0
 agents:
   count: 1
