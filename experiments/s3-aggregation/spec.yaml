@@ -14,7 +14,7 @@ task:
     - ${TEAM:-agg-p01-n04}-s02
     - ${TEAM:-agg-p01-n04}-s03
     - ${TEAM:-agg-p01-n04}-s04
-  revision: 37ffff15d9ae9bb56b3843ca196a1e4a35155fae
+  revision: bc8474f012ef8270fde97e93a828c929e867ff3d
 agents:
   count: ${N:-4}                              # TEAM's size: one selector per agent
 resources:

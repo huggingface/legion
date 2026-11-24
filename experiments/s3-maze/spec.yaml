@@ -18,7 +18,7 @@ inference:
 task:
   repo: https://huggingface.co/datasets/HuggingFaceSwarms/s3-maze
   selector: ${TREE:-maze-t01}                 # maze-t01 .. maze-t32: one task per tree
-  revision: 3b6c363d92626bd4d97a7ca89964fb850982d9ab
+  revision: 3421ea2d46e8963e59cf3690da6ea47739eefb2f
 agents:
   count: ${N:-4}
 stop_on_success: true                         # the first agent out ends the run
