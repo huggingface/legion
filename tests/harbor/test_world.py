@@ -102,15 +102,15 @@ def invoke(directory, name, arguments, env):
     return result.returncode, json.loads(result.stdout)
 
 
-async def test_resource_reports_old_manifest_keys(served, tmp_path, monkeypatch):
+async def test_resource_reports_invalid_manifest(served, tmp_path, monkeypatch):
     monkeypatch.setenv("LEGION_WORLD_TOKEN", SECRET)
     manifest = served.manifest()
-    manifest["tools"][0]["x-flock-timeout_s"] = 5
+    manifest["tools"][0]["x-legion-timeout_s"] = 0
     monkeypatch.setattr(served, "manifest", lambda: manifest)
     resource = WorldResource({"url": served.url}, state_dir=tmp_path, agents=["agent-001"],
                              secrets=[])
     try:
-        with pytest.raises(ValueError, match=r"invalid world manifest: .*x-flock-timeout_s.*renamed to x-legion"):
+        with pytest.raises(ValueError, match=r"invalid world manifest: .*x-legion-timeout_s.*greater than 0"):
             await resource.start()
     finally:
         await resource.stop()
