@@ -1,5 +1,7 @@
 # Legion
 
+> My name is Legion, for we are many.
+
 Run collaborating teams of agents on Harbor tasks. Each agent works in its own
 container, with tools for sharing findings on a message board or working with
 shared services. Legion launches the agents, keeps their sessions, and reports
