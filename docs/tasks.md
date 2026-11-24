@@ -183,7 +183,7 @@ See [billing and storage](billing.md) for personal permissions and optional org 
 DS=/fsx/$USER/s3-maze
 hf download HuggingFaceSwarms/s3-maze --repo-type dataset --revision 3b6c363d92626bd4d97a7ca89964fb850982d9ab --local-dir $DS
 printf 'SLURM_PARTITION=hopper-cpu\nSLURM_MAX_MEM_PER_CPU_MB=2000\nVENV=%s\nCONTAINERS_REGISTRIES_CONF=%s\n' \
-  "$PWD/.venv" "$DS/legion/registries.conf" > cluster.env
+  "$PWD/.venv" "$DS/flock/registries.conf" > cluster.env
 # secrets.env (mode 600): HF_TOKEN, HF_INFERENCE_TOKEN, BUCKET_ID
 uv run legion init $PWD/runs/maze-t01-n04 --from experiments/s3-maze --profile cluster.env --secrets secrets.env
 echo RUN_NAME=maze-t01-n04 >> runs/maze-t01-n04/run.env

@@ -30,7 +30,7 @@ pinned: false
 ---
 
 legion controller ($(git -C "$ROOT" rev-parse --short HEAD)). Source:
-https://github.com/huggingface/flock. The API needs the swarm bearer token;
+https://github.com/huggingface/legion. The API needs the swarm bearer token;
 \`/\` (status table) and \`/healthz\` are open.
 MD
 python3 - "$SPACE" "$STAGE" "$WHEEL_URL" "${JOB_LABELS:-experiment=legion-m1}" <<'PY'

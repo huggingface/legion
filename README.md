@@ -20,8 +20,8 @@ as Python functions. Pi is currently the supported agent harness.
 You need Python 3.12+, [uv](https://docs.astral.sh/uv/), and Git:
 
 ```sh
-git clone https://github.com/huggingface/flock
-cd flock
+git clone https://github.com/huggingface/legion
+cd legion
 uv sync
 ```
 

@@ -20,7 +20,7 @@ at launch on every backend, including local compute; it requires HF bucket write
 Install (Python 3.12+; Harbor comes with legion):
 
 ```sh
-git clone https://github.com/huggingface/flock && cd flock
+git clone https://github.com/huggingface/legion && cd legion
 uv sync
 ```
 
