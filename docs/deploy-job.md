@@ -20,7 +20,7 @@ group, so worker traffic never crosses an edge or a proxy.
 │     7860  full API      7861  `/` and `/healthz` only            │
 │        ▲                                                         │
 │        │ http://${HF_NETWORK_GROUP_PREFIX}controller:7860        │
-│  worker jobs (cpu-basic) ... and their agents' `legion` CLI       │
+│  worker jobs (cpu-basic) ... and their agents' `legion` CLI      │
 └──────────────────────────────────────────────────────────────────┘
    GPU / model jobs stay outside the group, reached through their own proxy URL.
 ```

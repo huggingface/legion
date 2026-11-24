@@ -24,7 +24,7 @@ legion init $PWD/runs/demo --from my-experiment --profile my-cluster.env --secre
 #   run.env (mode 600)  every ${VAR} the spec reads (commented: the spec's default),
 #                       the secrets it names, per-run LEGION_TOKEN and LEGION_WORLD_TOKEN
 $EDITOR runs/demo/run.env              # fill what the checks report; rerun `legion init runs/demo`
-export LEGION_RUN_DIR=$PWD/runs/demo    # or `legion --run runs/demo ...` on each command
+export LEGION_RUN_DIR=$PWD/runs/demo     # or `legion --run runs/demo ...` on each command
 legion launch runs/demo/experiment      # sbatch the world and the controller, wait, create
 legion status demo
 legion stop demo --release              # drain, checkpoint, stop the world, cancel both jobs
@@ -91,11 +91,11 @@ SLURM_PARTITION=cpu                      # sbatch -p and the specs' ${SLURM_PART
 WORKER_CPUS=4                            # the specs' compute.cpus / compute.mem
 WORKER_MEM=7G
 SLURM_MAX_MEM_PER_CPU_MB=2000            # the partition's MaxMemPerCPU: more silently raises the CPU count; unset: not checked
-LEGION_SLURM_MAX_CPUS=32                  # the largest job a node runs (spec max_cpus/max_mem); unset: not checked
+LEGION_SLURM_MAX_CPUS=32                 # the largest job a node runs (spec max_cpus/max_mem); unset: not checked
 LEGION_SLURM_MAX_MEM=60G
-VENV=/shared/legion/venv                  # the job scripts: bin/legion, legion-controller, legion-worker, python
-REPO=/shared/legion/repo                  # optional: a legion checkout, mounted in the workers' container
-SECRETS_FILE=/shared/legion/secrets.env   # optional, mode 600, sourced by every job before run.env
+VENV=/shared/legion/venv                 # the job scripts: bin/legion, legion-controller, legion-worker, python
+REPO=/shared/legion/repo                 # optional: a legion checkout, mounted in the workers' container
+SECRETS_FILE=/shared/legion/secrets.env  # optional, mode 600, sourced by every job before run.env
 CONTAINER_IMAGE=/shared/legion/images/worker.sqsh   # optional: Enroot/Pyxis image for the workers
 CONTAINER_MOUNTS=/shared/uv/python       # comma-separated, read-only at the same path, besides VENV, REPO and the run's slurm/
 ```

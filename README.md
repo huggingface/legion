@@ -23,8 +23,7 @@ cd flock
 uv sync
 ```
 
-Use `uv run legion` for the commands below. A bare `legion` may invoke your system's
-file-locking utility instead.
+Use `uv run legion` for the commands below.
 
 Docker with Compose or Podman is needed for local task containers. The mini-swarm
 example below uses Hugging Face Sandboxes instead, so it does not need Docker.

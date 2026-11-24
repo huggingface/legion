@@ -54,7 +54,7 @@ def write_spec(tmp_path: Path, raw: dict) -> Path:
 # --------------------------------------------------------------------------- apply + controller
 
 
-def test_apply_uploads_the_folder_and_pins_its_version(tmp_path, monkeypatch, app, store):
+def test_apply_uploads_the_folder_and_pins_its_version(tmp_path, monkeypatch, app, store, clock):
     wire(monkeypatch, app)
     folder(tmp_path)
     f = write_spec(tmp_path, raw_spec(tools=["add"]))
@@ -73,11 +73,12 @@ def test_apply_uploads_the_folder_and_pins_its_version(tmp_path, monkeypatch, ap
     f = write_spec(tmp_path, raw_spec(tools="all"))
     r = runner.invoke(cli.app, ["launch", str(f)])
     assert r.exit_code == 1 and "run `legion update` first" in r.output
+    clock.advance(1)
     r = runner.invoke(cli.app, ["update", str(f)])
     assert r.exit_code == 0, r.output
     v2 = store.get_swarm("demo")["spec"].tools_version
     assert v2 != v1 and store.get_tool_bundle("demo", v2)["tools"] == ["add", "mul"]
-    assert sorted(b["version"] for b in store.list_tool_bundles("demo")) == sorted([v1, v2])
+    assert [b["version"] for b in store.list_tool_bundles("demo")] == [v2, v1]
 
 
 def test_apply_refuses_unknown_tools_and_bad_modules(tmp_path, monkeypatch, app, store):

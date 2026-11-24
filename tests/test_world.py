@@ -156,6 +156,7 @@ def test_manifest_validation():
     ok = {"world_api": "v1", "name": "w", "version": "1", "tools": [{"name": "a"}]}
     assert WorldManifest.model_validate({**ok, "extra": 1}).tools[0].parameters == {
         "type": "object", "properties": {}}
+    assert WorldManifest.model_validate({**ok, "tools": [{"name": "a", 42: "ignored"}]}).names() == ["a"]
     for bad, msg in [({"world_api": "v2"}, "not supported"), ({"name": "Bad Name"}, "must match"),
                      ({"tools": [{"name": "a"}, {"name": "a"}]}, "listed twice"),
                      ({"tools": [{"name": "a", "parameters": {"type": "array"}}]}, "type object"),

@@ -82,7 +82,7 @@ class WorldTool(BaseModel):
     @classmethod
     def _old_keys(cls, v: Any) -> Any:
         # the keys' former prefix: ignored as unknown otherwise, and the upload/timeout silently off
-        old = sorted(k for k in v if k.startswith("x-flock-")) if isinstance(v, dict) else []
+        old = sorted(k for k in v if isinstance(k, str) and k.startswith("x-flock-")) if isinstance(v, dict) else []
         if old:
             raise ValueError(f"{', '.join(old)}: renamed to x-legion-*")
         return v

@@ -25,7 +25,13 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from legion.harbor.results import write_json
-from legion.world.protocol import AGENT_HEADER, TOKEN_HEADER, WorldManifest, agent_token
+from legion.world.protocol import (
+    AGENT_HEADER,
+    TOKEN_HEADER,
+    WorldManifest,
+    agent_token,
+    manifest_error,
+)
 from legion.world.workspace import MAX_BYTES
 
 SOCKET = "/run/legion-world.sock"
@@ -153,7 +159,10 @@ class Resource:
             await asyncio.sleep(1)
         r = await self.client.get("/manifest")
         r.raise_for_status()
-        manifest = WorldManifest.model_validate(r.json())
+        try:
+            manifest = WorldManifest.model_validate(r.json())
+        except ValueError as e:
+            raise ValueError(f"invalid world manifest: {manifest_error(e)} ({self.url})") from None
         self.metadata = {
             "url": self.url,
             "transport": self.options.transport,
