@@ -25,13 +25,13 @@ SEQUENCES = [("SIGUSR1", "SIGUSR1"), ("SIGUSR1", "SIGTERM"), ("SIGTERM",)]
 # a single SIGTERM: test_controller_job.py::test_sigterm_stops_loops_then_pushes_and_logs_ok
 @pytest.mark.parametrize("signals", SEQUENCES[:2])
 async def test_controller_stops_once(tmp_path, monkeypatch, caplog, signals):
-    import flock.controller.main as main_mod
+    import legion.controller.main as main_mod
 
     caplog.set_level(logging.INFO)
     bucket = FakeBucket(tmp_path / "bucket")
     monkeypatch.setattr(main_mod, "state_sync_from_env", lambda env, d: StateSync(bucket, d))
     port = _free_port()
-    b = _built(tmp_path, PORT=str(port), FLOCK_STATUS_PORT="0", FLOCK_STATE_URL="hf://x/y/z")
+    b = _built(tmp_path, PORT=str(port), LEGION_STATUS_PORT="0", LEGION_STATE_URL="hf://x/y/z")
     task = asyncio.create_task(main_mod.serve(b, host="127.0.0.1"))
     async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as c:
         for _ in range(100):
@@ -56,10 +56,10 @@ def test_world_serve_stops_once(tmp_path, signals):
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
-    env = {**{k: v for k, v in os.environ.items() if not k.startswith("FLOCK_")},
-           "HOME": str(tmp_path / "home"), "FLOCK_WORLD_TOKEN": "w0rld-t0ken",
+    env = {**{k: v for k, v in os.environ.items() if not k.startswith("LEGION_")},
+           "HOME": str(tmp_path / "home"), "LEGION_WORLD_TOKEN": "w0rld-t0ken",
            "TASKBOARD_DB": str(tmp_path / "taskboard.db")}
-    proc = subprocess.Popen([sys.executable, "-m", "flock.world", "serve",
+    proc = subprocess.Popen([sys.executable, "-m", "legion.world", "serve",
                              "taskboard:TaskBoard", "--port", str(port)],
                             cwd=TASKBOARD, env=env, text=True,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)

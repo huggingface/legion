@@ -1,7 +1,7 @@
 # A swarm in ten lanes builds a Python chatbot through pull requests, on HF Jobs: each agent a
 # dedicated hf-sandbox Trial of the task pybot-agent. The shared world (the PR tools) and a board
 # are resources, reached over HTTP through the world.* and message_board.* tools. What it needs,
-# cost and how to launch: README.md. `flock init` writes every ${VAR} below into run.env.
+# cost and how to launch: README.md. `legion init` writes every ${VAR} below into run.env.
 name: ${RUN_NAME:-pybot-1}
 bucket_id: ${BUCKET_ID}                              # [namespace/]name; a bare name uses HF_TOKEN's account
 compute: hf-jobs
@@ -40,7 +40,7 @@ resources:
       max_channels: 40                        # general, 10 lanes and the teams' channels
   world:
     url: '${WORLD_URL}'                       # the world job's public URL
-    token_env: PYBOT_WORLD_TOKEN              # = the world's FLOCK_WORLD_TOKEN; one world per run,
+    token_env: PYBOT_WORLD_TOKEN              # = the world's LEGION_WORLD_TOKEN; one world per run,
                                               # a new secret each run (same secret + name = same agent)
     transport: http                           # no mounts on hf-sandbox: each agent's own token
 tools:

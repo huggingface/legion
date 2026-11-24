@@ -1,5 +1,5 @@
 """`loop:` in the spec (docs/loop.md): validation, the `while` alias on the wire, prompt files
-inlined by `flock launch`, and world-backed settings accepted by the model but refused at apply."""
+inlined by `legion launch`, and world-backed settings accepted by the model but refused at apply."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
-from flock import cli
-from flock.models import LoopSpec, SwarmSpec, agent_cap, load_spec_yaml, loop_refusals
+from legion import cli
+from legion.models import LoopSpec, SwarmSpec, agent_cap, load_spec_yaml, loop_refusals
 
 from .conftest import TOKEN, make_spec, wire
 
@@ -68,12 +68,12 @@ def test_controller_refuses_what_it_cannot_run(app):
     s = spec_with({"prompt": "x", "on": ["world.event:claim"]})
     r = c.put("/swarms/demo", json=s.model_dump(mode="json"))
     assert r.status_code == 400 and "needs a world (not in this version)" in r.text
-    s = spec_with({"prompt_file": "round.md"})  # sent without `flock launch`'s inlining
+    s = spec_with({"prompt_file": "round.md"})  # sent without `legion launch`'s inlining
     r = c.put("/swarms/demo", json=s.model_dump(mode="json"))
     assert r.status_code == 400 and "not inlined" in r.text
 
 
-def test_flock_apply_inlines_prompt_files_and_refuses_world_settings(tmp_path, monkeypatch, app, store):
+def test_legion_apply_inlines_prompt_files_and_refuses_world_settings(tmp_path, monkeypatch, app, store):
     wire(monkeypatch, app)
     (tmp_path / "prompts").mkdir()
     (tmp_path / "prompts" / "round.md").write_text("Round {round} ({why}).\n")
@@ -103,9 +103,9 @@ def test_flock_apply_inlines_prompt_files_and_refuses_world_settings(tmp_path, m
 
 
 def test_local_run_checks_loops_like_apply(tmp_path, monkeypatch):
-    """The local run (flock.controller.localrun) runs the same CLI loop checks as `flock launch` (`_check_loops`): the `on:`
+    """The local run (legion.controller.localrun) runs the same CLI loop checks as `legion launch` (`_check_loops`): the `on:`
     warning, and refusals on the CLI before anything starts."""
-    from flock.controller import localrun
+    from legion.controller import localrun
 
     started: list = []
 
@@ -150,7 +150,7 @@ def test_wake_defaults():
 def test_until_takes_a_duration_or_a_clock_time():
     from datetime import UTC, datetime
 
-    from flock.models import until_deadline
+    from legion.models import until_deadline
     t = datetime(2026, 10, 28, 20, tzinfo=UTC).timestamp()
     assert until_deadline("2h", 1000.0) == 8200.0
     for v in ("2026-10-28T20:00Z", "2026-10-28T20:00", "2026-10-28T22:00+02:00"):
@@ -166,7 +166,7 @@ def test_until_accepts_unquoted_yaml_times():
 
     import yaml
 
-    from flock.models import until_deadline
+    from legion.models import until_deadline
     for text, t in (("2026-10-28T20:00:00Z", datetime(2026, 10, 28, 20, tzinfo=UTC)),
                     ("2026-10-28", datetime(2026, 10, 28, tzinfo=UTC))):
         w = yaml.safe_load(f"prompt: x\nwhile: {{until: {text}}}\n")

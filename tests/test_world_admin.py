@@ -9,12 +9,12 @@ import pytest
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from flock.controller.api import create_app as controller_app
-from flock.models import SwarmSpec
-from flock.world import Admin, World, server, tool
-from flock.world.__main__ import world_app
-from flock.world.host import derived_token, world_admin_token
-from flock.world.server import create_app
+from legion.controller.api import create_app as controller_app
+from legion.models import SwarmSpec
+from legion.world import Admin, World, server, tool
+from legion.world.__main__ import world_app
+from legion.world.host import derived_token, world_admin_token
+from legion.world.server import create_app
 
 from .conftest import FAKE_INFERENCE, HB, TOKEN, wire
 
@@ -25,8 +25,8 @@ ADMIN = {"X-World-Token": ADMIN_SECRET}
 
 @pytest.fixture(autouse=True)
 def admin_secret(monkeypatch):
-    monkeypatch.setenv("FLOCK_WORLD_ADMIN_TOKEN", ADMIN_SECRET)
-H = {"X-World-Token": SECRET, "X-Flock-Agent": "dev-0001"}
+    monkeypatch.setenv("LEGION_WORLD_ADMIN_TOKEN", ADMIN_SECRET)
+H = {"X-World-Token": SECRET, "X-Legion-Agent": "dev-0001"}
 
 
 class Knobbed(World):
@@ -61,7 +61,7 @@ def test_parked_until_the_world_builds(monkeypatch):
         if len(tries) < 3 or not gate:  # raises at least twice, then until the test opens it
             raise RuntimeError("restore failed: token s3cr3t-value-123\nsecond line")
         w = Knobbed.__new__(Knobbed)
-        w.__dict__["_flock_admin"] = admin
+        w.__dict__["_legion_admin"] = admin
         w.__init__()
         return w
 
@@ -89,7 +89,7 @@ def test_parked_until_the_world_builds(monkeypatch):
 
 def test_pause_while_parked_carries_over(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "PARK_FIRST_S", 0.05)
-    monkeypatch.setenv("FLOCK_WORLD_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("LEGION_WORLD_STATE_DIR", str(tmp_path))
     gate = []
 
     def build(admin: Admin) -> World:
@@ -97,7 +97,7 @@ def test_pause_while_parked_carries_over(monkeypatch, tmp_path):
             raise RuntimeError("not yet")
         w = Knobbed.__new__(Knobbed)
         admin.attach(tmp_path)
-        w.__dict__["_flock_admin"] = admin
+        w.__dict__["_legion_admin"] = admin
         w.__init__()
         return w
 
@@ -121,7 +121,7 @@ def test_healthz_needs_no_token_and_admin_needs_the_admin_secret():
 
 
 def test_admin_is_403_without_an_admin_secret(monkeypatch):
-    monkeypatch.delenv("FLOCK_WORLD_ADMIN_TOKEN")
+    monkeypatch.delenv("LEGION_WORLD_ADMIN_TOKEN")
     for token in (SECRET, None):
         c = TestClient(create_app(Knobbed(), token))
         for h in (ADMIN, {"X-World-Token": SECRET}, {}):
@@ -139,7 +139,7 @@ def test_admin_bodies_are_capped():
 
 
 def test_a_failing_on_change_rolls_the_whole_patch_back(monkeypatch, tmp_path):
-    monkeypatch.setenv("FLOCK_WORLD_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("LEGION_WORLD_STATE_DIR", str(tmp_path))
     w = Knobbed()
     seen = []
     w.admin.knobs["save.interval_s"].on_change = lambda v: (seen.append(v), 1 / 0)
@@ -154,7 +154,7 @@ def test_a_failing_on_change_rolls_the_whole_patch_back(monkeypatch, tmp_path):
 @pytest.mark.parametrize("text", ['{"paused": ["x"]}', '{"knobs": [1]}', '[]', '{"paused": {"a": 1}}',
                                   'not json'])
 def test_a_wrong_shaped_knobs_file_falls_back_to_the_defaults(monkeypatch, tmp_path, text):
-    monkeypatch.setenv("FLOCK_WORLD_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("LEGION_WORLD_STATE_DIR", str(tmp_path))
     (tmp_path / "knobs.json").write_text(text)
     w = Knobbed()
     assert w.slots == 1 and w.admin.paused == {}
@@ -181,7 +181,7 @@ def test_sys_exit_in_init_parks(monkeypatch):
 
 
 def test_knob_validation_and_persistence_across_restart(monkeypatch, tmp_path):
-    monkeypatch.setenv("FLOCK_WORLD_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("LEGION_WORLD_STATE_DIR", str(tmp_path))
     w = Knobbed()
     c = TestClient(create_app(w, SECRET))
     for bad in ({"hub.push.slots": 9}, {"hub.push.slots": "2"}, {"hub.push.slots": True},
@@ -210,7 +210,7 @@ def test_knob_validation_and_persistence_across_restart(monkeypatch, tmp_path):
 
 def test_load_hands_the_admin_to_the_world(monkeypatch, tmp_path):
     (tmp_path / "kw.py").write_text("from tests.test_world_admin import Knobbed\n")
-    monkeypatch.setenv("FLOCK_WORLD_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("LEGION_WORLD_STATE_DIR", str(tmp_path / "state"))
     (tmp_path / "state").mkdir()
     admin = Admin()
     w = server.load("kw:Knobbed", str(tmp_path), admin=admin)
@@ -229,11 +229,11 @@ def test_world_admin_token_is_never_the_world_secret():
         return SwarmSpec.model_validate({"swarm": "sw", "compute": "local", "world": world,
                                          "inference": FAKE_INFERENCE, "types": {"dev": {**HB, "model": "m"}}})
     local = spec({"command": ["python", "w.py"]})
-    assert world_admin_token(local, TOKEN, {}) == derived_token(TOKEN, "flock-world-admin:sw")
+    assert world_admin_token(local, TOKEN, {}) == derived_token(TOKEN, "legion-world-admin:sw")
     assert world_admin_token(local, TOKEN, {}) != derived_token(TOKEN, "sw")  # the world secret
     url = spec({"url": "http://w.invalid", "token_env": "WORLD_SECRET"})
     assert world_admin_token(url, TOKEN, {"WORLD_SECRET": SECRET}) is None
-    assert world_admin_token(url, TOKEN, {"FLOCK_WORLD_ADMIN_TOKEN": "a"}) == "a"
+    assert world_admin_token(url, TOKEN, {"LEGION_WORLD_ADMIN_TOKEN": "a"}) == "a"
 
 
 def _forward(world_client: TestClient):
@@ -247,7 +247,7 @@ def _forward(world_client: TestClient):
 
 def _swarm(world_client, store, clock):
     app = controller_app(store, TOKEN, clock=clock, secret_source={
-        "WORLD_SECRET": SECRET, "FLOCK_WORLD_ADMIN_TOKEN": ADMIN_SECRET},
+        "WORLD_SECRET": SECRET, "LEGION_WORLD_ADMIN_TOKEN": ADMIN_SECRET},
                          loop_interval=0, world_transport=_forward(world_client))
     spec = SwarmSpec.model_validate({
         "swarm": "sw", "compute": "local", "world": {"url": "http://w.invalid", "token_env": "WORLD_SECRET"},

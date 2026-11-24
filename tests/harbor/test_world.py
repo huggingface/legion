@@ -1,4 +1,4 @@
-"""resources.world and the world.* tools against a real flock.world server on 127.0.0.1."""
+"""resources.world and the world.* tools against a real legion.world server on 127.0.0.1."""
 
 import json
 import os
@@ -15,16 +15,16 @@ import pytest
 
 uvicorn = pytest.importorskip("uvicorn")
 
-import flock.harbor
-from flock.harbor.tools.bundle import build_tool_bundle
-from flock.harbor.tools.runner import load_module
-from flock.world import Agent, ToolError, World, tool
-from flock.world.server import create_app
-from flock.world.workspace import apply_patch
+import legion.harbor
+from legion.harbor.tools.bundle import build_tool_bundle
+from legion.harbor.tools.runner import load_module
+from legion.world import Agent, ToolError, World, tool
+from legion.world.server import create_app
+from legion.world.workspace import apply_patch
 
 from .test_message_board_hooks import calls_in_flight_are_capped
 
-TOOLS_DIR = Path(flock.harbor.__file__).with_name("builtin") / "tools"
+TOOLS_DIR = Path(legion.harbor.__file__).with_name("builtin") / "tools"
 world_tools = load_module(TOOLS_DIR / "world.py")
 WorldResource = load_module(TOOLS_DIR.parent / "resources" / "world.py").Resource
 SECRET = "world-secret"
@@ -39,7 +39,7 @@ class Shared(World):
 
     def manifest(self):
         m = super().manifest()
-        m["tools"][0]["x-flock-workspace"] = {"arg": "path", "default": "clone", "skip": ["main"]}
+        m["tools"][0]["x-legion-workspace"] = {"arg": "path", "default": "clone", "skip": ["main"]}
         return m
 
     def call_workspace(self, name, args, agent, snapshot):
@@ -94,18 +94,32 @@ def clone(tmp_path):
 
 def invoke(directory, name, arguments, env):
     result = subprocess.run(
-        [sys.executable, "-S", str(directory / "bin/flock-tool"), name, "--json",
+        [sys.executable, "-S", str(directory / "bin/legion-tool"), name, "--json",
          json.dumps(arguments)],
-        env={**os.environ, **env, "FLOCK_TOOLS_MANIFEST": str(directory / "manifest.json")},
+        env={**os.environ, **env, "LEGION_TOOLS_MANIFEST": str(directory / "manifest.json")},
         capture_output=True, text=True, timeout=30,
     )
     return result.returncode, json.loads(result.stdout)
 
 
+async def test_resource_reports_old_manifest_keys(served, tmp_path, monkeypatch):
+    monkeypatch.setenv("LEGION_WORLD_TOKEN", SECRET)
+    manifest = served.manifest()
+    manifest["tools"][0]["x-flock-timeout_s"] = 5
+    monkeypatch.setattr(served, "manifest", lambda: manifest)
+    resource = WorldResource({"url": served.url}, state_dir=tmp_path, agents=["agent-001"],
+                             secrets=[])
+    try:
+        with pytest.raises(ValueError, match=r"invalid world manifest: .*x-flock-timeout_s.*renamed to x-legion"):
+            await resource.start()
+    finally:
+        await resource.stop()
+
+
 async def test_unix_transport_proxies_each_agent_and_uploads_its_clone(
     served, clone, tmp_path, monkeypatch
 ):
-    monkeypatch.setenv("FLOCK_WORLD_TOKEN", SECRET)
+    monkeypatch.setenv("LEGION_WORLD_TOKEN", SECRET)
     bundle = build_tool_bundle(TOOLS_DIR, ["world.*"], tmp_path / "tools.tar.gz")
     assert bundle.manifest["requires"] == ["world"]
     directory = tmp_path / "bundle"
@@ -118,7 +132,7 @@ async def test_unix_transport_proxies_each_agent_and_uploads_its_clone(
         await resource.start()
         assert resource.metadata["tools"] == ["submit"]
         binding = resource.bind("agent-001")
-        assert binding["env"] == {"WORLD_SOCKET": "/run/flock-world.sock"}
+        assert binding["env"] == {"WORLD_SOCKET": "/run/legion-world.sock"}
         env = {"WORLD_SOCKET": binding["mounts"][0]["source"]}
         code, listed = invoke(directory, "world.tools", {}, env)
         assert code == 0 and listed["tools"][0]["name"] == "submit"
@@ -149,7 +163,7 @@ async def test_unix_transport_proxies_each_agent_and_uploads_its_clone(
 async def test_http_transport_token_acts_only_as_its_agent(
     served, clone, tmp_path, monkeypatch
 ):
-    monkeypatch.setenv("FLOCK_WORLD_TOKEN", SECRET)
+    monkeypatch.setenv("LEGION_WORLD_TOKEN", SECRET)
     resource = WorldResource({"url": served.url, "transport": "http"},
                              state_dir=tmp_path, agents=["agent-001"], secrets=[])
     try:
@@ -178,14 +192,14 @@ async def test_http_transport_token_acts_only_as_its_agent(
 async def test_socket_proxy_names_the_agent_and_opens_only_its_routes(
     served, tmp_path, monkeypatch
 ):
-    monkeypatch.setenv("FLOCK_WORLD_TOKEN", SECRET)
+    monkeypatch.setenv("LEGION_WORLD_TOKEN", SECRET)
     resource = WorldResource({"url": served.url}, state_dir=tmp_path, agents=["agent-001"],
                              secrets=[])
     try:
         await resource.start()
         await resource.add(["agent-002"])  # placed after start
         path = resource.bind("agent-001")["mounts"][0]["source"]
-        spoofed = {"X-Flock-Agent": "agent-002", "X-Flock-Type": "interviewer",
+        spoofed = {"X-Legion-Agent": "agent-002", "X-Legion-Type": "interviewer",
                    "X-World-Token": "guess"}
         transport = httpx.HTTPTransport(uds=path)
         with httpx.Client(base_url="http://world", transport=transport) as client:

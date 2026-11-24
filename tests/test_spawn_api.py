@@ -7,9 +7,9 @@ import httpx
 import pytest
 from pydantic import TypeAdapter
 
-from flock.controller import spawn as spawning
-from flock.controller.store import Store
-from flock.models import AssignCommand, Command, SwarmSpec, TypeHealth
+from legion.controller import spawn as spawning
+from legion.controller.store import Store
+from legion.models import AssignCommand, Command, SwarmSpec, TypeHealth
 
 from .conftest import FAKE_INFERENCE, HB, TOKEN
 
@@ -93,7 +93,7 @@ async def test_children_are_placed_on_their_types_workers(client, store, jobs, t
     launched = {x["worker_id"] for x in jobs.launches}
     assert launched == {"demo-leader-w0000", "demo-analyst-w0000", "demo-analyst-w0001"}
     cmd = next(a for a in assigns(store, "demo-analyst-w0000") if a.agent == names[0])
-    assert cmd.parent == LEADER and cmd.agent_token.startswith("flock_at_")
+    assert cmd.parent == LEADER and cmd.agent_token.startswith("legion_at_")
     # the replica gets a token too, and the same one on every assign
     lead = assigns(store, "demo-leader-w0000")[0]
     assert lead.parent is None
@@ -270,7 +270,7 @@ async def test_agent_token_scope(client, app, store, swarm):
     async with as_agent(app, tok[LEADER]) as c:  # the subtree reaches grandchildren
         assert (await c.get(f"/agents/{r.json()['name']}")).status_code == 200
         assert (await c.post(f"/agents/{LEADER}/prompt", json={"text": "x"})).status_code == 403
-    async with as_agent(app, "flock_at_" + "0" * 64) as c:
+    async with as_agent(app, "legion_at_" + "0" * 64) as c:
         assert (await c.get("/whoami")).status_code == 401
     assert (await client.get("/whoami")).json() == {"kind": "controller"}
 
@@ -308,7 +308,7 @@ def test_spawn_during_cascade_removal_leaves_no_orphan(store, client, swarm):
     spawn must wait for it and then be refused."""
     import threading
 
-    from flock.models import SpawnRequest
+    from legion.models import SpawnRequest
 
     parent = spawning.spawn(store, LEADER, SpawnRequest(type="analyst"), 0)[0].name
     scanned, resume = threading.Event(), threading.Event()
@@ -389,8 +389,8 @@ def test_agent_being_removed_gets_no_new_token(store, clock, tick, swarm):
     token of a row marked removing must not authenticate."""
     from datetime import timedelta
 
-    from flock.controller.reconcile import record_heartbeat
-    from flock.models import SpawnRequest, WorkerHeartbeat
+    from legion.controller.reconcile import record_heartbeat
+    from legion.models import SpawnRequest, WorkerHeartbeat
 
     parent = spawning.spawn(store, LEADER, SpawnRequest(type="analyst"), 0)[0].name
     tick()
@@ -445,7 +445,7 @@ async def test_ephemeral_children_are_removed_after_their_session(client, store,
     new agent."""
     from datetime import timedelta
 
-    from flock.models import AgentHeartbeat, UnassignCommand, WorkerHeartbeat
+    from legion.models import AgentHeartbeat, UnassignCommand, WorkerHeartbeat
 
     spec = spawn_spec(spawn={"leader": {"types": ["analyst"], "max": 1}},
                       analyst={"ephemeral": True})

@@ -5,15 +5,15 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-import flock.harbor
-from flock.controller.jobs import HubJobsClient
-from flock.controller.reconcile import reconcile
-from flock.harbor.config import Config
-from flock.harbor.spec import Spec, compile_spec, substitute
-from flock.models import SwarmSpec, load_spec_yaml, loop_refusals
+import legion.harbor
+from legion.controller.jobs import HubJobsClient
+from legion.controller.reconcile import reconcile
+from legion.harbor.config import Config
+from legion.harbor.spec import Spec, compile_spec, substitute
+from legion.models import SwarmSpec, load_spec_yaml, loop_refusals
 
 EXAMPLES = Path(__file__).parent / "examples"
-RESOURCES = Path(flock.harbor.__file__).parent / "builtin" / "resources"
+RESOURCES = Path(legion.harbor.__file__).parent / "builtin" / "resources"
 
 
 def within(small, big):
@@ -247,7 +247,7 @@ def test_compile_gives_one_harbor_type_per_role(tmp_path):
     assert h.roster == {} and swarm.naming == "words"  # the controller names them, and sends
     # each assign the roster: the run's names and their roles (reconcile.harbor_roster)
     assert h.resources == {"message_board": {"url": "https://board.example", "channels": ["general"]}}
-    assert h.config == {  # inference is the type's (resolved_model): `flock update` may move it
+    assert h.config == {  # inference is the type's (resolved_model): `legion update` may move it
         "model": "Qwen/Qwen3.8-27B",
         "task": {"repo": "https://huggingface.co/datasets/a/b",
                  "dataset": None, "selector": "lanes", "revision": "main"},
@@ -277,8 +277,8 @@ def test_compile_gives_one_harbor_type_per_role(tmp_path):
     (lambda d: d["inference"].pop("api_key_env"), "HF_TOKEN is the workers' Hub token"),
     (lambda d: d["inference"].pop("api_key_env") or d.update(environment={"backend": "podman"})
      or d.update(compute="slurm"), "HF_TOKEN is the workers' Hub token"),
-    (lambda d: d["resources"]["message_board"].update(token_env="FLOCK_WORLD_ADMIN_TOKEN"),
-     "FLOCK_WORLD_ADMIN_TOKEN is the world's admin secret"),
+    (lambda d: d["resources"]["message_board"].update(token_env="LEGION_WORLD_ADMIN_TOKEN"),
+     "LEGION_WORLD_ADMIN_TOKEN is the world's admin secret"),
     (lambda d: d["agents"]["roles"]["safety"].update(inference={"hf_router": {}}),
      r"agents.roles.safety.inference.api_key_env: HF_TOKEN is the workers' Hub token"),
 ])
@@ -318,7 +318,7 @@ def test_only_the_blocks_the_roles_run_on_are_checked(tmp_path):
      "each worker's own node"),
 ])
 def test_servers_on_this_machine_need_agents_on_it(tmp_path, edit, error):
-    """`localhost` is the machine flock runs on: refused where the agents run elsewhere."""
+    """`localhost` is the machine legion runs on: refused where the agents run elsewhere."""
     data = load_spec_yaml(COMPILE)
     data["inference"] = {"urls": ["http://localhost:8000/v1"]}
     edit(data)
@@ -366,7 +366,7 @@ def test_roles_sharing_the_run_loop_split_its_reserve(tmp_path):
     (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
     swarm = compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
     reserves = [ts.loop.final.reserve_usd for ts in swarm.types.values()]
-    assert reserves == [10, 10]  # flock holds back their sum: the spec's 20
+    assert reserves == [10, 10]  # legion holds back their sum: the spec's 20
     harbor = swarm.types["answers"].harbor
     assert harbor.tools == {} and harbor.tools_sha256 is None  # no bundle: no tools
 
@@ -412,7 +412,7 @@ def test_workers_env_reaches_the_hf_jobs_workers(tmp_path, monkeypatch, store, s
     assert {name: ts.env for name, ts in swarm.types.items()} == {
         "answers": {"PYBOT_REPO": "ns/chat"}, "safety": {"PYBOT_REPO": "ns/chat"},
     }
-    monkeypatch.setenv("FLOCK_WHEEL_URL", "hf://buckets/ns/flock/dist/x.whl")
+    monkeypatch.setenv("LEGION_WHEEL_URL", "hf://buckets/ns/legion/dist/x.whl")
     runs = []
 
     class Api:  # HfApi's run_job, recorded
@@ -448,7 +448,7 @@ def test_a_missing_resource_module_is_refused_at_compile(tmp_path):
         compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
 
 
-def test_harbor_agents_get_flock_names_and_their_roles_reach_each_assign(
+def test_harbor_agents_get_legion_names_and_their_roles_reach_each_assign(
         tmp_path, monkeypatch, store, settings, clock):
     """Words names (`<adjective>-<noun>`, reserved on the controller), whatever the roles. The
     first pass creates every type's agents before any assign, and each assign carries the
@@ -456,7 +456,7 @@ def test_harbor_agents_get_flock_names_and_their_roles_reach_each_assign(
     agents take the names the rosters listed."""
     import json
 
-    from flock.controller.naming import HANDLE_RE
+    from legion.controller.naming import HANDLE_RE
 
     data = load_spec_yaml(COMPILE)
     data.update(compute="hf-jobs", namespace="ns", bucket_id="ns/sh")
@@ -464,7 +464,7 @@ def test_harbor_agents_get_flock_names_and_their_roles_reach_each_assign(
         (tmp_path / name).write_text("x")
     (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
     swarm = compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
-    monkeypatch.setenv("FLOCK_WHEEL_URL", "hf://buckets/ns/flock/dist/x.whl")
+    monkeypatch.setenv("LEGION_WHEEL_URL", "hf://buckets/ns/legion/dist/x.whl")
     jobs = HubJobsClient(token="t", image=None)
     jobs.api = SimpleNamespace(run_job=lambda **kw: SimpleNamespace(id="job"))
     store.put_swarm(swarm, 0)
@@ -534,7 +534,7 @@ def test_a_role_name_prefix_reaches_its_type_and_needs_words_naming(tmp_path):
 
 
 def test_naming_consecutive_id_updates_never_rename_running_agents(tmp_path):
-    from flock.ops import SpecError, keep_pins
+    from legion.ops import SpecError, keep_pins
 
     old = consecutive_swarm(tmp_path)
     grown = consecutive_swarm(tmp_path, reviewers=3)  # the last role may grow
@@ -553,7 +553,7 @@ def test_naming_consecutive_id_updates_never_rename_running_agents(tmp_path):
 def test_one_task_per_agent_refuses_a_resize_in_a_run(tmp_path):
     """A type whose agents each run their own task (sources.pin_tasks): an update keeps the
     pinned map, so a count that changes the agents is refused, never an agent without a task."""
-    from flock.ops import SpecError, keep_pins
+    from legion.ops import SpecError, keep_pins
 
     def swarm(count):
         (tmp_path / "spec.yaml").write_text(
@@ -575,8 +575,8 @@ def test_one_task_per_agent_refuses_a_resize_in_a_run(tmp_path):
 def test_naming_consecutive_id_a_raised_ramp_gets_consecutive_names(tmp_path, store, clock):
     """The last role's ramp raised (count 1 -> 3): its new agents get agent-NNN names, never
     `<type>-NNNN` (the ramp is compared too, not only the replicas, which a ramp keeps at 0)."""
-    from flock.controller.naming import replica_names
-    from flock.ops import keep_pins
+    from legion.controller.naming import replica_names
+    from legion.ops import keep_pins
 
     old = consecutive_swarm(tmp_path, ramp="{start: 1, add: 1, every: 10m}")
     raised = consecutive_swarm(tmp_path, reviewers=3, ramp="{start: 1, add: 1, every: 10m}")

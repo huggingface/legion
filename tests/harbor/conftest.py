@@ -2,8 +2,8 @@ import os
 
 import pytest
 
-from flock.harbor import resources
-from flock.harbor.config import BUILTIN
+from legion.harbor import resources
+from legion.harbor.config import BUILTIN
 
 os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 

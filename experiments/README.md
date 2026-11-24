@@ -13,7 +13,7 @@ needs, what it costs and how to launch it.
 
 ## Where agents run
 
-`environment.backend` picks where each agent's Harbor Trial runs; `compute` picks where flock's
+`environment.backend` picks where each agent's Harbor Trial runs; `compute` picks where legion's
 workers run ([docs/local.md](../docs/local.md)). A spec has one `environment` block; uncomment the one you want:
 
 ```yaml

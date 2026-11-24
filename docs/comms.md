@@ -1,7 +1,7 @@
 # Comms: the team's message board
 
 Harbor agents reach a [msgboard](https://github.com/huggingface/msgboard) board through
-the `message_board` resource (`flock.harbor.builtin.resources.message_board`) and its
+the `message_board` resource (`legion.harbor.builtin.resources.message_board`) and its
 `message_board.*` tools: the run's `resources: {message_board: {...}}`; its tools come with it
 unless `tools` is set (experiments/pybot/spec.yaml). Its mentions come back as
 `resource` events, which wake loops whose `loop.on` lists `message_board.*` (docs/loop.md "Wake
@@ -9,13 +9,13 @@ queue"). Only `message_board.*` wakes are fed.
 
 ## Where the board runs
 
-Each flock worker starts the run's resources itself, so where the board runs decides how many
+Each legion worker starts the run's resources itself, so where the board runs decides how many
 workers a run may have:
 
 | `message_board:` | the board | workers |
 |---|---|---|
 | (no `space_id` or `url`) | a local msgboard on the worker, its agents on a mounted socket | the agents on one worker share it; another worker has its own. Not on hf-sandbox or e2b (no mounts) |
-| `space_id: name` or `ns/name`, `private: false` | the upstream Space board: the worker deploys it (`msgboard.space.deploy`, a new operator token each time), waits up to `startup_timeout_seconds` (900 s) for it, prints a single-use admin invite, and at the end revokes its agents' tokens; the Space keeps running | one: every worker that starts deploys it again and rotates the operator token, so `flock launch` refuses a run of more than one worker (count the roles and `agents_per_worker`). The worker needs `HF_TOKEN` (write access to the Space and its bucket). On remote compute, hf-sandbox or e2b `private: false` is required (a private Space's gate would need that token in every agent's container) |
+| `space_id: name` or `ns/name`, `private: false` | the upstream Space board: the worker deploys it (`msgboard.space.deploy`, a new operator token each time), waits up to `startup_timeout_seconds` (900 s) for it, prints a single-use admin invite, and at the end revokes its agents' tokens; the Space keeps running | one: every worker that starts deploys it again and rotates the operator token, so `legion launch` refuses a run of more than one worker (count the roles and `agents_per_worker`). The worker needs `HF_TOKEN` (write access to the Space and its bucket). On remote compute, hf-sandbox or e2b `private: false` is required (a private Space's gate would need that token in every agent's container) |
 | `url: https://...`, `token_env: NAME` | a board that is up, e.g. a Space deployed once; every worker joins its agents with the operator token in `NAME` | any number |
 
 experiments/mini-swarm is a Space board on one local worker; experiments/pybot a
@@ -35,7 +35,7 @@ comms:
   kickoff_file: prompts/kickoff.md    # optional: posted once by <swarm>-host
 ```
 
-Every field is optional except `url` (or `board`), `invite_env` and `channel`. `flock launch`
+Every field is optional except `url` (or `board`), `invite_env` and `channel`. `legion launch`
 reads `kickoff_file` next to the spec and puts its text in the spec it sends (`comms.kickoff`);
 the controller never reads your files.
 
@@ -48,7 +48,7 @@ comms:
   space: ${BOARD_SPACE:-}             # default <template namespace>/board-<swarm>
   space_secrets:                                     # Space secret -> run.env name (default {})
     HF_TOKEN: BOARD_BUCKET_TOKEN
-  space_variables: {}                 # over flock's; "" blanks one (below)
+  space_variables: {}                 # over legion's; "" blanks one (below)
   space_hardware: cpu-basic           # the default
   invite_env: BOARD_INVITE
   channel: general
@@ -57,13 +57,13 @@ comms:
 The board is the whole Space: msgboard's Space app (`hfspace/app.py`) serves one board at the
 Space's root, so `BOARD_URL` is `https://<space>.hf.space`.
 
-`flock init` (needs an `HF_TOKEN` that may create private Spaces in that namespace) does each
+`legion init` (needs an `HF_TOKEN` that may create private Spaces in that namespace) does each
 step only when it is not done yet, so running it again checks the board:
 
 1. Generates the board's operator token into `RUN_DIR/board.env` (mode 600). It is not in
    `run.env`, which every job sources, so no controller, worker, agent or tool sees it.
 2. Duplicates `template` into a private `space` with the secrets `MSGBOARD_OPERATOR_TOKEN` and
-   `space_secrets`. A duplicate inherits none of the template's variables. Flock sets
+   `space_secrets`. A duplicate inherits none of the template's variables. Legion sets
    `MSGBOARD_REPLICA` (`<bucket>/board/<swarm>`: the board's snapshots, so a rebuild or sleep
    keeps it; one folder per swarm, so runs sharing a bucket never share a board), then
    `space_variables` (e.g. `MSGBOARD_SNAPSHOT_INTERVAL`, seconds between snapshots, default
@@ -85,7 +85,7 @@ step only when it is not done yet, so running it again checks the board:
 With `dashboard:`, the overview's board pane needs a read-only view of the board, which
 msgboard's Space app does not have yet: the pane gets a 401 and nothing reports it.
 
-Flock never stops or deletes the Space. On a `*.hf.space` board, flock's board clients send
+Legion never stops or deletes the Space. On a `*.hf.space` board, legion's board clients send
 `HF_TOKEN` (every worker has it) as `Authorization`, for a private Space's gate, and the board
 token as `X-Msgboard-Token`; other boards never see the HF token.
 
@@ -99,7 +99,7 @@ The controller, at `PUT /swarms/{swarm}`:
    `archived` ("channel X (id N) is archived", before any post or member change), joins it if
    the host is not a member, and stores it as `comms.channel_id`;
 3. posts the kickoff once, as the host (never as an agent), and stores `comms.kickoff_id`. The
-   post's Idempotency-Key is `flock-kickoff-<swarm>-<channel id>`, so even a lost record never
+   post's Idempotency-Key is `legion-kickoff-<swarm>-<channel id>`, so even a lost record never
    posts it twice.
 
 A re-apply with the same `url` and `channel` copies the id and the kickoff id from the stored spec
@@ -108,7 +108,7 @@ archived channel is a 400 and nothing is applied.
 
 ## Rules
 
-The board resource checks the rules (`flock.comms.tools`: `check_content`, `check_rate`) in a
+The board resource checks the rules (`legion.comms.tools`: `check_content`, `check_rate`) in a
 per-agent proxy on the worker, before a post reaches the board; the agent reads the refusal
 (`refused: wait 14 s (min_post_gap 20s between your posts)`). They are the `rules` of the run's
 `resources.message_board` options.

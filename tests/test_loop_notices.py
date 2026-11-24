@@ -7,10 +7,10 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from flock.controller.api import create_app
-from flock.controller.loop import notice_line
-from flock.models import LoopMeta, worker_type_spec
-from flock.worker.loop import render
+from legion.controller.api import create_app
+from legion.controller.loop import notice_line
+from legion.models import LoopMeta, worker_type_spec
+from legion.worker.loop import render
 
 from .conftest import TOKEN
 from .test_api import W0, hb_body

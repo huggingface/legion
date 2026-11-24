@@ -1,18 +1,18 @@
 #!/bin/bash
 # common.sh: sourced by controller.sbatch, world.sbatch and worker.sbatch (never run on its own).
-# `flock init` copies the four files to <run dir>/slurm/ (docs/slurm.md "Deploying"); each job
+# `legion init` copies the four files to <run dir>/slurm/ (docs/slurm.md "Deploying"); each job
 # sources <run dir>/slurm/common.sh, so a run keeps its own copy.
 #
 # The caller sets RUN_DIR (the run directory, an absolute path) before sourcing. This file sources
-# the run's cluster profile (cluster.env, copied by `flock init --profile`), the cluster's secrets
+# the run's cluster profile (cluster.env, copied by `legion init --profile`), the cluster's secrets
 # file when the profile names one (SECRETS_FILE, mode 600) and the run's config (run.env, mode 600;
 # later wins), sets umask 077 and defines log(), die(), require_var(), http_status(),
 # publish_host(), free_port() and the container helpers (CONTAINER_IMAGE,
 # container_srun_args). It runs on the HOST: a worker then starts in a container when one is set.
 #
 # Nothing here is passed with `sbatch --export`: every value is read from files in the run
-# directory inside the job. Secrets are never echoed. cluster.env names VENV (bin/flock,
-# flock-controller, flock-worker, python), optionally REPO (a flock checkout), SECRETS_FILE,
+# directory inside the job. Secrets are never echoed. cluster.env names VENV (bin/legion,
+# legion-controller, legion-worker, python), optionally REPO (a legion checkout), SECRETS_FILE,
 # CONTAINER_IMAGE and CONTAINER_MOUNTS.
 
 umask 077
@@ -83,7 +83,7 @@ case $RUN in *[!A-Za-z0-9._-]*|"") die "run directory name $RUN: use letters, di
 SLURM_DIR=$RUN_DIR/slurm   # these scripts (mounted read-only in a container)
 RUN_ENV=$RUN_DIR/run.env
 HOSTS_DIR=$RUN_DIR/hosts   # *.host: a directory, so a container can mount it ro and see updates
-SPEC=$RUN_DIR/experiment/spec.yaml   # the experiment folder's copy (`flock init`)
+SPEC=$RUN_DIR/experiment/spec.yaml   # the experiment folder's copy (`legion init`)
 export RUN RUN_DIR SLURM_DIR RUN_ENV HOSTS_DIR SPEC
 mkdir -p "$RUN_DIR/logs" "$RUN_DIR/launch" "$HOSTS_DIR" || die "cannot create $RUN_DIR"
 
@@ -118,7 +118,7 @@ if [ -f "$RUN_DIR/cluster.env" ]; then
   export -n SLURM_PARTITION 2>/dev/null
 fi
 [ -z "${SECRETS_FILE:-}" ] || source_env_600 "$SECRETS_FILE"
-[ ! -f "$RUN_ENV" ] || source_env_600 "$RUN_ENV"   # `flock init`: the spec's ${VAR}s, its secrets, per-run tokens
+[ ! -f "$RUN_ENV" ] || source_env_600 "$RUN_ENV"   # `legion init`: the spec's ${VAR}s, its secrets, per-run tokens
 require_var VENV
 
 # A role's own venv / checkout (run.env: CTL_VENV, WORLD_VENV, WORKER_VENV, and *_REPO); default
@@ -132,8 +132,8 @@ esac
 VENV=${VENV%/} REPO=${REPO:-} REPO=${REPO%/}
 export VENV REPO
 
-# The venv first on PATH: subprocesses started by flock (`flock` CLI inside tools,
-# `python -I -m flock.tools.runner`) must find the same install. Scripts still call
+# The venv first on PATH: subprocesses started by legion (`legion` CLI inside tools,
+# `python -I -m legion.tools.runner`) must find the same install. Scripts still call
 # $VENV/bin/<cmd> directly.
 export PATH="$VENV/bin:$PATH"
 export PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 HF_HUB_DISABLE_PROGRESS_BARS=1
@@ -149,16 +149,16 @@ export HF_HOME=/tmp/hf-${SLURM_JOB_ID:-nojob}
 CONTAINER_IMAGE=${CONTAINER_IMAGE:-}   # cluster.env; run.env may override it
 # select_worker_image TYPE (worker.sbatch, after the env file): the worker's image is
 # CONTAINER_IMAGE_<TYPE> from run.env (TYPE with - and . as _, e.g. CONTAINER_IMAGE_agent_pi), else
-# FLOCK_CONTAINER_IMAGE (the env file; flock's Slurm client writes it when
-# compute.container_image / FLOCK_SLURM_CONTAINER_IMAGE is set), else CONTAINER_IMAGE above.
+# LEGION_CONTAINER_IMAGE (the env file; legion's Slurm client writes it when
+# compute.container_image / LEGION_SLURM_CONTAINER_IMAGE is set), else CONTAINER_IMAGE above.
 select_worker_image() {
   local t=${1//[-.]/_} v
   case $t in *[!A-Za-z0-9_]*|"") ;; *) v=CONTAINER_IMAGE_$t; [ -n "${!v:-}" ] && { CONTAINER_IMAGE=${!v}; return; } ;; esac
-  CONTAINER_IMAGE=${FLOCK_CONTAINER_IMAGE:-$CONTAINER_IMAGE}
+  CONTAINER_IMAGE=${LEGION_CONTAINER_IMAGE:-$CONTAINER_IMAGE}
 }
-# container_mounts [DIR...]: the --container-mounts list: the venv, the flock repo, this slurm dir,
+# container_mounts [DIR...]: the --container-mounts list: the venv, the legion repo, this slurm dir,
 # each CONTAINER_MOUNTS entry (cluster.env, comma-separated: e.g. the uv Python dir the venv's
-# bin/python links to; `flock init` checks it is mounted) and each DIR, read-only at their own path.
+# bin/python links to; `legion init` checks it is mounted) and each DIR, read-only at their own path.
 container_mounts() {
   local m="" d
   local -a profile
@@ -188,7 +188,7 @@ container_srun_args() {
 }
 
 # The venv must be complete before any job starts.
-for _cmd in python flock flock-controller flock-worker; do
+for _cmd in python legion legion-controller legion-worker; do
   [ -x "$VENV/bin/$_cmd" ] || die "$VENV/bin/$_cmd is missing: the venv is not ready"
 done
 unset _cmd

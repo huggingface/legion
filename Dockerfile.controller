@@ -1,5 +1,5 @@
-# flock controller as an HF Docker Space (port 7860, persistent storage on /data).
-# Space secrets: FLOCK_TOKEN, HF_TOKEN (jobs in the swarm namespace), and every
+# legion controller as an HF Docker Space (port 7860, persistent storage on /data).
+# Space secrets: LEGION_TOKEN, HF_TOKEN (jobs in the swarm namespace), and every
 # secret named in specs (e.g. OPENAI_API_KEY, MSGBOARD_INVITE_*).
 FROM python:3.12-slim
 
@@ -7,16 +7,16 @@ RUN useradd -m -u 1000 user
 WORKDIR /app
 COPY pyproject.toml README.md* ./
 COPY src ./src
-# Not buildable as is: flock needs msgboard, a private GitHub repo the build cannot clone.
+# Not buildable as is: legion needs msgboard, a private GitHub repo the build cannot clone.
 # shortcut: the Space path is unsupported until msgboard is public or the build fetches
 # harbor-deps.tar (scripts/publish-wheel.sh) with a build secret; staging that tar in this
 # public Space would publish msgboard. Run the controller as an HF Job (docs/deploy-job.md).
 RUN pip install --no-cache-dir ".[controller]"
 
 ENV PORT=7860 \
-    FLOCK_DATA=/data \
+    LEGION_DATA=/data \
     PYTHONUNBUFFERED=1
 RUN mkdir -p /data && chown user:user /data
 USER user
 EXPOSE 7860
-CMD ["flock-controller"]
+CMD ["legion-controller"]

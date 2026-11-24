@@ -7,10 +7,10 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from flock.comms.board import SyncBoard
-from flock.comms.tools import Refused, check_content, check_rate
-from flock.controller.comms import CommsError, resolve
-from flock.models import (
+from legion.comms.board import SyncBoard
+from legion.comms.tools import Refused, check_content, check_rate
+from legion.controller.comms import CommsError, resolve
+from legion.models import (
     COMMS_TOOLS,
     CommsRules,
     CommsSpec,
@@ -36,7 +36,7 @@ def board():
 
 def swarm_raw(**comms) -> dict:
     return {"swarm": "sw", "namespace": "ns", "bucket_id": "ns/b",
-            "comms": {"url": "http://board", "invite_env": INVITE_ENV, "channel": "#flock-test",
+            "comms": {"url": "http://board", "invite_env": INVITE_ENV, "channel": "#legion-test",
                       **comms},
             "inference": FAKE_INFERENCE, "types": {"dev": {**HB, "model": "m", "comms": True}}}
 
@@ -47,7 +47,7 @@ def swarm_raw(**comms) -> dict:
 def test_comms_block_validates():
     s = SwarmSpec.model_validate(swarm_raw(rules={"min_post_gap": "20s", "max_posts": 80,
                                                   "threads": "per_topic", "no_group_mentions": True}))
-    assert s.comms.channel == "flock-test" and s.comms.wake == ["mention", "thread"]
+    assert s.comms.channel == "legion-test" and s.comms.wake == ["mention", "thread"]
     assert s.comms.rules.gap_s == 20 and s.comms.search == "board"
     assert comms_tools(s.types["dev"], s.comms) == list(COMMS_TOOLS)
     with pytest.raises(ValidationError, match="not supported"):
@@ -144,7 +144,7 @@ def test_controller_refuses_an_archived_channel_before_any_post_or_join():
     """An archived channel is refused at resolve, not at the kickoff post (409)."""
     b, srv, url = fake_msgboard.serve(fake_msgboard.Board(archived={CH}))
     try:
-        with pytest.raises(CommsError, match=r"channel flock-test \(id 12\) is archived"):
+        with pytest.raises(CommsError, match=r"channel legion-test \(id 12\) is archived"):
             resolve(SwarmSpec.model_validate(swarm_raw(url=url, kickoff="Kickoff.")), None,
                     {INVITE_ENV: b.invite})
         assert [(m, p) for m, p, _, _ in b.requests] == [("POST", "/v1/join"), ("GET", "/v1/channels")]

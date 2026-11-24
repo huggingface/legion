@@ -1,4 +1,4 @@
-"""Worlds (docs/world.md): the `flock.world` base and server, the manifest and spec models, the
+"""Worlds (docs/world.md): the `legion.world` base and server, the manifest and spec models, the
 controller's apply (start, health check, refusals), the worker hub (calls, gateway, section,
 hooks, secret). A small task-board world (tests/fixtures/taskboard) and a recording world are served in
 process with uvicorn on 127.0.0.1; no network beyond loopback."""
@@ -26,20 +26,20 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
-from flock import cli
-from flock.controller.api import create_app as controller_app
-from flock.controller.jobs import FakeJobsClient
-from flock.controller.reconcile import Settings, reconcile
-from flock.models import (
+from legion import cli
+from legion.controller.api import create_app as controller_app
+from legion.controller.jobs import FakeJobsClient
+from legion.controller.reconcile import Settings, reconcile
+from legion.models import (
     SwarmSpec,
     TypeSpec,
     WorldSpec,
     world_tools,
 )
-from flock.world import Agent, ToolError, World, tool
-from flock.world.host import WorldError, WorldHost, check_tools, derived_token, fetch_manifest
-from flock.world.protocol import TOKEN_ENV, WorldManifest, agent_token
-from flock.world.server import create_app
+from legion.world import Agent, ToolError, World, tool
+from legion.world.host import WorldError, WorldHost, check_tools, derived_token, fetch_manifest
+from legion.world.protocol import TOKEN_ENV, WorldManifest, agent_token
+from legion.world.server import create_app
 
 from .conftest import FAKE_INFERENCE, HB, TOKEN, Clock
 
@@ -56,7 +56,7 @@ def load_taskboard():
 
 
 class Recorder(World):
-    """Records what flock sends; `version` can be bumped per instance."""
+    """Records what legion sends; `version` can be bumped per instance."""
 
     name, version = "rec", "1.0"
 
@@ -130,7 +130,7 @@ def taskboard(tmp_path):
     s.close()
 
 
-H = {"X-World-Token": SECRET, "X-Flock-Agent": "dev-0001"}
+H = {"X-World-Token": SECRET, "X-Legion-Agent": "dev-0001"}
 
 
 # --------------------------------------------------------------------------- base and server
@@ -156,9 +156,11 @@ def test_manifest_validation():
     ok = {"world_api": "v1", "name": "w", "version": "1", "tools": [{"name": "a"}]}
     assert WorldManifest.model_validate({**ok, "extra": 1}).tools[0].parameters == {
         "type": "object", "properties": {}}
+    assert WorldManifest.model_validate({**ok, "tools": [{"name": "a", 42: "ignored"}]}).names() == ["a"]
     for bad, msg in [({"world_api": "v2"}, "not supported"), ({"name": "Bad Name"}, "must match"),
                      ({"tools": [{"name": "a"}, {"name": "a"}]}, "listed twice"),
                      ({"tools": [{"name": "a", "parameters": {"type": "array"}}]}, "type object"),
+                     ({"tools": [{"name": "a", "x-flock-timeout_s": 5}]}, "renamed to x-legion"),
                      ({"version": " "}, "version")]:
         with pytest.raises(ValidationError, match=msg):
             WorldManifest.model_validate({**ok, **bad})
@@ -171,7 +173,7 @@ def test_server_protocol():
         r = c.request(method, path, json={}, headers={"X-World-Token": "wrong"})
         assert r.status_code == 401 and r.json()["error"]["code"] == "unauthorized"
     assert c.get("/manifest", headers=H).json()["name"] == "rec"
-    headers = {**H, "X-Flock-Type": "dev", "X-Flock-Swarm": "sw", "X-Flock-Turn": "t-3",
+    headers = {**H, "X-Legion-Type": "dev", "X-Legion-Swarm": "sw", "X-Legion-Turn": "t-3",
                "X-Request-Id": "r1"}
     assert c.post("/tools/echo", json={"args": {"text": "ab", "times": 2}}, headers=headers).json() \
         == {"ok": True, "result": {"text": "abab", "by": "dev-0001"}}
@@ -197,11 +199,11 @@ def test_server_protocol():
 
 def test_an_agent_token_acts_only_as_its_agent_on_manifest_and_tools():
     c = TestClient(create_app(Recorder(), SECRET))
-    own = {"X-World-Token": agent_token(SECRET, "dev-0001"), "X-Flock-Agent": "dev-0001"}
+    own = {"X-World-Token": agent_token(SECRET, "dev-0001"), "X-Legion-Agent": "dev-0001"}
     assert c.get("/manifest", headers=own).json()["name"] == "rec"
     assert c.post("/tools/echo", json={"args": {"text": "a"}}, headers=own).json()["result"] \
         == {"text": "a", "by": "dev-0001"}
-    for method, path, headers in [("POST", "/tools/echo", {**own, "X-Flock-Agent": "dev-0002"}),
+    for method, path, headers in [("POST", "/tools/echo", {**own, "X-Legion-Agent": "dev-0002"}),
                                   ("GET", "/manifest", {"X-World-Token": own["X-World-Token"]}),
                                   ("GET", "/metrics", own), ("POST", "/hooks", own)]:
         r = c.request(method, path, json={"args": {"text": "a"}}, headers=headers)
@@ -211,7 +213,7 @@ def test_an_agent_token_acts_only_as_its_agent_on_manifest_and_tools():
 def test_taskboard_claims_are_exclusive_and_released_when_an_agent_is_done(tmp_path):
     c = TestClient(create_app(load_taskboard()(db=str(tmp_path / "tb.db"),
                                                seed=str(TASKBOARD / "tasks.txt")), SECRET))
-    b = {**H, "X-Flock-Agent": "dev-0002"}
+    b = {**H, "X-Legion-Agent": "dev-0002"}
 
     def call(headers, tool_name, **args):
         return c.post(f"/tools/{tool_name}", json={"args": args}, headers=headers).json()
@@ -239,13 +241,13 @@ def test_taskboard_claims_are_exclusive_and_released_when_an_agent_is_done(tmp_p
 
 def raw(world: dict | None = None, **types) -> dict:
     return {"swarm": "sw", "compute": "local",
-            "world": world if world is not None else {"command": "flock world serve tb:TB"},
+            "world": world if world is not None else {"command": "legion world serve tb:TB"},
             "inference": FAKE_INFERENCE, "types": types or {"dev": {**HB, "model": "m"}}}
 
 
 def test_world_spec_validates():
     s = SwarmSpec.model_validate(raw())
-    assert s.world.command == ["flock", "world", "serve", "tb:TB"] and s.world.url is None
+    assert s.world.command == ["legion", "world", "serve", "tb:TB"] and s.world.url is None
     for world, msg in [({}, "`command`"), ({"dir": "w", "url": "http://w"}, "give the command"),
                        ({"url": "ftp://w"}, "http"), ({"command": []}, "non-empty"),
                        ({"url": "http://w", "token_env": "no-dash"}, "env var name"),
@@ -376,7 +378,7 @@ def _copy_taskboard(dst: Path) -> Path:
 def test_world_host_starts_keeps_replaces_and_stops_a_command_world(tmp_path):
     d = _copy_taskboard(tmp_path / "tb")
     host = WorldHost(log_dir=tmp_path / "logs")
-    w = WorldSpec(dir=str(d), command=["{python}", "-m", "flock.cli", "world", "serve",
+    w = WorldSpec(dir=str(d), command=["{python}", "-m", "legion.cli", "world", "serve",
                                        "taskboard:TaskBoard"])
     try:
         url, started = host.ensure("sw", w, "tok")
@@ -423,7 +425,7 @@ class H(BaseHTTPRequestHandler):
         self.send_response(200); self.send_header("Content-Length", str(len(data)))
         self.end_headers(); self.wfile.write(data)
     def log_message(self, *a): pass
-HTTPServer(("127.0.0.1", int(os.environ["FLOCK_WORLD_PORT"])), H).serve_forever()
+HTTPServer(("127.0.0.1", int(os.environ["LEGION_WORLD_PORT"])), H).serve_forever()
 """
 
 
@@ -469,7 +471,7 @@ class H(BaseHTTPRequestHandler):
         self.send_response(200); self.send_header("Content-Length", "2"); self.end_headers()
         self.wfile.write(b"{}")
     def log_message(self, *a): pass
-HTTPServer(("127.0.0.1", int(os.environ["FLOCK_WORLD_PORT"])), H).serve_forever()
+HTTPServer(("127.0.0.1", int(os.environ["LEGION_WORLD_PORT"])), H).serve_forever()
 """
 
 
@@ -507,7 +509,7 @@ async def test_apply_starts_a_command_world_and_remove_stops_it(store, tmp_path)
     app = controller_app(store, TOKEN, secret_source={}, loop_interval=0, worlds=host)
     spec = SwarmSpec.model_validate({
         "swarm": "sw", "compute": "local",
-        "world": {"dir": str(d), "command": [sys.executable, "-m", "flock.cli", "world", "serve",
+        "world": {"dir": str(d), "command": [sys.executable, "-m", "legion.cli", "world", "serve",
                                              "taskboard:TaskBoard"]},
         "inference": FAKE_INFERENCE, "types": {"dev": {**HB, "model": "m"}}})
     transport = httpx.ASGITransport(app=app)
@@ -586,7 +588,7 @@ def test_server_dispatches_from_the_manifest_it_serves_and_awaits_async_hooks():
 
 
 def test_tool_results_and_errors_never_carry_secret_env_values(monkeypatch):
-    from flock.world.server import redact
+    from legion.world.server import redact
 
     monkeypatch.setenv("HF_TOKEN", "hf_supersecretvalue")
     monkeypatch.setenv("BOARD_INVITE", "invite-code-1234")
@@ -637,7 +639,7 @@ def test_doctor_warns_and_passes(capsys):
 
 
 def test_doctor_flags_a_missing_read_and_a_failing_read_only_tool():
-    from flock.world.doctor import doctor
+    from legion.world.doctor import doctor
 
     def handler(request: httpx.Request) -> httpx.Response:
         p = request.url.path

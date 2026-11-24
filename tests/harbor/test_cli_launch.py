@@ -1,7 +1,7 @@
-"""A Harbor spec through flock's commands: `flock launch` and `flock update` compile it (the
+"""A Harbor spec through legion's commands: `legion launch` and `legion update` compile it (the
 task pinned once, the tool bundle's sha recorded), a resume keeps the run's pin and folder paths
 (a moved folder, `--ref`), and a running type's Trial inputs are fixed; links inside the shipped
-folders are refused, and `flock init` warns of them and writes the compiled secrets."""
+folders are refused, and `legion init` warns of them and writes the compiled secrets."""
 
 import os
 import shutil
@@ -12,10 +12,10 @@ import pytest
 from harbor.models.task.id import GitTaskId
 from typer.testing import CliRunner
 
-import flock.harbor
-from flock import cli, rundir
-from flock.harbor import sources
-from flock.ops import SpecError, check_spec, read_spec
+import legion.harbor
+from legion import cli, rundir
+from legion.harbor import sources
+from legion.ops import SpecError, check_spec, read_spec
 
 EXPERIMENTS = Path(__file__).parents[2] / "experiments"
 FIXTURES = Path(__file__).parents[1] / "fixtures"
@@ -71,7 +71,7 @@ def pins(monkeypatch):
 def test_launch_resume_and_update_on_a_harbor_spec(tmp_path, monkeypatch, app, store, tick,
                                                     pins):
     wire(monkeypatch, app)
-    monkeypatch.setenv("FLOCK_URL", "http://controller.invalid")  # no local controller started
+    monkeypatch.setenv("LEGION_URL", "http://controller.invalid")  # no local controller started
     exp = experiment(tmp_path / "exp")
     git = ["git", "-C", str(exp), "-c", "user.name=t", "-c", "user.email=t@t"]
     for args in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "exp"]):  # for --ref
@@ -116,7 +116,7 @@ def test_launch_resume_and_update_on_a_harbor_spec(tmp_path, monkeypatch, app, s
 
 
 def experiment_spec(monkeypatch, pins, name, rev, env=None):
-    """An experiments/ folder's spec (or an absolute folder's, or a spec file in one) as `flock
+    """An experiments/ folder's spec (or an absolute folder's, or a spec file in one) as `legion
     launch` reads it, the task pin faked."""
     pins[rev] = "a" * 40
     for key in ("RUN_NAME", "BUCKET_ID"):
@@ -153,12 +153,12 @@ def test_the_pybot_spec_compiles(monkeypatch, pins):
 
 
 def test_links_in_the_shipped_folders_and_init(tmp_path, pins):
-    """A linked tools folder ships; a link inside it is refused at launch and by `flock init`
+    """A linked tools folder ships; a link inside it is refused at launch and by `legion init`
     (which would copy what it points to). Init's run.env names the board's default token,
     known once the spec is compiled."""
     exp = experiment(tmp_path / "exp",
                      resources="{fake: {mount: true}, message_board: {url: https://board.example}}")
-    board = Path(flock.harbor.__file__).with_name("builtin") / "resources" / "message_board.py"
+    board = Path(legion.harbor.__file__).with_name("builtin") / "resources" / "message_board.py"
     shutil.copy(board, exp / "resources" / "message_board.py")
     shutil.move(exp / "tools", tmp_path / "shared")
     (exp / "tools").symlink_to(tmp_path / "shared")
@@ -195,7 +195,7 @@ def test_the_mini_swarm_spec_compiles(monkeypatch, pins):
     assert ts.harbor.config["environment"] == {"backend": "hf-sandbox", "flavor": "cpu-basic"}
     assert ts.secrets == ["HF_TOKEN"]  # the worker deploys the Space and starts the sandboxes
     # hf-jobs.yaml: the same run (task pin, roster, loop, limits) with the same model on a vLLM
-    # job flock starts
+    # job legion starts
     for key in ("MODEL", "FLAVOR", "MAX_MODEL_LEN"):
         monkeypatch.delenv(key, raising=False)
     hf = experiment_spec(monkeypatch, pins, "mini-swarm/hf-jobs.yaml",
@@ -223,9 +223,9 @@ def test_the_escape_room_spec_compiles(monkeypatch, pins):
 
 
 def test_serve_takes_the_run_dirs_environment(tmp_path, monkeypatch, pins):
-    """`flock --run RUN serve SPEC` fills the spec from the run's run.env and starts the servers
+    """`legion --run RUN serve SPEC` fills the spec from the run's run.env and starts the servers
     with its environment (the Hub faked)."""
-    from flock.controller.hf_jobs_servers import HFJobsServers
+    from legion.controller.hf_jobs_servers import HFJobsServers
 
     from ..fake_hub_jobs import FakeHubJobs
 
@@ -241,7 +241,7 @@ def test_serve_takes_the_run_dirs_environment(tmp_path, monkeypatch, pins):
         tokens.append(env.get("HF_TOKEN"))
         return HFJobsServers(FakeHubJobs(), env.get("HF_TOKEN"))
 
-    monkeypatch.setattr("flock.controller.hf_jobs_servers.hf_jobs_servers", starter)
+    monkeypatch.setattr("legion.controller.hf_jobs_servers.hf_jobs_servers", starter)
     r = runner.invoke(cli.app, ["--run", str(run), "serve",
                                 str(EXPERIMENTS / "mini-swarm" / "hf-jobs.yaml"), "--stop"])
     assert r.exit_code == 0, r.output

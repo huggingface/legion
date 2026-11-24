@@ -1,6 +1,6 @@
-"""HarborAdapter + FlockPi on fakes: a FakeTrial (test_launch's) that runs the real FlockPi
+"""HarborAdapter + LegionPi on fakes: a FakeTrial (test_launch's) that runs the real LegionPi
 against a FakeEnv (after harbor-core's test_agent.py) whose `pi --print` writes a canned pi.txt.
-Container networks are faked at their command boundary (flock.harbor.networking.command)."""
+Container networks are faked at their command boundary (legion.harbor.networking.command)."""
 
 import asyncio
 import json
@@ -17,13 +17,13 @@ from harbor.models.agent.context import AgentContext
 from harbor.models.trial.result import ExceptionInfo
 from harbor.models.verifier.result import VerifierResult
 
-from flock.harbor import agent as flock_agent
-from flock.harbor import launch, networking
-from flock.harbor.agent import FlockPi
-from flock.harbor.spec import Spec, compile_spec
-from flock.models import Inference
-from flock.worker.adapters.base import ResumeError
-from flock.worker.adapters.harbor import HarborAdapter, make_adapter
+from legion.harbor import agent as legion_agent
+from legion.harbor import launch, networking
+from legion.harbor.agent import LegionPi
+from legion.harbor.spec import Spec, compile_spec
+from legion.models import Inference
+from legion.worker.adapters.base import ResumeError
+from legion.worker.adapters.harbor import HarborAdapter, make_adapter
 
 from .test_envs import compose
 from .test_launch import FakeTrial
@@ -70,7 +70,7 @@ class FakeEnv:
 
     async def service_exec(self, command, *, service, timeout_sec):
         # Compose mixes a banner from stderr into stdout; the command frames its JSON body.
-        from flock.worker.adapters.harbor import CHECK_END, CHECK_START
+        from legion.worker.adapters.harbor import CHECK_END, CHECK_START
 
         parts = shlex.split(command)
         original = parts[parts.index("-c") + 1]
@@ -115,7 +115,7 @@ class FakeEnv:
             return ExecResult(return_code=0 if f.probe_ok else 1)
         if user == "root":
             f.root.append(command)
-        if command.endswith(flock_agent.KILL_PI):
+        if command.endswith(legion_agent.KILL_PI):
             if f.kill_fails:
                 return ExecResult(return_code=1)
             self.killed = True
@@ -225,8 +225,8 @@ def install(setattr) -> Fakes:
             await shared.route_gate.wait()
         if args[0] == "ip":
             return 0, "[]", ""
-        if args[2] == "inspect":  # flock-<run id>-<participant>
-            return 0, json.dumps([{"Labels": {"io.flock.run": args[3].split("-")[1]}}]), ""
+        if args[2] == "inspect":  # legion-<run id>-<participant>
+            return 0, json.dumps([{"Labels": {"io.legion.run": args[3].split("-")[1]}}]), ""
         return 0, "", ""
 
     setattr(launch.Trial, "create", create)
@@ -243,10 +243,10 @@ def fakes(monkeypatch):
 
 @pytest.fixture
 def clock(monkeypatch):
-    """FlockPi's monotonic clock, moved by hand; an idle Trial looks at it every 20 ms."""
+    """LegionPi's monotonic clock, moved by hand; an idle Trial looks at it every 20 ms."""
     now = [0.0]
-    monkeypatch.setattr(flock_agent, "time", SimpleNamespace(monotonic=lambda: now[0]))
-    monkeypatch.setattr(flock_agent, "PROBE", 0.02)
+    monkeypatch.setattr(legion_agent, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(legion_agent, "PROBE", 0.02)
     return now
 
 
@@ -306,7 +306,7 @@ async def test_one_trial_across_bursts(fakes, tmp_path):
     assert evs[1].message["content"][0]["text"] == "reply-1"
     await a.stop()
     assert (await read(events, "exited"))[-1].kind == "exited"
-    assert a.alive() and isinstance(fakes.trials[0].agent, FlockPi)
+    assert a.alive() and isinstance(fakes.trials[0].agent, LegionPi)
 
     assert (await start(a, sid))[0] == sid
     events = a.events()
@@ -323,7 +323,7 @@ async def test_one_trial_across_bursts(fakes, tmp_path):
 
 
 def pi_models(fakes, n=0):
-    """The models.json the n-th Trial's Pi was last given (FlockPi's copy)."""
+    """The models.json the n-th Trial's Pi was last given (LegionPi's copy)."""
     (provider,) = json.loads((fakes.trials[n].agent.logs_dir / "models.json").read_text())[
         "providers"].values()
     return provider
@@ -366,7 +366,7 @@ async def test_pi_reaches_this_machine_through_podman(fakes, tmp_path):
     agent = fakes.trials[0].config.agent
     assert agent.base_url == pi_models(fakes)["baseUrl"] == "http://host.containers.internal:8000/v1"
     assert agent.extra_allowed_hosts == ["host.containers.internal"]
-    assert agent.env["FLOCK_INFERENCE_KEY"] == "none" and agent.model_api_key_name == "FLOCK_INFERENCE_KEY"
+    assert agent.env["LEGION_INFERENCE_KEY"] == "none" and agent.model_api_key_name == "LEGION_INFERENCE_KEY"
     assert pi_models(fakes)["models"] == [{"id": "moonshotai/Kimi-K2.5", "contextWindow": 32768}]
     await a.stop()
     await read(events, "exited")
@@ -384,8 +384,8 @@ async def test_an_agent_keeps_its_server_across_trials_and_workers(fakes, tmp_pa
     """The server is picked from the swarm and the agent's name, so the agent's Trial on the
     worker it is restored on after a restart calls the server of its first one (whose prefix
     cache holds its context), the one its heartbeat names."""
-    from flock.worker.agents import AgentRuntime
-    from flock.worker.events import Outbox
+    from legion.worker.agents import AgentRuntime
+    from legion.worker.events import Outbox
 
     monkeypatch.setenv("SWARM", "s3-maze-07")  # the workers' env
     ts = endpoint_spec({"urls": [f"http://10.0.0.{i}:8000/v1" for i in range(1, 15)]})
@@ -445,7 +445,7 @@ async def test_stop_kills_a_turn_in_flight(fakes, tmp_path):
     await a.stop()
     evs = await read(events, "exited")
     assert [(e.kind, e.status) for e in evs] == [("turn_ended", "interrupted"), ("exited", None)]
-    assert any(c.endswith(flock_agent.KILL_PI) for c in fakes.root)
+    assert any(c.endswith(legion_agent.KILL_PI) for c in fakes.root)
     assert a.alive()
     _, events = await start(a)  # same Trial; the queued prompt was dropped
     await a.send("b")
@@ -483,7 +483,7 @@ async def test_resume_errors(fakes, tmp_path):
 async def test_a_failed_probe_reports_and_the_next_start_takes_a_new_trial(
     fakes, tmp_path, monkeypatch
 ):
-    monkeypatch.setattr(flock_agent, "PROBE", 0.05)
+    monkeypatch.setattr(legion_agent, "PROBE", 0.05)
     a = adapter(tmp_path)
     sid, events = await start(a)
     await a.send("a")
@@ -527,7 +527,7 @@ async def test_three_failed_turns_end_the_trial(fakes, tmp_path):
     evs = await read(events, "exited")
     assert [e.kind for e in evs] == ["error", "exited"] and "3 failed turns" in evs[0].error
     await asyncio.wait_for(asyncio.shield(a._run), 5)
-    assert fakes.trials[0].verified  # FlockPi returned: Harbor ran the verifier
+    assert fakes.trials[0].verified  # LegionPi returned: Harbor ran the verifier
     _, events = await start(a, None)
     await a.send("d")
     assert (await read(events, "turn_ended"))[-1].status == "completed"
@@ -552,8 +552,8 @@ async def test_trial_hours_roll_over_to_a_new_trial(fakes, tmp_path, clock):
 
 
 async def test_the_worker_runtime_drives_one_trial_across_bursts(fakes, tmp_path):
-    from flock.worker.agents import AgentRuntime
-    from flock.worker.events import Outbox
+    from legion.worker.agents import AgentRuntime
+    from legion.worker.events import Outbox
 
     from ..worker_fakes import event_types, until
 
@@ -578,7 +578,7 @@ def lines(a):
 
 
 async def test_unmounted_sessions_reach_home_at_rollover_and_close(fakes, tmp_path, clock):
-    fakes.mounted = False  # hf-sandbox: FlockPi downloads the sessions every SYNC s only
+    fakes.mounted = False  # hf-sandbox: LegionPi downloads the sessions every SYNC s only
     a = adapter(tmp_path, trial_hours=1)
     _, events = await start(a)
     for prompt in ("a", "b"):
@@ -617,7 +617,7 @@ async def test_a_prompt_sent_while_the_verifier_runs_ends_as_a_failed_turn(fakes
     for prompt in "abc":
         await a.send(prompt)
         await read(events, "turn_ended")
-    await until(lambda: a.trial.agent.why is not None)  # FlockPi returned; Harbor verifies
+    await until(lambda: a.trial.agent.why is not None)  # LegionPi returned; Harbor verifies
     await a.send("late")
     fakes.verify_gate.set()
     evs = await read(events, "exited")
@@ -735,14 +735,14 @@ async def test_each_trial_gets_its_own_network_removed_after_it(fakes, tmp_path,
     await read(events, "turn_ended")
     await a.close()
     calls = [c[2:] for c in fakes.net if c[0] == "docker" and c[2] != "inspect"]
-    t1, t2 = (f"flock-{a._network_id}-agent-0000-t{n}" for n in (1, 2))
+    t1, t2 = (f"legion-{a._network_id}-agent-0000-t{n}" for n in (1, 2))
     assert [(c[0], c[-1]) for c in calls] == [
         ("create", t1), ("rm", t1), ("create", t2), ("rm", t2)]
     (overlay,) = fakes.trials[1].config.environment.extra_docker_compose
     assert json.loads(overlay.read_text())["networks"]["default"] == {"external": True, "name": t2}
     # the agent's env names: the environment keeps their values out of every exec's argv
     assert fakes.trials[1].config.environment.kwargs["secret_names"] == [
-        "FLOCK_TOOLS_MANIFEST", "HF_TOKEN"]
+        "HF_TOKEN", "LEGION_TOOLS_MANIFEST"]
 
 
 @pytest.mark.parametrize("backend", ["hf-sandbox", "e2b"])
@@ -753,7 +753,7 @@ async def test_a_sandbox_trial_gets_no_network(fakes, tmp_path, backend):
     env = fakes.trials[0].config.environment
     assert fakes.net == [] and env.extra_docker_compose == []
     if backend == "e2b":  # Harbor's own E2B environment, living as long as the Trial
-        assert env.import_path == "flock.harbor.envs:E2B"
+        assert env.import_path == "legion.harbor.envs:E2B"
         assert env.kwargs["sandbox_timeout_secs"] == math.ceil(
             fakes.trials[0].config.agent.override_timeout_sec) + 600
 
@@ -783,13 +783,13 @@ async def test_close_cancels_a_slow_verifier_after_its_timeout(fakes, tmp_path):
 async def test_close_while_a_trial_starts_does_not_raise(fakes, tmp_path, monkeypatch):
     from ..worker_fakes import until
 
-    monkeypatch.setattr(flock_agent, "PROBE", 0.05)
+    monkeypatch.setattr(legion_agent, "PROBE", 0.05)
     a = adapter(tmp_path)
     _, events = await start(a)
     fakes.probe_ok = False
     await read(events, "exited")  # t1 failed its probe
     fakes.probe_ok, fakes.start_gate = True, asyncio.Event()
-    await a.send("b")  # starts t2, which hangs before FlockPi is ready
+    await a.send("b")  # starts t2, which hangs before LegionPi is ready
     await until(lambda: len(fakes.trials) == 2)
     burst = asyncio.create_task(a.start(a.workdir, None, a.spec))  # waits for t2
     await asyncio.sleep(0)
@@ -814,7 +814,7 @@ async def test_a_trial_closed_while_created_leaves_no_network(fakes, tmp_path):
 
 
 async def test_a_failed_kill_is_reported(fakes, tmp_path, monkeypatch):
-    monkeypatch.setattr(flock_agent, "STOP_GRACE", 0.05)
+    monkeypatch.setattr(legion_agent, "STOP_GRACE", 0.05)
     a = adapter(tmp_path)
     _, events = await start(a)
     fakes.hold, fakes.kill_fails = {1}, True
@@ -823,7 +823,7 @@ async def test_a_failed_kill_is_reported(fakes, tmp_path, monkeypatch):
     await a.stop()
     evs = await read(events, "exited")
     assert [e.kind for e in evs] == ["error", "exited"] and "kill pi" in evs[0].error
-    assert "pkill" not in flock_agent.KILL_PI
+    assert "pkill" not in legion_agent.KILL_PI
     fakes.release(1)
 
 
@@ -834,7 +834,7 @@ def test_read_turn_counts_compaction(tmp_path):
          "message": {"role": "assistant", "usage": {"input": 10, "output": 1}}},
         {"type": "compaction_end", "result": {"usage": {"input": 100, "output": 20}}},
     ]))
-    messages, usage = flock_agent.read_turn(path)
+    messages, usage = legion_agent.read_turn(path)
     assert len(messages) == 1 and (usage.input, usage.output) == (110, 21)
 
 
@@ -844,7 +844,7 @@ def test_the_kill_script_needs_no_procps_and_spares_itself(tmp_path):
     import subprocess
 
     proc = tmp_path / "proc"
-    script = flock_agent.KILL_PI.replace("/proc", str(proc))
+    script = legion_agent.KILL_PI.replace("/proc", str(proc))
     for pid, ppid, argv in [("11", "12", ["node", "/usr/bin/pi", "--print", "--mode", "json"]),
                             ("12", "1", ["bash", "-c", "set -o pipefail; pi --print 'hi'"]),
                             ("20", "11", ["bash", "-c", "make test"]), ("21", "20", ["make"]),
@@ -865,8 +865,8 @@ def test_the_kill_script_needs_no_procps_and_spares_itself(tmp_path):
 
 
 def runtime(tmp_path):
-    from flock.worker.agents import AgentRuntime
-    from flock.worker.events import Outbox
+    from legion.worker.agents import AgentRuntime
+    from legion.worker.events import Outbox
 
     a = adapter(tmp_path)
     spec = a.spec.model_copy(update={"idle_grace": "200ms"})
@@ -911,7 +911,7 @@ async def test_no_trial_starts_after_the_exit_path_closed_the_agent(fakes, tmp_p
 
 
 async def test_drain_cancels_a_slow_verifier(fakes, tmp_path, monkeypatch):
-    from flock.worker import agents
+    from legion.worker import agents
 
     from ..worker_fakes import until
 
@@ -929,7 +929,7 @@ async def test_drain_cancels_a_slow_verifier(fakes, tmp_path, monkeypatch):
 def harbor_worker(tmp_path, *texts, sync=None):
     """A worker with agent-0000 (this file's fakes) assigned, then sent `texts`; its bursts
     stay open 2 s after a turn."""
-    from flock.models import AssignCommand, PromptCommand
+    from legion.models import AssignCommand, PromptCommand
 
     from ..test_worker_main import FakeController, make_worker
 
@@ -978,8 +978,8 @@ async def test_preempt_pushes_the_last_turns_unmounted_sessions(fakes, tmp_path)
 
 
 async def test_a_pi_turn_leaves_no_value_in_an_argv(fakes, monkeypatch, tmp_path):
-    """The env the real FlockPi gives a `pi --print` turn (Harbor's Pi passes the inference key
-    as OPENAI_API_KEY, not under the spec's name) through flock's docker environment with the
+    """The env the real LegionPi gives a `pi --print` turn (Harbor's Pi passes the inference key
+    as OPENAI_API_KEY, not under the spec's name) through legion's docker environment with the
     adapter's secret_names: every name is passed bare, every value through the environment."""
     a = adapter(tmp_path)
     _, events = await start(a)

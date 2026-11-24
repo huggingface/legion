@@ -28,7 +28,7 @@ To bill an organization instead, explicitly set its namespace:
 
 ```yaml
 namespace: my-org
-bucket_id: flock-runs
+bucket_id: legion-runs
 ```
 
 This selects the org for HF infrastructure and router billing; router requests include
@@ -47,17 +47,17 @@ plan. It makes billable inference requests.
 
 ## Bucket IDs
 
-Set `bucket_id` to a bare name (`flock-runs`) or a qualified ID (`your-username/flock-runs`), as
+Set `bucket_id` to a bare name (`legion-runs`) or a qualified ID (`your-username/legion-runs`), as
 in [huggingface_hub](https://huggingface.co/docs/huggingface_hub/guides/buckets).
 Bare names use the explicit namespace, else `HF_TOKEN`'s account. Qualified IDs select storage
 independently of billing. `hf://buckets/...` URLs and user-provided path prefixes are refused
 in this field. The former `bucket` field has been removed.
 
-`flock launch` resolves the ID once, creates a missing bucket private with `HF_TOKEN`, and
+`legion launch` resolves the ID once, creates a missing bucket private with `HF_TOKEN`, and
 stores `<namespace>/<name>` for the controller and workers. Existing buckets retain their
-visibility. The source YAML and an unset namespace stay as written. `flock init` checks an
+visibility. The source YAML and an unset namespace stay as written. `legion init` checks an
 existing bucket's write access; for a missing one it reports that launch will create it.
-Flock's own `controller/<swarm>/` and `<swarm>/<type>/<agent>/` folders are unchanged.
+Legion's own `controller/<swarm>/` and `<swarm>/<type>/<agent>/` folders are unchanged.
 
 `bucket_id` is required for HF Jobs and Slurm workers. Local workers keep agent state on disk;
 an optional bucket can still hold the local controller's checkpoint. For Slurm, launch writes
@@ -65,9 +65,9 @@ the resolved ID to `hosts/bucket_id` before submitting the controller, so the ba
 construct its checkpoint URL without another account lookup.
 
 A configured bucket is always prepared, including local and foreground launches. It needs
-bucket create/write credentials even with `FLOCK_STATE_URL=` (checkpointing off). Leave
+bucket create/write credentials even with `LEGION_STATE_URL=` (checkpointing off). Leave
 `bucket_id` unset for a local run that needs no Hub storage or credentials. The foreground
-`python -m flock.controller.localrun` command uses the same bucket preparation as `flock launch`.
+`python -m legion.controller.localrun` command uses the same bucket preparation as `legion launch`.
 
 A manually org-deployed job controller refuses a blank namespace when `HF_TOKEN` belongs
 to another account. For a controller in `my-org`, set `namespace: my-org`

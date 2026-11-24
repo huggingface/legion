@@ -1,8 +1,8 @@
 """A fake Hub for tests, at HF_ENDPOINT: no real Hub, bucket or job is ever reached.
 
 - GET /api/buckets/...: every bucket is empty (`[]`); `hub.asked` lists these requests.
-- POST /api/jobs/<ns>: the job runs on this machine as `python -m flock.worker.main` (what
-  flock's worker image ends in, `exec flock-worker`) with the job's environment and secrets,
+- POST /api/jobs/<ns>: the job runs on this machine as `python -m legion.worker.main` (what
+  legion's worker image ends in, `exec legion-worker`) with the job's environment and secrets,
   minus BUCKET_ID (the agents' state stays on this disk), its /work and HOME under `root/<job id>`.
   `hub.jobs[id]` keeps the job spec as huggingface_hub sent it.
 - GET /api/jobs/<ns>/<id>: RUNNING, then COMPLETED (exit 0), ERROR (another exit) or CANCELED.
@@ -45,7 +45,7 @@ class Hub:
         d.mkdir(parents=True)
         with (d / "log").open("wb") as log:
             self.procs[job] = subprocess.Popen(
-                [sys.executable, "-m", "flock.worker.main"], cwd=d, env=env, stdout=log,
+                [sys.executable, "-m", "legion.worker.main"], cwd=d, env=env, stdout=log,
                 stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
         self.jobs[job] = {**spec, "namespace": ns}
         return self.info(job)

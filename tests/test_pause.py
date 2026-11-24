@@ -5,10 +5,10 @@ from __future__ import annotations
 
 import httpx
 
-from flock.controller.api import create_app
-from flock.controller.health import Health
-from flock.controller.reconcile import swarm_stream
-from flock.models import SwarmSpec
+from legion.controller.api import create_app
+from legion.controller.health import Health
+from legion.controller.reconcile import swarm_stream
+from legion.models import SwarmSpec
 
 from . import test_loop_controller
 from .conftest import make_spec
@@ -139,7 +139,7 @@ async def test_world_down_holds_world_types_after_the_threshold_and_resumes_its_
     T = clock().timestamp()
     store.put_swarm(world_types_spec(), T)
     world = FakeWorld()
-    h = Health(store, secrets={"FLOCK_WORLD_DOWN_PAUSE_S": "600"},
+    h = Health(store, secrets={"LEGION_WORLD_DOWN_PAUSE_S": "600"},
                transport=httpx.MockTransport(world))
     app = create_app(store, "tok", clock=clock, loop_interval=0, health=h)
     loops = app.state.loops

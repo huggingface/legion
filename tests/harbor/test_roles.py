@@ -4,7 +4,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from flock.harbor.config import AgentSettings, Config
+from legion.harbor.config import AgentSettings, Config
 
 EXAMPLES = Path(__file__).parent / "examples"
 

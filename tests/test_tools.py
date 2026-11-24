@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from flock.models import SwarmSpec
-from flock.tools.bundle import (
+from legion.models import SwarmSpec
+from legion.tools.bundle import (
     MANIFEST_NAME,
     extract,
     load_extracted,
@@ -18,8 +18,8 @@ from flock.tools.bundle import (
     read_manifest,
     version_of,
 )
-from flock.tools.loader import ToolsError, check_args, describe, load_dir
-from flock.tools.spec import prepare
+from legion.tools.loader import ToolsError, check_args, describe, load_dir
+from legion.tools.spec import prepare
 
 from .conftest import FAKE_INFERENCE, HB
 
@@ -36,7 +36,7 @@ TYPES_SRC = '''
 
     from typing import Literal, Optional
 
-    from flock.tools import Context
+    from legion.tools import Context
 
 
     def everything(s: str, i: int, f: float, b: bool, tags: list[str], d: dict,
@@ -143,11 +143,11 @@ def test_helpers_and_imported_functions_are_not_tools(tmp_path):
 
 
 def test_readonly_tools_are_flagged_in_the_manifest(tmp_path):
-    """`@flock.tools.readonly` puts `readonly: true` in the manifest; other tools leave the key
+    """`@legion.tools.readonly` puts `readonly: true` in the manifest; other tools leave the key
     out, so a folder without the flag keeps its manifest and version."""
     folder = tmp_path / "tools"
     write(folder, "board.py", """
-        from flock.tools import readonly
+        from legion.tools import readonly
 
         @readonly
         def task_board() -> str:
@@ -232,7 +232,7 @@ def test_pack_refuses_symlinks_and_big_folders(tmp_path, monkeypatch):
     with pytest.raises(ToolsError, match="symlinks are not allowed"):
         pack(folder)
     (folder / "link.py").unlink()
-    import flock.tools.bundle as bundle_mod
+    import legion.tools.bundle as bundle_mod
 
     monkeypatch.setattr(bundle_mod, "MAX_BUNDLE_BYTES", 100)
     with pytest.raises(ToolsError, match="the limit is 100"):
@@ -300,7 +300,7 @@ def test_spec_fields_are_optional_and_checked():
             "types": {"dev": {**HB, "model": "m"}}}
     s = SwarmSpec.model_validate(base)
     assert s.tools_dir is None and s.tools_version is None and s.types["dev"].tools is None
-    with pytest.raises(ValueError, match="tools_version is written by `flock launch`"):
+    with pytest.raises(ValueError, match="tools_version is written by `legion launch`"):
         SwarmSpec.model_validate({**base, "tools_version": "nothex"})
     with pytest.raises(ValueError):
         SwarmSpec.model_validate({**base, "types": {"dev": {**HB, "model": "m",

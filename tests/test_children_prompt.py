@@ -1,4 +1,4 @@
-"""Parent-scoped bulk prompt (`POST /agents/{name}/children/prompts`, `flock prompt
+"""Parent-scoped bulk prompt (`POST /agents/{name}/children/prompts`, `legion prompt
 --children`): a leader prompts its 100 children in one request with its own token."""
 
 from __future__ import annotations
@@ -7,10 +7,10 @@ from datetime import timedelta
 
 from typer.testing import CliRunner
 
-from flock import cli
-from flock.client import Client
-from flock.controller import spawn as spawning
-from flock.models import AgentHeartbeat, PromptCommand, WorkerHeartbeat
+from legion import cli
+from legion.client import Client
+from legion.controller import spawn as spawning
+from legion.models import AgentHeartbeat, PromptCommand, WorkerHeartbeat
 
 from .test_spawn_api import LEADER, apply, as_agent, spawn, spawn_spec
 
@@ -80,7 +80,7 @@ def test_cli_prompt_children(monkeypatch, app, store):
         return {"matched": 0}
 
     monkeypatch.setattr(Client, "_call", fake_call)
-    monkeypatch.setenv("FLOCK_AGENT", LEADER)
+    monkeypatch.setenv("LEGION_AGENT", LEADER)
     r = runner.invoke(cli.app, ["prompt", "--children", "--type", "analyst", "--state", "idle", "go"])
     assert r.exit_code == 0, r.output
     assert sent[-1] == ("POST", f"/agents/{LEADER}/children/prompts",
@@ -88,6 +88,6 @@ def test_cli_prompt_children(monkeypatch, app, store):
                          "text": "go"})
     r = runner.invoke(cli.app, ["prompt", "--children", "--parent", "x-0001", "hi"])
     assert r.exit_code == 0 and sent[-1][1] == "/agents/x-0001/children/prompts"
-    monkeypatch.delenv("FLOCK_AGENT")
+    monkeypatch.delenv("LEGION_AGENT")
     assert runner.invoke(cli.app, ["prompt", "--children", "hi"]).exit_code == 2  # no parent
     assert runner.invoke(cli.app, ["prompt", "--children", "a-0001", "hi"]).exit_code == 2

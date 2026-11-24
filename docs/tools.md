@@ -1,7 +1,7 @@
 # Adding tools
 
 Tools are Python functions packaged for the agents' task environments. Start with
-a module in `src/flock/harbor/builtin/tools/`, or use an experiment-specific
+a module in `src/legion/harbor/builtin/tools/`, or use an experiment-specific
 `tools_dir`. Adding a tool does not require changing the controller or CLI.
 
 ## Define and select a tool
@@ -32,11 +32,11 @@ types include `str`, `int`, `float`, `bool`, `None`, unions, `Literal`, typed li
 and dictionaries with string keys. Defaults become optional arguments. Return
 JSON-serializable values; synchronous and asynchronous functions are supported.
 
-Flock includes tool descriptions in the agent instructions. Inside the task
+Legion includes tool descriptions in the agent instructions. Inside the task
 environment, the agent invokes them with:
 
 ```sh
-flock-tool calculator.add --json '{"x": 2, "y": 3}'
+legion-tool calculator.add --json '{"x": 2, "y": 3}'
 ```
 
 This command uses the tool bundle installed for that agent; it is not a separate
@@ -75,6 +75,6 @@ variables, allowed hosts, and, where supported, mounts.
 
 Use the existing [message board](comms.md), [world](world.md), and
 [spawn](spawn.md) resources where they fit. For a custom provider, follow the
-`Resource` interface in `src/flock/harbor/resources.py` and the providers under
-`src/flock/harbor/builtin/resources/`; `resources_dir` selects an alternative
+`Resource` interface in `src/legion/harbor/resources.py` and the providers under
+`src/legion/harbor/builtin/resources/`; `resources_dir` selects an alternative
 provider directory. Do not put credentials in tool source or example YAML.

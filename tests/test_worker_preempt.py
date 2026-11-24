@@ -1,5 +1,5 @@
 """Worker preemption (SIGUSR1/SIGTERM; docs/slurm.md): interrupt, parallel sync, marker, flag,
-exit 75, all inside FLOCK_DRAIN_BUDGET_S; then a restart with the same name restores. Also the
+exit 75, all inside LEGION_DRAIN_BUDGET_S; then a restart with the same name restores. Also the
 controller host file (Slurm) and a container with no usable HOME."""
 
 from __future__ import annotations
@@ -17,10 +17,10 @@ from pathlib import Path
 import httpx
 import pytest
 
-from flock.models import AssignCommand, PromptCommand
-from flock.worker import main as wmain
-from flock.worker.events import utcnow
-from flock.worker.main import PREEMPT_EXIT, ControllerClient, Worker, WorkerConfig
+from legion.models import AssignCommand, PromptCommand
+from legion.worker import main as wmain
+from legion.worker.events import utcnow
+from legion.worker.main import PREEMPT_EXIT, ControllerClient, Worker, WorkerConfig
 
 from .test_worker_main import WID, FakeController
 from .worker_fakes import MemoryStore, RecordingSync, ScriptedAdapter, spec, until
@@ -164,13 +164,13 @@ async def test_preempt_is_bounded_by_the_budget(tmp_path):
 def test_budget_from_env_and_host_file(tmp_path):
     host = tmp_path / "controller.host"
     host.write_text("ip-10-0-0-7\n")
-    env = {"FLOCK_URL": "http://${CTL_HOST}:7860", "FLOCK_CTL_HOST_FILE": str(host),
-           "FLOCK_TOKEN": "t", "WORKER_ID": WID, "SWARM": "sw", "TYPE": "researcher",
-           "DEADLINE": "2026-10-25T00:00:00+00:00", "FLOCK_DRAIN_BUDGET_S": "12"}
+    env = {"LEGION_URL": "http://${CTL_HOST}:7860", "LEGION_CTL_HOST_FILE": str(host),
+           "LEGION_TOKEN": "t", "WORKER_ID": WID, "SWARM": "sw", "TYPE": "researcher",
+           "DEADLINE": "2026-10-25T00:00:00+00:00", "LEGION_DRAIN_BUDGET_S": "12"}
     cfg = WorkerConfig.from_env(env)
     assert cfg.url == "http://ip-10-0-0-7:7860" and cfg.drain_budget == 12.0
     assert cfg.url_template == "http://${CTL_HOST}:7860"
-    assert WorkerConfig.from_env({**env, "FLOCK_DRAIN_BUDGET_S": ""}).drain_budget == 20.0
+    assert WorkerConfig.from_env({**env, "LEGION_DRAIN_BUDGET_S": ""}).drain_budget == 20.0
     host.write_text("ip-10-0-0-7:40111\n")  # host:port (a free port): the file's port wins
     assert WorkerConfig.from_env(env).url == "http://ip-10-0-0-7:40111"
     # worker.sbatch exports CTL_HOST from the same file
@@ -194,7 +194,7 @@ async def test_client_follows_a_moved_controller(tmp_path):
         resolve_url=lambda: wmain.expand_env("http://${CTL_HOST}:7860",
                                              {"CTL_HOST": wmain.read_host_file(str(host))}))
     host.write_text("new-node\n")  # the controller was requeued on another node
-    from flock.models import WorkerHeartbeat
+    from legion.models import WorkerHeartbeat
 
     hb = WorkerHeartbeat(worker=WID, deadline=utcnow(), agents=[])
     assert await client.heartbeat(hb) == {"ok": True}
@@ -208,7 +208,7 @@ def test_worker_startup_without_home(tmp_path, monkeypatch):
     and nothing defaults to /tmp."""
     import tempfile
 
-    from flock.home import home
+    from legion.home import home
 
     ro_home = tmp_path / "ro-home"
     ro_home.mkdir()
@@ -219,8 +219,8 @@ def test_worker_startup_without_home(tmp_path, monkeypatch):
     monkeypatch.setattr(tempfile, "tempdir", None)  # restored after the test
     root = tmp_path / "work"  # what /work is in the container
     work = root / "agents"
-    monkeypatch.setenv("FLOCK_URL", "http://ctl:7860")
-    monkeypatch.setenv("FLOCK_TOKEN", "t")
+    monkeypatch.setenv("LEGION_URL", "http://ctl:7860")
+    monkeypatch.setenv("LEGION_TOKEN", "t")
     monkeypatch.setenv("WORKER_ID", WID)
     monkeypatch.setenv("SWARM", "sw")
     monkeypatch.setenv("TYPE", "researcher")
@@ -268,7 +268,7 @@ async def test_repeated_signals_drain_once(tmp_path, caplog):
     """The Spot watcher signals every process of the job, and the batch script forwards: the
     worker may get USR1 then TERM (USR1 twice: test_runs.py::test_slurm). The first starts the
     drain; the rest change nothing."""
-    caplog.set_level("INFO", logger="flock.worker")
+    caplog.set_level("INFO", logger="legion.worker")
     store = SlowStore(delay=0.3)
     ctrl = FakeController()
     ctrl.batches = [[AssignCommand(agent=n, type="researcher", spec=spec(idle_grace="10s"),
@@ -292,14 +292,14 @@ async def test_repeated_signals_drain_once(tmp_path, caplog):
 
 
 def _nonreclaim(leaf: Path, mb: float, oom_kill: int = 2) -> None:
-    from flock.worker.cgroup import MB
+    from legion.worker.cgroup import MB
 
     (leaf / "memory.stat").write_text(f"anon {int(mb * MB)}\nfile {3000 * MB}\n")
     (leaf / "memory.events").write_text(f"oom 0\noom_kill {oom_kill}\n")
 
 
 async def _ladder_worker(tmp_path, n=2):
-    from flock.worker.cgroup import CgroupMem
+    from legion.worker.cgroup import CgroupMem
 
     from .test_worker_cgroup import v2
 
@@ -311,12 +311,12 @@ async def _ladder_worker(tmp_path, n=2):
         await worker.dispatch(AssignCommand(agent=name, type="researcher", spec=s, restore=False))
         await worker.dispatch(PromptCommand(agent=name, prompt_id=name, text="work"))
     await until(lambda: all(rt.turn_id for rt in worker.agents.values()) and len(worker.agents) == n)
-    worker.mem_knobs["FLOCK_MEM_DRAIN_DEADLINE_S"] = 0.2  # after the assigns' apply_knobs
+    worker.mem_knobs["LEGION_MEM_DRAIN_DEADLINE_S"] = 0.2  # after the assigns' apply_knobs
     return worker, leaf
 
 
 async def _step(worker, leaf, mb, **kw):
-    from flock.models import WorkerMem
+    from legion.models import WorkerMem
 
     _nonreclaim(leaf, mb, **kw)
     worker.mem = WorkerMem(**worker.cgroup.sample())
@@ -354,13 +354,13 @@ async def test_oom_kill_delta_preempts(tmp_path):
 
 
 def test_mem_thresholds_spec_over_env_over_default(tmp_path, monkeypatch):
-    from flock.worker.cgroup import MemThresholds
+    from legion.worker.cgroup import MemThresholds
 
     worker, _, _ = make(tmp_path, FakeController(), MemoryStore())
     assert MemThresholds.read(worker.mem_knob) == MemThresholds()
-    for k, v in {"FLOCK_MEM_ROTATE": "0.6", "FLOCK_MEM_DRAIN_DEADLINE_S": "x",
-                 "FLOCK_MEM_DRAIN": "0.8"}.items():
+    for k, v in {"LEGION_MEM_ROTATE": "0.6", "LEGION_MEM_DRAIN_DEADLINE_S": "x",
+                 "LEGION_MEM_DRAIN": "0.8"}.items():
         monkeypatch.setenv(k, v)
-    worker.mem_knobs["FLOCK_MEM_DRAIN"] = 0.9  # the spec's worker.memory.drain
+    worker.mem_knobs["LEGION_MEM_DRAIN"] = 0.9  # the spec's worker.memory.drain
     th = MemThresholds.read(worker.mem_knob)
     assert (th.rotate, th.drain_deadline_s, th.drain) == (0.6, 300, 0.9)

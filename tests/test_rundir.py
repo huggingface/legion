@@ -1,5 +1,5 @@
-"""flock.rundir: `flock init RUN_DIR --from FOLDER` (files, run.env, checks with fakes, no
-network) and `flock --run RUN_DIR` / FLOCK_RUN_DIR."""
+"""legion.rundir: `legion init RUN_DIR --from FOLDER` (files, run.env, checks with fakes, no
+network) and `legion --run RUN_DIR` / LEGION_RUN_DIR."""
 
 from __future__ import annotations
 
@@ -10,11 +10,11 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
-from flock import cli, rundir
-from flock.client import Client
-from flock.models import PreflightReport, PreflightResult
-from flock.ops import read_spec
-from flock.specrender import read_env_file
+from legion import cli, rundir
+from legion.client import Client
+from legion.models import PreflightReport, PreflightResult
+from legion.ops import read_spec
+from legion.specrender import read_env_file
 
 from .conftest import FAKE_INFERENCE, HB
 
@@ -71,8 +71,8 @@ def test_init_creates_everything_then_changes_nothing(tmp_path):
     env_file = run / "run.env"
     assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
     values = read_env_file(env_file)
-    assert len(values["FLOCK_TOKEN"]) > 30 and values["FLOCK_WORLD_TOKEN"] != values["FLOCK_TOKEN"]
-    assert values["PYBOT_WORLD_TOKEN"] == values["FLOCK_WORLD_TOKEN"]  # world.token_env
+    assert len(values["LEGION_TOKEN"]) > 30 and values["LEGION_WORLD_TOKEN"] != values["LEGION_TOKEN"]
+    assert values["PYBOT_WORLD_TOKEN"] == values["LEGION_WORLD_TOKEN"]  # world.token_env
     text = env_file.read_text()
     assert "# swarm (default: demo)\n#SWARM=demo\n" in text  # a default stays the spec's
     assert "#ANTHROPIC_API_KEY=" in text and "#HF_TOKEN=" in text  # secrets named, unset
@@ -105,14 +105,14 @@ def test_empty_experiment_folder_is_filled_and_missing_source_refused(tmp_path):
 def test_secrets_fill_without_echo_and_never_overwrite(tmp_path, monkeypatch):
     src, run = _folder(tmp_path), tmp_path / "r"
     sec = tmp_path / "secrets.env"
-    sec.write_text("ANTHROPIC_API_KEY=sk-very-secret\nFLOCK_TOKEN=shared-token\nOTHER=x y\n")
+    sec.write_text("ANTHROPIC_API_KEY=sk-very-secret\nLEGION_TOKEN=shared-token\nOTHER=x y\n")
     sec.chmod(0o600)
     monkeypatch.setattr(rundir, "check_venv", lambda env: rundir.Check("venv", True))
     r = runner.invoke(cli.app, ["init", str(run), "--from", str(src), "--secrets", str(sec)])
     values = read_env_file(run / "run.env")
-    assert values["ANTHROPIC_API_KEY"] == "sk-very-secret" and values["FLOCK_TOKEN"] != "shared-token"
-    for secret in ("sk-very-secret", "shared-token", values["FLOCK_TOKEN"],
-                   values["FLOCK_WORLD_TOKEN"]):
+    assert values["ANTHROPIC_API_KEY"] == "sk-very-secret" and values["LEGION_TOKEN"] != "shared-token"
+    for secret in ("sk-very-secret", "shared-token", values["LEGION_TOKEN"],
+                   values["LEGION_WORLD_TOKEN"]):
         assert secret not in r.output
     assert "ANTHROPIC_API_KEY (from --secrets)" in r.output and "not written: OTHER" in r.output
     assert r.exit_code == 0, r.output
@@ -163,10 +163,10 @@ def test_slots_count_ramp_max_and_spawned_children(tmp_path):
 
 def test_tokens_must_match(tmp_path):
     data = {"world": {"token_env": "PYBOT_WORLD_TOKEN"}}
-    ok = {"FLOCK_TOKEN": "a", "FLOCK_WORLD_TOKEN": "w", "PYBOT_WORLD_TOKEN": "w"}
+    ok = {"LEGION_TOKEN": "a", "LEGION_WORLD_TOKEN": "w", "PYBOT_WORLD_TOKEN": "w"}
     assert rundir.check_tokens(data, ok).ok
     assert not rundir.check_tokens(data, {**ok, "PYBOT_WORLD_TOKEN": "x"}).ok
-    assert "FLOCK_TOKEN" in rundir.check_tokens(data, {**ok, "FLOCK_TOKEN": ""}).detail
+    assert "LEGION_TOKEN" in rundir.check_tokens(data, {**ok, "LEGION_TOKEN": ""}).detail
 
 
 class FakeBucket:
@@ -210,13 +210,13 @@ def _result(ok, unverified=False):
 @pytest.mark.parametrize("ok", [True, False])
 def test_providers_reuse_the_preflight_probe(tmp_path, monkeypatch, ok):
     spec = _spec(tmp_path)
-    monkeypatch.setattr("flock.ops.provider_backed", lambda s: True)
+    monkeypatch.setattr("legion.ops.provider_backed", lambda s: True)
 
     async def fake(s, secrets, client):
         assert secrets["K"] == "v"
         return PreflightReport(swarm=s.swarm, ok=ok, results=[_result(ok)])
 
-    monkeypatch.setattr("flock.controller.preflight.run_preflight", fake)
+    monkeypatch.setattr("legion.controller.preflight.run_preflight", fake)
     c = rundir.check_providers(spec, {"K": "v"})
     assert c.ok is ok and c.lines == (["p:m: ok 5 ms"] if ok else ["p:m: FAIL 5 ms (HTTP 500)"])
 
@@ -228,7 +228,7 @@ def test_board_checks_the_invite_and_health_without_joining(tmp_path, monkeypatc
                                               "invite_env": "INV", "channel": "general"}})
     seen = []
     monkeypatch.setattr(httpx, "get", lambda url, timeout: seen.append(url) or httpx.Response(200))
-    monkeypatch.setattr("flock.controller.comms.resolve", lambda *a, **k: pytest.fail("joined"))
+    monkeypatch.setattr("legion.controller.comms.resolve", lambda *a, **k: pytest.fail("joined"))
     c = rundir.check_board(spec, {"INV": "code"})
     assert c.ok and "join not tested" in c.detail and "code" not in c.detail
     assert seen == ["https://b.invalid/x/v1/health"]
@@ -266,7 +266,7 @@ def test_existing_open_run_env_is_made_private(tmp_path):
     (run / "run.env").chmod(0o644)
     rundir.init(run, _folder(tmp_path), env={})
     assert stat.S_IMODE((run / "run.env").stat().st_mode) == 0o600
-    assert read_env_file(run / "run.env")["FLOCK_TOKEN"]
+    assert read_env_file(run / "run.env")["LEGION_TOKEN"]
 
 
 def test_venv_must_import_the_worker(tmp_path):
@@ -292,7 +292,7 @@ def test_world_conformance_when_up(tmp_path, monkeypatch):
     assert rundir.check_world(spec, {}, run).ok is None
     monkeypatch.setattr(httpx, "get", lambda url, timeout: calls.append(url))
     for failed in (False, True):
-        monkeypatch.setattr("flock.world.doctor.doctor",
+        monkeypatch.setattr("legion.world.doctor.doctor",
                             lambda url, token, f=failed: (calls.append((url, token)) or ["manifest ok"], f))
         c = rundir.check_world(spec, {"PYBOT_WORLD_TOKEN": "w"}, run)
         assert c.ok is (not failed) and c.lines == ["manifest ok"]
@@ -302,42 +302,42 @@ def test_world_conformance_when_up(tmp_path, monkeypatch):
 def test_run_dir_resolution(tmp_path, monkeypatch):
     run = tmp_path / "r"
     (run / "hosts").mkdir(parents=True)
-    (run / "run.env").write_text("FLOCK_TOKEN=run-tok\n")
-    assert rundir.run_context(run) == ({"FLOCK_RUN_DIR": str(run), "FLOCK_TOKEN": "run-tok"},
+    (run / "run.env").write_text("LEGION_TOKEN=run-tok\n")
+    assert rundir.run_context(run) == ({"LEGION_RUN_DIR": str(run), "LEGION_TOKEN": "run-tok"},
                                        [str(run / "run.env")])
-    (run / ".flock").mkdir()
-    (run / ".flock" / "current").write_text("{}")
-    assert rundir.run_context(run)[0]["FLOCK_CURRENT"] == str(run / ".flock" / "current")
+    (run / ".legion").mkdir()
+    (run / ".legion" / "current").write_text("{}")
+    assert rundir.run_context(run)[0]["LEGION_CURRENT"] == str(run / ".legion" / "current")
     (run / "hosts" / "controller.host").write_text("node3\n")
-    assert rundir.run_context(run)[0]["FLOCK_URL"] == "http://node3:7860"
+    assert rundir.run_context(run)[0]["LEGION_URL"] == "http://node3:7860"
     (run / "hosts" / "controller.host").write_text("https://abc--7860.hf.jobs\n")  # an HF Job's
-    assert rundir.run_context(run)[0]["FLOCK_URL"] == "https://abc--7860.hf.jobs"
+    assert rundir.run_context(run)[0]["LEGION_URL"] == "https://abc--7860.hf.jobs"
     (run / "hosts" / "controller.host").write_text("node3:7999\n")
-    assert rundir.run_context(run)[0]["FLOCK_URL"] == "http://node3:7999"
+    assert rundir.run_context(run)[0]["LEGION_URL"] == "http://node3:7999"
 
     seen = []
     monkeypatch.setattr(Client, "swarms", lambda self: seen.append(
-        (self.env.get("FLOCK_URL"), self.env.get("FLOCK_TOKEN"))) or [])
-    monkeypatch.setenv("FLOCK_URL", "http://shell:1")  # restored by monkeypatch at teardown
-    monkeypatch.setenv("FLOCK_TOKEN", "shell-tok")
-    monkeypatch.setenv("FLOCK_RUN_DIR", str(run))
-    assert runner.invoke(cli.app, ["status"]).exit_code == 0  # FLOCK_RUN_DIR loses to FLOCK_URL
+        (self.env.get("LEGION_URL"), self.env.get("LEGION_TOKEN"))) or [])
+    monkeypatch.setenv("LEGION_URL", "http://shell:1")  # restored by monkeypatch at teardown
+    monkeypatch.setenv("LEGION_TOKEN", "shell-tok")
+    monkeypatch.setenv("LEGION_RUN_DIR", str(run))
+    assert runner.invoke(cli.app, ["status"]).exit_code == 0  # LEGION_RUN_DIR loses to LEGION_URL
     assert runner.invoke(cli.app, ["--run", str(run), "status"]).exit_code == 0  # --run wins
-    monkeypatch.delenv("FLOCK_URL")
+    monkeypatch.delenv("LEGION_URL")
     assert runner.invoke(cli.app, ["status"]).exit_code == 0
     assert seen == [("http://shell:1", "shell-tok"), ("http://node3:7999", "run-tok"),
                     ("http://node3:7999", "run-tok")]
     (run / "hosts" / "controller.host").unlink()
-    (run / ".flock" / "current").unlink()
-    monkeypatch.setenv("FLOCK_URL", "http://shell:1")
+    (run / ".legion" / "current").unlink()
+    monkeypatch.setenv("LEGION_URL", "http://shell:1")
     r = runner.invoke(cli.app, ["--run", str(run), "status"])
     assert r.exit_code == 1 and "no controller host file" in r.output
-    assert os.environ["FLOCK_URL"] == "http://shell:1" and len(seen) == 3  # not mutated
+    assert os.environ["LEGION_URL"] == "http://shell:1" and len(seen) == 3  # not mutated
 
 
 def test_run_env_is_the_first_env_file(tmp_path, monkeypatch):
-    monkeypatch.setenv("FLOCK_TOKEN", "t")  # --run sets both: restored at teardown
-    monkeypatch.setenv("FLOCK_URL", "http://shell:1")
+    monkeypatch.setenv("LEGION_TOKEN", "t")  # --run sets both: restored at teardown
+    monkeypatch.setenv("LEGION_URL", "http://shell:1")
     run = tmp_path / "r"
     rundir.init(run, _folder(tmp_path), env={})
     (run / "hosts" / "controller.host").write_text("node3\n")
@@ -352,7 +352,7 @@ def test_run_env_is_the_first_env_file(tmp_path, monkeypatch):
         return {"warnings": [], "probed": [], "kept": [], "diff": [], "deletes": [],
                 "world_tools": None, "applied": False}
 
-    monkeypatch.setattr("flock.ops.update", fake_update)
+    monkeypatch.setattr("legion.ops.update", fake_update)
     r = runner.invoke(cli.app, ["--run", str(run), "update", str(run / "experiment"),
                                 "--env", str(over)])
     assert r.exit_code == 0, r.output
@@ -477,7 +477,7 @@ def test_slurm_capacity_from_a_fake_sinfo(tmp_path):
         return run
 
     # 2 researchers, 2 per worker: 1 worker x 4 CPUs
-    c = rundir.check_capacity(spec, {"FLOCK_SLURM_PARTITION": "cpu"}, run=sinfo(30))
+    c = rundir.check_capacity(spec, {"LEGION_SLURM_PARTITION": "cpu"}, run=sinfo(30))
     assert c.ok and not c.warn and c.lines == ["partition cpu: 4 CPUs planned, 30 idle now"]
     assert calls[-1] == ["sinfo", "-h", "-p", "cpu", "-o", "%P %C"]
     c = rundir.check_capacity(spec, {}, run=sinfo(2))  # the default (`*`) row only, not gpu's
@@ -485,8 +485,8 @@ def test_slurm_capacity_from_a_fake_sinfo(tmp_path):
     assert calls[-1] == ["sinfo", "-h", "-o", "%P %C"]
     failing = lambda argv: rundir.subprocess.CompletedProcess(argv, 1, "", "no partition")
     assert rundir.check_capacity(spec, {}, run=failing).ok is None
-    # the profile's node limits (FLOCK_SLURM_MAX_*) are seen by init too
-    c = rundir.check_capacity(spec, {"FLOCK_SLURM_MAX_CPUS": "2"}, run=sinfo(30))
+    # the profile's node limits (LEGION_SLURM_MAX_*) are seen by init too
+    c = rundir.check_capacity(spec, {"LEGION_SLURM_MAX_CPUS": "2"}, run=sinfo(30))
     assert c.ok is False and "over max_cpus 2" in c.detail
 
 

@@ -1,4 +1,4 @@
-"""`flock launch` starts what serves the run when no controller answers (`ops.up`), and `flock
+"""`legion launch` starts what serves the run when no controller answers (`ops.up`), and `legion
 stop --release` ends it after a verified checkpoint (`ops.down`): Slurm with fake sbatch /
 squeue / scancel on PATH, HF Jobs with a fake HfApi, the controller in process."""
 
@@ -16,12 +16,12 @@ import yaml
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from flock import cli, ops
-from flock.client import Client
-from flock.controller.api import create_app
-from flock.models import SwarmSpec
-from flock.ops import SpecError, read_spec
-from flock.rundir import SLURM_SCRIPTS
+from legion import cli, ops
+from legion.client import Client
+from legion.controller.api import create_app
+from legion.models import SwarmSpec
+from legion.ops import SpecError, read_spec
+from legion.rundir import SLURM_SCRIPTS
 
 from .conftest import TOKEN, make_spec, wire, write_spec
 
@@ -58,7 +58,7 @@ def _log(calls: Path) -> list[str]:
 
 @pytest.fixture
 def slurm_run(tmp_path, monkeypatch, store):
-    """A run directory (as `flock init` leaves it) whose spec has a world command, the fake
+    """A run directory (as `legion init` leaves it) whose spec has a world command, the fake
     Slurm commands on PATH and the controller in process (its world faked)."""
     bin_, calls = _commands(tmp_path)
     monkeypatch.setenv("PATH", f"{bin_}:{os.environ['PATH']}")
@@ -66,10 +66,10 @@ def slurm_run(tmp_path, monkeypatch, store):
     for sub in ("hosts", "logs", "experiment"):
         (run / sub).mkdir(parents=True)
     shutil.copytree(SLURM_SCRIPTS, run / "slurm")
-    (run / "run.env").write_text(f"FLOCK_TOKEN={TOKEN}\nWORLD_CPUS=8\n")
+    (run / "run.env").write_text(f"LEGION_TOKEN={TOKEN}\nWORLD_CPUS=8\n")
     spec = make_spec().model_dump(mode="json", exclude_none=True)
     spec["compute"] = {"kind": "slurm"}
-    spec["world"] = {"command": ["{python}", "-m", "flock.world", "serve", "w:W"],
+    spec["world"] = {"command": ["{python}", "-m", "legion.world", "serve", "w:W"],
                      "url": "http://world.invalid:8000", "token_env": "WT"}
     f = run / "experiment" / "spec.yaml"
     f.write_text(yaml.safe_dump(spec))
@@ -121,14 +121,14 @@ def test_launch_starts_controller_and_world_waits_then_creates_and_release_ends_
     said: list[str] = []
     done = ops.launch(api, read_spec(r.spec_file, api.env_files), r.spec_file,
                       env_files=api.env_files, preflight=False, say=said.append)
-    assert done["up"] == {"jobs": {"world": "flock-world-run", "controller": "flock-ctl-run"},
+    assert done["up"] == {"jobs": {"world": "legion-world-run", "controller": "legion-ctl-run"},
                           "url": "http://node-c:7999"}
     assert polls == ["poll"] and any("waiting for the world and controller" in s for s in said)
     assert done["status"]["swarm"] == "demo" and store.get_swarm("demo") is not None  # created
     world, ctl = _log(r.calls)
-    assert world == (f"sbatch -J flock-world-run -o {r.run}/logs/%x-%j.out -c 8 "
+    assert world == (f"sbatch -J legion-world-run -o {r.run}/logs/%x-%j.out -c 8 "
                      f"{r.run}/slurm/world.sbatch {r.run}")
-    assert ctl == (f"sbatch -J flock-ctl-run -o {r.run}/logs/%x-%j.out "
+    assert ctl == (f"sbatch -J legion-ctl-run -o {r.run}/logs/%x-%j.out "
                    f"{r.run}/slurm/controller.sbatch {r.run}")
 
     # stop --release: drain, checkpoint, the world's clean stop, then cancel what still runs
@@ -136,9 +136,9 @@ def test_launch_starts_controller_and_world_waits_then_creates_and_release_ends_
     res = runner.invoke(cli.app, ["--run", str(r.run), "stop", "demo", "--release"])
     assert res.exit_code == 0, res.output
     assert _log(r.calls) == ["drain", "checkpoint",
-                             f"scancel --signal=TERM --batch -u {ME} -n flock-world-run",
-                             f"scancel -u {ME} -n flock-ctl-run"]  # the world ended on SIGTERM
-    assert "ended flock-world-run" in res.output and "ended flock-ctl-run" in res.output
+                             f"scancel --signal=TERM --batch -u {ME} -n legion-world-run",
+                             f"scancel -u {ME} -n legion-ctl-run"]  # the world ended on SIGTERM
+    assert "ended legion-world-run" in res.output and "ended legion-ctl-run" in res.output
     assert [p.name for p in (r.run / "hosts").iterdir()] == ["bucket_id"]
     assert (r.run / "hosts" / "bucket_id").read_text() == "ns/sh\n"
 
@@ -148,7 +148,7 @@ def test_launch_starts_controller_and_world_waits_then_creates_and_release_ends_
     _start_jobs_on_first_poll(monkeypatch, r.run)
     done = ops.launch(api, read_spec(r.spec_file, api.env_files), r.spec_file,
                       env_files=api.env_files)
-    assert [x.split()[2] for x in _log(r.calls)] == ["flock-world-run", "flock-ctl-run"]
+    assert [x.split()[2] for x in _log(r.calls)] == ["legion-world-run", "legion-ctl-run"]
     assert "resumed" in done and "status" not in done
     assert "released" not in store.swarm_flags("demo")
 
@@ -165,7 +165,7 @@ def test_a_failed_final_checkpoint_is_reported_and_nothing_is_cancelled(slurm_ru
     assert "final checkpoint failed: error 500" in res.output and "bucket 503" in res.output
     assert "nothing was ended" in res.output
     assert _log(r.calls) == ["drain", "checkpoint"]  # no scancel: the controller keeps its state
-    assert "flock-ctl-run RUNNING" in r.jobs.read_text()
+    assert "legion-ctl-run RUNNING" in r.jobs.read_text()
 
 
 def test_a_pending_world_is_cancelled_not_signalled(slurm_run, monkeypatch):
@@ -173,21 +173,21 @@ def test_a_pending_world_is_cancelled_not_signalled(slurm_run, monkeypatch):
     api = Client.for_run(r.run, need_host=False)
     _start_jobs_on_first_poll(monkeypatch, r.run)
     ops.launch(api, read_spec(r.spec_file, api.env_files), r.spec_file, preflight=False)
-    r.jobs.write_text("flock-world-run PENDING\nflock-ctl-run RUNNING\n")  # requeued, waiting
+    r.jobs.write_text("legion-world-run PENDING\nlegion-ctl-run RUNNING\n")  # requeued, waiting
     r.calls.write_text("")
-    assert ops.stop(api, "demo", release=True)["down"]["ended"] == ["flock-world-run",
-                                                                    "flock-ctl-run"]
-    assert _log(r.calls) == ["drain", "checkpoint", f"scancel -u {ME} -n flock-world-run",
-                             f"scancel -u {ME} -n flock-ctl-run"]
+    assert ops.stop(api, "demo", release=True)["down"]["ended"] == ["legion-world-run",
+                                                                    "legion-ctl-run"]
+    assert _log(r.calls) == ["drain", "checkpoint", f"scancel -u {ME} -n legion-world-run",
+                             f"scancel -u {ME} -n legion-ctl-run"]
 
 
 def test_launch_waits_for_a_queued_job_instead_of_submitting_another(slurm_run, monkeypatch):
     r = slurm_run
-    r.jobs.write_text("flock-world-run PENDING\nflock-ctl-run PENDING\n")  # from a launch
+    r.jobs.write_text("legion-world-run PENDING\nlegion-ctl-run PENDING\n")  # from a launch
     api = Client.for_run(r.run, need_host=False)
     _start_jobs_on_first_poll(monkeypatch, r.run)
     done = ops.launch(api, read_spec(r.spec_file, api.env_files), r.spec_file, preflight=False)
-    assert done["up"]["jobs"] == {"world": "flock-world-run", "controller": "flock-ctl-run"}
+    assert done["up"]["jobs"] == {"world": "legion-world-run", "controller": "legion-ctl-run"}
     assert _log(r.calls) == []  # no sbatch
 
 
@@ -197,7 +197,7 @@ def test_a_job_that_ends_before_it_comes_up_fails_the_launch(slurm_run, monkeypa
     monkeypatch.setattr(ops, "_sleep", lambda s: pytest.fail("no wait for a dead job"))
     (r.calls.parent / "bin" / "sbatch").write_text(  # submitted, then failed (still listed)
         f"#!/bin/bash\necho \"$2 FAILED\" >> {r.jobs}\n")
-    with pytest.raises(SpecError, match=r"job flock-world-run ended before it came up"):
+    with pytest.raises(SpecError, match=r"job legion-world-run ended before it came up"):
         ops.launch(api, read_spec(r.spec_file, api.env_files), r.spec_file, preflight=False)
 
 
@@ -257,29 +257,29 @@ def test_hf_jobs_launch_starts_the_controller_job_and_release_cancels_it(
     app = create_app(store, TOKEN, checkpoint=lambda: log.append("checkpoint") or 1)
     wire(monkeypatch, app)
     monkeypatch.setattr(Client, "answers", lambda self: "job1" in hf.jobs)
-    env = {"FLOCK_TOKEN": TOKEN, "HF_TOKEN": "hf", "ANTHROPIC_API_KEY": "sk",
-           "FLOCK_WHEEL_URL": "hf://buckets/ns/flock/dist/abc/flock.whl"}
+    env = {"LEGION_TOKEN": TOKEN, "HF_TOKEN": "hf", "ANTHROPIC_API_KEY": "sk",
+           "LEGION_WHEEL_URL": "hf://buckets/ns/legion/dist/abc/legion.whl"}
     api = Client(env)
     f = write_spec(tmp_path / "spec.yaml", make_spec())
     done = ops.launch(api, read_spec(f), f, preflight=False)
     assert done["up"] == {"jobs": {"controller": "job1"}, "url": "https://job1--7860.hf.jobs"}
-    assert api.env["FLOCK_URL"] == "https://job1--7860.hf.jobs" and "status" in done
+    assert api.env["LEGION_URL"] == "https://job1--7860.hf.jobs" and "status" in done
     kw = hf.kwargs
-    assert kw["network_group"] == "flock" and kw["namespace"] == "ns"  # jobdeploy's default
-    assert sorted(kw["secrets"]) == ["ANTHROPIC_API_KEY", "FLOCK_TOKEN", "HF_TOKEN"]
-    assert kw["env"]["FLOCK_STATE_URL"] == "hf://buckets/ns/flock/controller/flock"
+    assert kw["network_group"] == "legion" and kw["namespace"] == "ns"  # jobdeploy's default
+    assert sorted(kw["secrets"]) == ["ANTHROPIC_API_KEY", "HF_TOKEN", "LEGION_TOKEN"]
+    assert kw["env"]["LEGION_STATE_URL"] == "hf://buckets/ns/legion/controller/legion"
 
     log.clear()
     out = ops.stop(api, "demo", release=True)  # an HF Job URL: the group's controller ends
     assert log == ["checkpoint", "cancel_job job1 ns"]
-    assert out["down"] == {"checkpoint": 1, "ended": ["group flock's controller job"]}
+    assert out["down"] == {"checkpoint": 1, "ended": ["group legion's controller job"]}
 
 
 def test_a_controller_with_no_job_a_local_one_or_one_with_other_swarms_is_kept(api, tmp_path, store, clock):
     f = write_spec(tmp_path / "spec.yaml", make_spec())
     ops.launch(api, read_spec(f), f, preflight=False)
     assert ops.stop(api, "demo", release=True)["down"]["kept"].startswith("no job of this run")
-    api.env = {**api.env, "FLOCK_URL": "https://job9--7860.hf.jobs"}
+    api.env = {**api.env, "LEGION_URL": "https://job9--7860.hf.jobs"}
     store.put_swarm(make_spec("other"), clock().timestamp())
     assert ops.down(api, "demo") == {"kept": "it also serves other"}
     local = SwarmSpec.model_validate({**make_spec("loc").model_dump(mode="json"),
@@ -300,8 +300,8 @@ def test_launch_hold_starts_the_jobs_held_and_creates_or_resumes_nothing(slurm_r
     api = Client.for_run(r.run, need_host=False)
     _start_jobs_on_first_poll(monkeypatch, r.run)
     done = ops.launch(api, read_spec(r.spec_file, api.env_files), r.spec_file, hold=True)
-    assert [x.split()[2] for x in _log(r.calls)] == ["flock-world-run", "flock-ctl-run"]
-    assert (r.run / "controller.hold").is_file()  # controller.sbatch: FLOCK_HOLD_ON_START=1
+    assert [x.split()[2] for x in _log(r.calls)] == ["legion-world-run", "legion-ctl-run"]
+    assert (r.run / "controller.hold").is_file()  # controller.sbatch: LEGION_HOLD_ON_START=1
     assert set(done["held"]["held"]["types"]) == set(store.get_swarm("demo")["spec"].types)
     assert "resumed" not in done and "status" not in done
-    assert store.swarm_flags("demo")["released"]  # still released: `flock launch` lifts it
+    assert store.swarm_flags("demo")["released"]  # still released: `legion launch` lifts it

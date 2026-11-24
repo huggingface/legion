@@ -9,12 +9,12 @@ import time
 
 import pytest
 
-from flock.controller import local
-from flock.models import AssignCommand, Harness, PromptCommand
-from flock.worker.adapters.harbor import HarborAdapter
-from flock.worker.agents import VERIFY_WAIT, AgentRuntime
-from flock.worker.events import Outbox
-from flock.worker.main import PREEMPT_EXIT, default_adapter_factory
+from legion.controller import local
+from legion.models import AssignCommand, Harness, PromptCommand
+from legion.worker.adapters.harbor import HarborAdapter
+from legion.worker.agents import VERIFY_WAIT, AgentRuntime
+from legion.worker.events import Outbox
+from legion.worker.main import PREEMPT_EXIT, default_adapter_factory
 
 from .test_worker_main import FakeController, make_worker
 from .worker_fakes import MemoryStore, RecordingSync, ScriptedAdapter, event_types, spec, until

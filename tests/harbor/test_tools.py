@@ -9,10 +9,10 @@ from unittest.mock import AsyncMock
 import pytest
 from harbor.trial.hooks import TrialEvent
 
-from flock.harbor.instructions import build_agent_instructions
-from flock.harbor.tools.bundle import build_tool_bundle
-from flock.harbor.tools.runner import load_selected, validate_value
-from flock.harbor.tools.setup import attach_tool_setup
+from legion.harbor.instructions import build_agent_instructions
+from legion.harbor.tools.bundle import build_tool_bundle
+from legion.harbor.tools.runner import load_selected, validate_value
+from legion.harbor.tools.setup import attach_tool_setup
 
 
 @pytest.fixture
@@ -79,7 +79,7 @@ def test_bundle_is_reproducible_and_runs_generic_async_tools(tools):
     with tarfile.open(first.archive) as archive:
         assert "tools/unused.py" not in archive.getnames()
         archive.extractall(destination, filter="data")
-    env = {**os.environ, "FLOCK_TOOLS_MANIFEST": str(destination / "manifest.json")}
+    env = {**os.environ, "LEGION_TOOLS_MANIFEST": str(destination / "manifest.json")}
     for name, args, expected in [
         ("sample.add", {"x": 3}, {"sum": 5}),
         ("sample.echo", {"values": ["hello"]}, {"values": ["hello"], "label": None}),
@@ -88,7 +88,7 @@ def test_bundle_is_reproducible_and_runs_generic_async_tools(tools):
             [
                 sys.executable,
                 "-S",
-                str(destination / "bin/flock-tool"),
+                str(destination / "bin/legion-tool"),
                 name,
                 "--json",
                 json.dumps(args),
@@ -116,7 +116,7 @@ async def test_setup_hook_is_generic_and_runs_once(tools):
         ensure_system_dependencies=AsyncMock(),
         exec_as_root=AsyncMock(),
         exec_as_agent=AsyncMock(),
-        extra_env={"FLOCK_TOOLS_MANIFEST": "/opt/flock-tools/manifest.json"},
+        extra_env={"LEGION_TOOLS_MANIFEST": "/opt/legion-tools/manifest.json"},
     )
     environment = SimpleNamespace(upload_file=AsyncMock())
     trial = SimpleNamespace(
@@ -129,7 +129,7 @@ async def test_setup_hook_is_generic_and_runs_once(tools):
     await callbacks[TrialEvent.AGENT_START](None)
     environment.upload_file.assert_awaited_once()
     agent.exec_as_agent.assert_awaited_once_with(
-        environment, "flock-tool --list", env=agent.extra_env, timeout_sec=30
+        environment, "legion-tool --list", env=agent.extra_env, timeout_sec=30
     )
 
 
@@ -155,23 +155,23 @@ async def test_setup_failure_propagates(tools):
 
 def test_bundle_hash_ignores_dist_info_record(tools, tmp_path, monkeypatch):
     # RECORD hashes bin/ scripts whose shebang is the venv path: it differs per install path
-    (tools / "dep.py").write_text('DEPENDENCIES = ["flockfakedep"]\ndef f() -> dict:\n    """f."""\n    return {}\nTOOLS = {"f": f}\n')
+    (tools / "dep.py").write_text('DEPENDENCIES = ["legionfakedep"]\ndef f() -> dict:\n    """f."""\n    return {}\nTOOLS = {"f": f}\n')
     hashes = []
     for i in range(2):
         site = tmp_path / f"venv{i}"
-        info = site / "flockfakedep-1.0.dist-info"
+        info = site / "legionfakedep-1.0.dist-info"
         info.mkdir(parents=True)
-        (site / "flockfakedep.py").write_text("X = 1\n")
-        (info / "METADATA").write_text("Metadata-Version: 2.1\nName: flockfakedep\nVersion: 1.0\n")
+        (site / "legionfakedep.py").write_text("X = 1\n")
+        (info / "METADATA").write_text("Metadata-Version: 2.1\nName: legionfakedep\nVersion: 1.0\n")
         (info / "INSTALLER").write_text(["pip", "uv"][i] + "\n")
-        (info / "RECORD").write_text(f"flockfakedep.py,,\n../../../bin/x,sha256={i},\n"
-                                     "flockfakedep-1.0.dist-info/METADATA,,\n"
-                                     "flockfakedep-1.0.dist-info/RECORD,,\n")
+        (info / "RECORD").write_text(f"legionfakedep.py,,\n../../../bin/x,sha256={i},\n"
+                                     "legionfakedep-1.0.dist-info/METADATA,,\n"
+                                     "legionfakedep-1.0.dist-info/RECORD,,\n")
         monkeypatch.syspath_prepend(str(site))
         b = build_tool_bundle(tools, ["dep.*"], tools / f"b{i}.tar.gz")
         hashes.append(b.sha256)
     assert hashes[0] == hashes[1]
     with tarfile.open(b.archive) as archive:
         names = archive.getnames()
-    assert "flockfakedep.py" in names and "flockfakedep-1.0.dist-info/METADATA" in names
-    assert not {"flockfakedep-1.0.dist-info/RECORD", "flockfakedep-1.0.dist-info/INSTALLER"} & set(names)
+    assert "legionfakedep.py" in names and "legionfakedep-1.0.dist-info/METADATA" in names
+    assert not {"legionfakedep-1.0.dist-info/RECORD", "legionfakedep-1.0.dist-info/INSTALLER"} & set(names)

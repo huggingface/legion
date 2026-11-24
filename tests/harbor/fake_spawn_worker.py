@@ -8,13 +8,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # `tests` importable
 
-import flock.harbor
-from flock.harbor import sources
-from flock.harbor.tools.runner import load_module
-from flock.worker.main import main
+import legion.harbor
+from legion.harbor import sources
+from legion.harbor.tools.runner import load_module
+from legion.worker.main import main
 from tests.harbor import test_adapter
 
-tool = load_module(Path(flock.harbor.__file__).with_name("builtin") / "tools" / "spawn.py")
+tool = load_module(Path(legion.harbor.__file__).with_name("builtin") / "tools" / "spawn.py")
 
 
 async def download(task, directory):  # as fake_worker.py's
@@ -35,9 +35,9 @@ def trial(self, config, fakes):
 
 async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
     agent = self.agent_env.get("SPAWN_AGENT", "")
-    leader = os.environ.get("TYPE") == "leader"  # this worker's type; names are flock's words
+    leader = os.environ.get("TYPE") == "leader"  # this worker's type; names are legion's words
     if " pi --print " in command and leader and agent and not self.fakes.pi:
-        os.environ.update(SPAWN_SOCKET=self.mounts["/run/flock-spawn.sock"], SPAWN_AGENT=agent)
+        os.environ.update(SPAWN_SOCKET=self.mounts["/run/legion-spawn.sock"], SPAWN_AGENT=agent)
         await asyncio.to_thread(tool.spawn, "helper", prompt="help", key="h1")
     return await run_pi(self, command, cwd, env, timeout_sec, user)
 

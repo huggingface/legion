@@ -8,8 +8,8 @@ from collections import Counter
 import pytest
 from pydantic import ValidationError
 
-from flock.harbor.spec import Spec
-from flock.models import HF_ROUTER_URL, Inference, SwarmSpec, TypeSpec
+from legion.harbor.spec import Spec
+from legion.models import HF_ROUTER_URL, Inference, SwarmSpec, TypeSpec
 
 from .conftest import HB
 
@@ -161,7 +161,7 @@ def test_standalone_typespec_is_unresolved():
 
 
 def test_a_stored_swarm_that_does_not_load_is_skipped(tmp_path, caplog):
-    from flock.controller.store import Store
+    from legion.controller.store import Store
 
     store = Store(tmp_path)
     good = spec({"w": {**HB, "model": "m"}}, URLS)
@@ -175,7 +175,7 @@ def test_a_stored_swarm_that_does_not_load_is_skipped(tmp_path, caplog):
     old["types"]["w"]["model"] = "inference:huggingface/Qwen/Qwen3.8-27B:deepinfra"
     store._x("INSERT INTO swarms (name, spec, applied_at) VALUES (?, ?, 0)",
              ["old", json.dumps(old)])
-    with caplog.at_level("ERROR", logger="flock.controller.store"):
+    with caplog.at_level("ERROR", logger="legion.controller.store"):
         assert [r["name"] for r in store.list_swarms()] == [good.swarm]
         assert [r["name"] for r in store.list_swarms()] == [good.swarm]  # logged once
     assert len(caplog.records) == 1 and "swarm old: stored spec" in caplog.text

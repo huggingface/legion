@@ -1,5 +1,5 @@
 """Job mode (docs/deploy-job.md): deployment config, workers launched into the controller's
-network group, X-Flock-Token auth next to the jobs proxy's HF bearer, state sync to a bucket,
+network group, X-Legion-Token auth next to the jobs proxy's HF bearer, state sync to a bucket,
 the public status port, and the launch arguments of scripts/deploy-job.sh."""
 
 from __future__ import annotations
@@ -17,27 +17,27 @@ from pathlib import Path
 import httpx
 import pytest
 
-from flock.client import ClientError, auth_headers
-from flock.controller import jobdeploy
-from flock.controller import spawn as spawning
-from flock.controller.jobs import HubJobsClient
-from flock.controller.main import build, deployment, serve, status_only
-from flock.controller.reconcile import reconcile
-from flock.controller.state import StateSync
-from flock.controller.store import Store
-from flock.models import Event
-from flock.worker.main import WorkerConfig, expand_env
+from legion.client import ClientError, auth_headers
+from legion.controller import jobdeploy
+from legion.controller import spawn as spawning
+from legion.controller.jobs import HubJobsClient
+from legion.controller.main import build, deployment, serve, status_only
+from legion.controller.reconcile import reconcile
+from legion.controller.state import StateSync
+from legion.controller.store import Store
+from legion.models import Event
+from legion.worker.main import WorkerConfig, expand_env
 
 from .conftest import TOKEN, make_spec
 from .fake_hub_jobs import FakeHubJobs
 
 GROUP_URL = "http://${HF_NETWORK_GROUP_PREFIX}controller:7860"
 JOB_ENV = {
-    "FLOCK_TOKEN": TOKEN,
-    "FLOCK_MODE": "job",
-    "FLOCK_NETWORK_GROUP": "flock-smoke",
-    "FLOCK_NAMESPACE": "ns",
-    "FLOCK_FAKE_JOBS": "1",
+    "LEGION_TOKEN": TOKEN,
+    "LEGION_MODE": "job",
+    "LEGION_NETWORK_GROUP": "legion-smoke",
+    "LEGION_NAMESPACE": "ns",
+    "LEGION_FAKE_JOBS": "1",
     "JOB_ID": "6ad7aaaa0000000000000001",
     "ANTHROPIC_API_KEY": "sk-test",
 }
@@ -48,7 +48,7 @@ JOB_ENV = {
 
 def test_job_mode_urls_come_from_job_id_and_alias():
     dep = deployment(JOB_ENV)
-    assert dep.mode == "job" and dep.network_group == "flock-smoke" and dep.namespace == "ns"
+    assert dep.mode == "job" and dep.network_group == "legion-smoke" and dep.namespace == "ns"
     assert dep.worker_url == GROUP_URL
     assert dep.public_url == "https://6ad7aaaa0000000000000001--7860.hf.jobs"
     assert dep.status_port == 7861
@@ -56,17 +56,17 @@ def test_job_mode_urls_come_from_job_id_and_alias():
 
 
 def test_job_mode_needs_a_group_and_space_mode_is_unchanged():
-    with pytest.raises(SystemExit, match="FLOCK_NETWORK_GROUP"):
-        deployment({"FLOCK_MODE": "job"})
-    dep = deployment({"SPACE_HOST": "me-flock.hf.space"})
+    with pytest.raises(SystemExit, match="LEGION_NETWORK_GROUP"):
+        deployment({"LEGION_MODE": "job"})
+    dep = deployment({"SPACE_HOST": "me-legion.hf.space"})
     assert dep.mode == "space" and dep.network_group is None and dep.status_port is None
-    assert dep.worker_url == dep.public_url == "https://me-flock.hf.space"
-    with pytest.raises(SystemExit, match="FLOCK_MODE"):
-        deployment({"FLOCK_MODE": "spaces"})
+    assert dep.worker_url == dep.public_url == "https://me-legion.hf.space"
+    with pytest.raises(SystemExit, match="LEGION_MODE"):
+        deployment({"LEGION_MODE": "spaces"})
 
 
 def _built(tmp_path, **extra):
-    return build({**JOB_ENV, "FLOCK_DATA": str(tmp_path / "data"), **extra})
+    return build({**JOB_ENV, "LEGION_DATA": str(tmp_path / "data"), **extra})
 
 
 def test_job_mode_launches_workers_in_the_group_with_the_alias_url(tmp_path):
@@ -77,8 +77,8 @@ def test_job_mode_launches_workers_in_the_group_with_the_alias_url(tmp_path):
     launches = b.jobs.launches
     assert len(launches) == 2  # 3 replicas, 2 per worker
     for x in launches:
-        assert x["network_group"] == "flock-smoke"
-        assert x["env"]["FLOCK_URL"] == GROUP_URL
+        assert x["network_group"] == "legion-smoke"
+        assert x["env"]["LEGION_URL"] == GROUP_URL
         assert x["namespace"] == "ns"
     b.store.close()
 
@@ -86,7 +86,7 @@ def test_job_mode_launches_workers_in_the_group_with_the_alias_url(tmp_path):
 async def test_job_mode_refuses_specs_in_another_namespace(tmp_path):
     b = _built(tmp_path)
     transport = httpx.ASGITransport(app=b.app)
-    headers = {"X-Flock-Token": TOKEN}
+    headers = {"X-Legion-Token": TOKEN}
     async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=headers) as c:
         spec = make_spec().model_copy(update={"namespace": "other"})
         r = await c.put("/swarms/demo", json=spec.model_dump(mode="json"))
@@ -109,14 +109,14 @@ async def test_job_mode_checks_the_token_account_without_changing_billing_defaul
         tmp_path, monkeypatch, mode, controller_ns, spec_ns, status, expected):
     hub = FakeHubJobs(account="token-owner")
     monkeypatch.setattr("huggingface_hub.HfApi", lambda **_: hub)
-    built = build({**JOB_ENV, "FLOCK_MODE": mode, "FLOCK_NAMESPACE": controller_ns,
-                   "FLOCK_FAKE_JOBS": "0", "FLOCK_DATA": str(tmp_path / "data"),
-                   "FLOCK_WHEEL_URL": "hf://buckets/token-owner/wheels/flock.whl"})
+    built = build({**JOB_ENV, "LEGION_MODE": mode, "LEGION_NAMESPACE": controller_ns,
+                   "LEGION_FAKE_JOBS": "0", "LEGION_DATA": str(tmp_path / "data"),
+                   "LEGION_WHEEL_URL": "hf://buckets/token-owner/wheels/legion.whl"})
     spec = make_spec().model_dump(mode="json")
     spec["namespace"] = spec_ns
     spec["inference"] = {"hf_router": {"provider": "deepinfra"}}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=built.app),
-                                base_url="http://controller", headers={"X-Flock-Token": TOKEN}) as c:
+                                base_url="http://controller", headers={"X-Legion-Token": TOKEN}) as c:
         applied = await c.put("/swarms/demo", json=spec)
         assert applied.status_code == status, applied.text
         if status == 400:
@@ -127,7 +127,7 @@ async def test_job_mode_checks_the_token_account_without_changing_billing_defaul
         reconcile(built.store, built.jobs, datetime(2026, 10, 20, tzinfo=UTC), built.settings)
         assert hub.runs and {job["namespace"] for job in hub.runs} == {expected}
         assert {job["network_group"] for job in hub.runs} == {
-            "flock-smoke" if mode == "job" else None}
+            "legion-smoke" if mode == "job" else None}
         stored = built.store.get_swarm("demo")["spec"]
         assert stored.namespace == spec_ns
         assert all(ts.resolved_model.headers == ({"X-HF-Bill-To": spec_ns} if spec_ns else {})
@@ -142,7 +142,7 @@ async def test_job_mode_checks_the_token_account_without_changing_billing_defaul
 
 
 def test_hub_client_sends_network_group_only_when_set(monkeypatch):
-    monkeypatch.setenv("FLOCK_WHEEL_URL", "hf://buckets/ns/flock/dist/x.whl")
+    monkeypatch.setenv("LEGION_WHEEL_URL", "hf://buckets/ns/legion/dist/x.whl")
     seen = []
 
     class Api:
@@ -150,19 +150,19 @@ def test_hub_client_sends_network_group_only_when_set(monkeypatch):
             seen.append(kw)
             return type("J", (), {"id": f"job-{len(seen)}"})()
 
-    for group in ("flock-smoke", None):
+    for group in ("legion-smoke", None):
         c = HubJobsClient(token="t", image=None, network_group=group)
         c.api = Api()
         c.launch("w0", make_spec().types["researcher"], {}, {}, {}, 60, namespace="ns")
-    assert seen[0]["network_group"] == "flock-smoke"
+    assert seen[0]["network_group"] == "legion-smoke"
     assert "network_group" not in seen[1]
 
 
 # --------------------------------------------------------------------------- worker side
 
 
-def test_worker_expands_the_group_prefix_in_flock_url():
-    env = {"FLOCK_URL": GROUP_URL, "FLOCK_TOKEN": "t", "WORKER_ID": "w", "SWARM": "s",
+def test_worker_expands_the_group_prefix_in_legion_url():
+    env = {"LEGION_URL": GROUP_URL, "LEGION_TOKEN": "t", "WORKER_ID": "w", "SWARM": "s",
            "TYPE": "t", "DEADLINE": "2026-10-21T00:00:00+00:00",
            "HF_NETWORK_GROUP_PREFIX": "nwa-abc123-"}
     assert WorkerConfig.from_env(env).url == "http://nwa-abc123-controller:7860"
@@ -175,16 +175,16 @@ def test_worker_expands_the_group_prefix_in_flock_url():
 # --------------------------------------------------------------------------- auth
 
 
-async def test_flock_token_in_header_coexists_with_proxy_bearer(app, store):
+async def test_legion_token_in_header_coexists_with_proxy_bearer(app, store):
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
         proxy = {"Authorization": "Bearer hf_proxy_token_not_ours"}
-        assert (await c.get("/swarms", headers={**proxy, "X-Flock-Token": TOKEN})).status_code == 200
-        assert (await c.get("/swarms", headers={"X-Flock-Token": TOKEN})).status_code == 200
+        assert (await c.get("/swarms", headers={**proxy, "X-Legion-Token": TOKEN})).status_code == 200
+        assert (await c.get("/swarms", headers={"X-Legion-Token": TOKEN})).status_code == 200
         # Space mode: the bearer alone still works
         assert (await c.get("/swarms", headers={"Authorization": f"Bearer {TOKEN}"})).status_code == 200
         assert (await c.get("/swarms", headers=proxy)).status_code == 401
-        assert (await c.get("/swarms", headers={"X-Flock-Token": "nope"})).status_code == 401
+        assert (await c.get("/swarms", headers={"X-Legion-Token": "nope"})).status_code == 401
         assert (await c.get("/swarms")).status_code == 401
 
 
@@ -195,32 +195,32 @@ async def test_agent_token_in_header_keeps_its_scope(app, store, client, tick):
     tick()
     tok = spawning.agent_token(store, LEADER, "demo", 0)
     transport = httpx.ASGITransport(app=app)
-    headers = {"X-Flock-Token": tok, "Authorization": "Bearer hf_proxy"}
+    headers = {"X-Legion-Token": tok, "Authorization": "Bearer hf_proxy"}
     async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=headers) as c:
         assert (await c.get(f"/agents/{LEADER}")).status_code == 200
         assert (await c.get("/swarms")).status_code == 403  # scoped: not the controller token
 
 
 def test_cli_headers_space_mode():
-    h = auth_headers("https://me-flock.hf.space", {"FLOCK_TOKEN": "ft"})
-    assert h == {"X-Flock-Token": "ft", "Authorization": "Bearer ft"}
-    h = auth_headers("http://nwa-x-controller:7860", {"FLOCK_TOKEN": "ft",
-                                                      "FLOCK_AGENT_TOKEN": "at"})
-    assert h == {"X-Flock-Token": "at", "Authorization": "Bearer at"}
+    h = auth_headers("https://me-legion.hf.space", {"LEGION_TOKEN": "ft"})
+    assert h == {"X-Legion-Token": "ft", "Authorization": "Bearer ft"}
+    h = auth_headers("http://nwa-x-controller:7860", {"LEGION_TOKEN": "ft",
+                                                      "LEGION_AGENT_TOKEN": "at"})
+    assert h == {"X-Legion-Token": "at", "Authorization": "Bearer at"}
 
 
 def test_cli_headers_behind_the_jobs_proxy(monkeypatch):
     url = "https://6ad7aaaa0000000000000001--7860.hf.jobs"
-    h = auth_headers(url, {"FLOCK_TOKEN": "ft", "HF_TOKEN": "hf_x"})
-    assert h == {"X-Flock-Token": "ft", "Authorization": "Bearer hf_x"}
-    h = auth_headers("https://proxy.example", {"FLOCK_TOKEN": "ft", "HF_TOKEN": "hf_x",
-                                               "FLOCK_PROXY_AUTH": "hf"})
+    h = auth_headers(url, {"LEGION_TOKEN": "ft", "HF_TOKEN": "hf_x"})
+    assert h == {"X-Legion-Token": "ft", "Authorization": "Bearer hf_x"}
+    h = auth_headers("https://proxy.example", {"LEGION_TOKEN": "ft", "HF_TOKEN": "hf_x",
+                                               "LEGION_PROXY_AUTH": "hf"})
     assert h["Authorization"] == "Bearer hf_x"
     monkeypatch.setattr("huggingface_hub.get_token", lambda: "hf_saved")
-    assert auth_headers(url, {"FLOCK_TOKEN": "ft"})["Authorization"] == "Bearer hf_saved"
+    assert auth_headers(url, {"LEGION_TOKEN": "ft"})["Authorization"] == "Bearer hf_saved"
     monkeypatch.setattr("huggingface_hub.get_token", lambda: None)
     with pytest.raises(ClientError, match="behind the HF Jobs proxy"):
-        auth_headers(url, {"FLOCK_TOKEN": "ft"})
+        auth_headers(url, {"LEGION_TOKEN": "ft"})
 
 
 # --------------------------------------------------------------------------- status port
@@ -228,7 +228,7 @@ def test_cli_headers_behind_the_jobs_proxy(monkeypatch):
 
 async def test_status_port_serves_only_the_page_and_healthz(app):
     transport = httpx.ASGITransport(app=status_only(app))
-    headers = {"X-Flock-Token": TOKEN, "Authorization": f"Bearer {TOKEN}"}
+    headers = {"X-Legion-Token": TOKEN, "Authorization": f"Bearer {TOKEN}"}
     async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=headers) as c:
         assert (await c.get("/")).status_code == 200
         assert (await c.get("/healthz")).json()["ok"] is True
@@ -287,7 +287,7 @@ def _event(agent: str, n: int) -> Event:
 
 
 def test_state_round_trip_through_the_bucket(tmp_path, caplog):
-    caplog.set_level(logging.INFO, "flock.state")
+    caplog.set_level(logging.INFO, "legion.state")
     bucket = FakeBucket(tmp_path / "bucket")
     a = tmp_path / "a"
     store = Store(a)
@@ -354,31 +354,31 @@ def test_build_restores_state_before_opening_the_store(tmp_path, monkeypatch):
     src.put_swarm(make_spec(), 1.0)
     StateSync(bucket, tmp_path / "src").push(src)
     src.close()
-    import flock.controller.main as main_mod
+    import legion.controller.main as main_mod
 
     monkeypatch.setattr(main_mod, "state_sync_from_env",
                         lambda env, d: StateSync(bucket, d))
-    b = _built(tmp_path, FLOCK_STATE_URL="hf://buckets/ns/flock/controller/flock-smoke")
+    b = _built(tmp_path, LEGION_STATE_URL="hf://buckets/ns/legion/controller/legion-smoke")
     assert b.store.get_swarm("demo") is not None
     b.store.close()
-    b = _built(tmp_path / "x", FLOCK_STATE_RESTORE="0")
+    b = _built(tmp_path / "x", LEGION_STATE_RESTORE="0")
     assert b.store.get_swarm("demo") is None
     b.store.close()
 
 
 def test_hold_on_start_restores_every_swarm_held_and_released(tmp_path, monkeypatch):
-    """`flock launch --hold`: the restored swarm is held and released, in the checkpoint before
-    the controller serves, and no worker launches until `flock launch` lifts it."""
+    """`legion launch --hold`: the restored swarm is held and released, in the checkpoint before
+    the controller serves, and no worker launches until `legion launch` lifts it."""
     bucket = FakeBucket(tmp_path / "bucket")
     src = Store(tmp_path / "src")
     src.put_swarm(make_spec(), 1.0)
     StateSync(bucket, tmp_path / "src").push(src)
     src.close()
-    import flock.controller.main as main_mod
+    import legion.controller.main as main_mod
 
     monkeypatch.setattr(main_mod, "state_sync_from_env", lambda env, d: StateSync(bucket, d))
     bucket.ops.clear()
-    b = _built(tmp_path, FLOCK_STATE_URL="hf://buckets/ns/flock/controller/run", FLOCK_HOLD_ON_START="1")
+    b = _built(tmp_path, LEGION_STATE_URL="hf://buckets/ns/legion/controller/run", LEGION_HOLD_ON_START="1")
     flags = b.store.swarm_flags("demo")
     assert set(flags["holds"]["types"]) == set(make_spec().types) and flags["released"]["by"] == "launch --hold"
     assert "upload" in bucket.ops  # pushed at once
@@ -389,9 +389,9 @@ def test_hold_on_start_restores_every_swarm_held_and_released(tmp_path, monkeypa
 
 
 def test_a_snapshot_without_swarms_is_not_restored(tmp_path, caplog):
-    """After `flock stop --delete` of the last swarm, the next push writes an empty snapshot: a new
+    """After `legion stop --delete` of the last swarm, the next push writes an empty snapshot: a new
     controller in the same group must start empty, not resurrect the removed swarm."""
-    caplog.set_level(logging.INFO, "flock.state")
+    caplog.set_level(logging.INFO, "legion.state")
     bucket = FakeBucket(tmp_path / "bucket")
     s = Store(tmp_path / "a")
     sync = StateSync(bucket, tmp_path / "a")
@@ -437,7 +437,7 @@ async def _serve_then_sigterm(b, *, long_poll: bool = False) -> float:
     loop = asyncio.get_running_loop()
     task = asyncio.create_task(serve(b, host="127.0.0.1"))
     client = httpx.AsyncClient(base_url=f"http://127.0.0.1:{b.deployment.port}",
-                               headers={"X-Flock-Token": TOKEN}, timeout=60)
+                               headers={"X-Legion-Token": TOKEN}, timeout=60)
     for _ in range(100):  # until the server answers
         try:
             if (await client.get("/healthz")).status_code == 200:
@@ -462,20 +462,20 @@ async def _serve_then_sigterm(b, *, long_poll: bool = False) -> float:
 async def test_sigterm_stops_loops_then_pushes_and_logs_ok(tmp_path, monkeypatch, caplog):
     caplog.set_level(logging.INFO)
     bucket = FakeBucket(tmp_path / "bucket")
-    import flock.controller.main as main_mod
+    import legion.controller.main as main_mod
 
     monkeypatch.setattr(main_mod, "state_sync_from_env", lambda env, d: StateSync(bucket, d))
     monkeypatch.setattr(main_mod, "GRACEFUL_SHUTDOWN", 1.0)  # the parked poll still outlasts it
     port = _free_port()
-    b = _built(tmp_path, PORT=str(port), FLOCK_STATUS_PORT="0",
-               FLOCK_STATE_URL="hf://x/y/z", FLOCK_STATE_SYNC_INTERVAL="0.1")
+    b = _built(tmp_path, PORT=str(port), LEGION_STATUS_PORT="0",
+               LEGION_STATE_URL="hf://x/y/z", LEGION_STATE_SYNC_INTERVAL="0.1")
     b.store.put_swarm(make_spec(researcher={"replicas": 0}), 1.0)  # an empty one never pushes
     took = await _serve_then_sigterm(b, long_poll=True)
     # the parked 30 s long-poll does not hold the exit past the graceful window
     assert took < main_mod.GRACEFUL_SHUTDOWN + 3
     lines = [r.getMessage() for r in caplog.records]
     order = [next(i for i, m in enumerate(lines) if m.startswith(p))
-             for p in ("SIGTERM: shutting down", "final push: ok (", "flock controller: exit")]
+             for p in ("SIGTERM: shutting down", "final push: ok (", "legion controller: exit")]
     assert order == sorted(order)
     assert any(m.startswith("final push: ok (") and m != "final push: ok (0 files)" for m in lines)
     assert sum(m.startswith("final push: ok") for m in lines) == 1
@@ -488,12 +488,12 @@ async def test_sigterm_stops_loops_then_pushes_and_logs_ok(tmp_path, monkeypatch
 async def test_final_push_failure_and_timeout_are_logged_and_exit_anyway(tmp_path, monkeypatch,
                                                                          caplog):
     caplog.set_level(logging.INFO)
-    import flock.controller.main as main_mod
+    import legion.controller.main as main_mod
 
     broken = SlowOrBrokenBucket(tmp_path / "b1", fail=True)
     monkeypatch.setattr(main_mod, "state_sync_from_env", lambda env, d: StateSync(broken, d))
-    b = _built(tmp_path / "one", PORT=str(_free_port()), FLOCK_STATUS_PORT="0",
-               FLOCK_STATE_URL="hf://x/y/z")
+    b = _built(tmp_path / "one", PORT=str(_free_port()), LEGION_STATUS_PORT="0",
+               LEGION_STATE_URL="hf://x/y/z")
     b.store.put_swarm(make_spec(), 1.0)
     await _serve_then_sigterm(b)
     assert "final push: failed (RuntimeError: bucket down)" in caplog.text
@@ -502,8 +502,8 @@ async def test_final_push_failure_and_timeout_are_logged_and_exit_anyway(tmp_pat
     release = threading.Event()
     slow = SlowOrBrokenBucket(tmp_path / "b2", block=release)
     monkeypatch.setattr(main_mod, "state_sync_from_env", lambda env, d: StateSync(slow, d))
-    b = _built(tmp_path / "two", PORT=str(_free_port()), FLOCK_STATUS_PORT="0",
-               FLOCK_STATE_URL="hf://x/y/z", FLOCK_FINAL_PUSH_TIMEOUT="0.3")
+    b = _built(tmp_path / "two", PORT=str(_free_port()), LEGION_STATUS_PORT="0",
+               LEGION_STATE_URL="hf://x/y/z", LEGION_FINAL_PUSH_TIMEOUT="0.3")
     b.store.put_swarm(make_spec(), 1.0)
     took = await _serve_then_sigterm(b)
     release.set()
@@ -533,27 +533,27 @@ def test_controller_job_without_expose_public(monkeypatch):
 def test_controller_job_launch_arguments(monkeypatch):
     monkeypatch.setattr(jobdeploy, "public_status_supported", lambda: True)
     kw = jobdeploy.run_job_args(
-        wheel_url="hf://buckets/me/flock/dist/abc/flock-0.0.1-py3-none-any.whl",
-        group="flock-smoke", namespace="me", flavor="cpu-upgrade", timeout="48h",
-        state_url="hf://buckets/me/flock/controller/flock-smoke",
-        job_labels="experiment=flock-m1", secrets={"FLOCK_TOKEN": "f", "HF_TOKEN": "h"},
+        wheel_url="hf://buckets/me/legion/dist/abc/legion-0.0.1-py3-none-any.whl",
+        group="legion-smoke", namespace="me", flavor="cpu-upgrade", timeout="48h",
+        state_url="hf://buckets/me/legion/controller/legion-smoke",
+        job_labels="experiment=legion-m1", secrets={"LEGION_TOKEN": "f", "HF_TOKEN": "h"},
     )
-    assert kw["network_group"] == "flock-smoke" and kw["network_aliases"] == ["controller"]
+    assert kw["network_group"] == "legion-smoke" and kw["network_aliases"] == ["controller"]
     assert kw["expose"] == [7860] and kw["expose_public"] == [7861]
-    assert kw["env"]["FLOCK_MODE"] == "job" and kw["env"]["FLOCK_NAMESPACE"] == "me"
-    assert kw["env"]["FLOCK_STATE_URL"].endswith("/controller/flock-smoke")
+    assert kw["env"]["LEGION_MODE"] == "job" and kw["env"]["LEGION_NAMESPACE"] == "me"
+    assert kw["env"]["LEGION_STATE_URL"].endswith("/controller/legion-smoke")
     assert "swarm" not in kw["labels"]  # never adopted as a worker by rebuild_from_jobs
     assert kw["namespace"] == "me" and kw["timeout"] == "48h"
     script = kw["command"][2]
     assert subprocess.run(["bash", "-n", "-c", script], check=False).returncode == 0
-    assert script.rstrip().endswith("exec flock-controller")
-    assert jobdeploy.default_state_url(kw["env"]["FLOCK_WHEEL_URL"], "g") == (
-        "hf://buckets/me/flock/controller/g")
+    assert script.rstrip().endswith("exec legion-controller")
+    assert jobdeploy.default_state_url(kw["env"]["LEGION_WHEEL_URL"], "g") == (
+        "hf://buckets/me/legion/controller/g")
 
 
-def test_controller_bootstrap_installs_flock_with_the_shipped_pins(tmp_path):
-    """The controller job's bootstrap on stubs (python3, uv, flock-controller; buckets read
-    from a local folder): flock[controller] is installed with uv.lock's versions and msgboard's
+def test_controller_bootstrap_installs_legion_with_the_shipped_pins(tmp_path):
+    """The controller job's bootstrap on stubs (python3, uv, legion-controller; buckets read
+    from a local folder): legion[controller] is installed with uv.lock's versions and msgboard's
     shipped wheel (never its private git source), as the workers' bootstrap does."""
     import tarfile
 
@@ -571,14 +571,14 @@ def test_controller_bootstrap_installs_flock_with_the_shipped_pins(tmp_path):
     for name, body in [  # python3 -c '<fetch>' <url> <file>: copied from the local bucket
         ("python3", f'[ "$1" != -c ] || cp "{bucket}/${{3#hf://buckets/}}" "$4"'),
         ("uv", 'for a; do [ "${prev:-}" = --overrides ] && cat "$a" >> LOG; prev=$a; done'),
-        ("flock-controller", ""),
+        ("legion-controller", ""),
     ]:
         (stubs / name).write_text(f'#!/bin/sh\necho "{name} $1 $2 $3" >> {log}\n'
                                   + body.replace("LOG", str(log)) + "\n")
         (stubs / name).chmod(0o755)
     script = jobdeploy.bootstrap_command()[2].replace("/opt/wheels", str(wheels))
     env = {"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(tmp_path),
-           "FLOCK_WHEEL_URL": "hf://buckets/ns/f/dist/w.whl", "FLOCK_DATA": str(tmp_path / "d")}
+           "LEGION_WHEEL_URL": "hf://buckets/ns/f/dist/w.whl", "LEGION_DATA": str(tmp_path / "d")}
     r = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True,
                        timeout=30, check=False)
     assert r.returncode == 0, r.stderr
@@ -587,22 +587,22 @@ def test_controller_bootstrap_installs_flock_with_the_shipped_pins(tmp_path):
     i = calls.index("uv pip install -q")
     assert calls[i + 1] == f"msgboard @ file://{wheels}/{MSGBOARD}"  # the overrides file
     assert (wheels / "constraints.txt").read_text() == "huggingface-hub==1.33.0\n"
-    assert calls[-1].startswith("flock-controller")
+    assert calls[-1].startswith("legion-controller")
     assert f'"$WHEEL[controller]" -c {wheels}/constraints.txt' in script
     assert "huggingface_hub==2" not in script  # the constraints pin it
 
 
 def test_deploy_job_dry_run_never_prints_secret_values(capsys):
-    env = {"FLOCK_TOKEN": "flock-secret-value", "HF_TOKEN": "hf_secret_value",
+    env = {"LEGION_TOKEN": "legion-secret-value", "HF_TOKEN": "hf_secret_value",
            "OPENAI_API_KEY": "sk-openai-secret"}
-    rc = jobdeploy.main(["hf://buckets/me/flock/dist/a/f.whl", "--namespace", "me",
+    rc = jobdeploy.main(["hf://buckets/me/legion/dist/a/f.whl", "--namespace", "me",
                          "--secret", "OPENAI_API_KEY", "--dry-run"], env)
     out = capsys.readouterr().out
-    assert rc == 0 and "network_group: flock" in out
+    assert rc == 0 and "network_group: legion" in out
     assert "OPENAI_API_KEY" in out
     assert not any(v in out for v in env.values())
-    with pytest.raises(SystemExit, match="FLOCK_TOKEN"):
-        jobdeploy.main(["hf://buckets/me/flock/dist/a/f.whl", "--namespace", "me", "--dry-run"],
+    with pytest.raises(SystemExit, match="LEGION_TOKEN"):
+        jobdeploy.main(["hf://buckets/me/legion/dist/a/f.whl", "--namespace", "me", "--dry-run"],
                        {"HF_TOKEN": "h"})
 
 
@@ -613,7 +613,7 @@ class FakeHub:
         self.polls, self.cancelled = polls, []
 
     def list_jobs(self, labels, namespace):
-        assert labels == {"flock-role": "controller", "flock-group": "g"} and namespace == "me"
+        assert labels == {"legion-role": "controller", "legion-group": "g"} and namespace == "me"
         if self.polls <= 0:
             return []
         self.polls -= 1
@@ -629,7 +629,7 @@ def _down_bucket(tmp_path, monkeypatch) -> FakeBucket:
     (tmp_path / "bucket/events/demo").mkdir(parents=True)
     (tmp_path / "bucket/state.db").write_text("x")
     (tmp_path / "bucket/events/demo/a.jsonl").write_text("{}\n")
-    monkeypatch.setattr("flock.worker.sync.HubBucketStore", lambda url, token=None: bucket)
+    monkeypatch.setattr("legion.worker.sync.HubBucketStore", lambda url, token=None: bucket)
     monkeypatch.setattr(jobdeploy.time, "sleep", lambda s: None)
     return bucket
 
@@ -637,7 +637,7 @@ def _down_bucket(tmp_path, monkeypatch) -> FakeBucket:
 def test_down_cancels_the_controller_then_deletes_its_state(tmp_path, monkeypatch, capsys):
     bucket = _down_bucket(tmp_path, monkeypatch)
     hub = FakeHub(polls=2)  # running at the first check, then gone after the cancel
-    rc = jobdeploy.down(hub, "me", "g", "hf://buckets/me/flock/controller/g", dry_run=False,
+    rc = jobdeploy.down(hub, "me", "g", "hf://buckets/me/legion/controller/g", dry_run=False,
                         env={})
     assert rc == 0 and hub.cancelled == ["ctl-1"] and bucket.list("") == []
     assert "deleted 2 state files" in capsys.readouterr().out

@@ -9,10 +9,10 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from flock.models import LoopMeta, LoopStartCommand, TokenUsage
-from flock.worker import agents as agents_mod
-from flock.worker.adapters.base import AdapterEvent
-from flock.worker.loop import render
+from legion.models import LoopMeta, LoopStartCommand, TokenUsage
+from legion.worker import agents as agents_mod
+from legion.worker.adapters.base import AdapterEvent
+from legion.worker.loop import render
 
 from .worker_fakes import ScriptedAdapter, runtime, until
 
@@ -71,7 +71,7 @@ class FailingAdapter(ScriptedAdapter):
 
 
 async def test_three_failed_turns_in_a_row_end_the_loop(tmp_path, monkeypatch):
-    monkeypatch.setattr("flock.worker.agents.LOOP_ERROR_BACKOFF", 0.01)
+    monkeypatch.setattr("legion.worker.agents.LOOP_ERROR_BACKOFF", 0.01)
     rt, ad = runtime(tmp_path, idle_grace="5s", adapter=FailingAdapter(tmp_path / "h"))
     await rt.setup(restore=False)
     rt.start_loop(start())
@@ -242,7 +242,7 @@ class TransportFailureAdapter(ScriptedAdapter):
 
 
 def test_transient_backoff_doubles_with_jitter_up_to_the_cap():
-    from flock.worker.agents import transient_backoff
+    from legion.worker.agents import transient_backoff
     top = [transient_backoff(n, rng=lambda: 1.0) for n in range(1, 10)]
     assert top == [2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 120.0, 120.0, 120.0]
     assert [transient_backoff(n, rng=lambda: 0.0) for n in (1, 3, 50)] == [1.0, 4.0, 60.0]
@@ -258,9 +258,9 @@ async def test_consecutive_transport_failures_back_off_then_count_as_errors(tmp_
         delays.append(real(n, rng=lambda: 1.0))
         return 0.001 * n
 
-    monkeypatch.setattr("flock.worker.agents.LOOP_ERROR_BACKOFF", 0.01)
-    monkeypatch.setattr("flock.worker.agents.LOOP_TRANSIENT_LIMIT", 4)
-    monkeypatch.setattr("flock.worker.agents.transient_backoff", spy)
+    monkeypatch.setattr("legion.worker.agents.LOOP_ERROR_BACKOFF", 0.01)
+    monkeypatch.setattr("legion.worker.agents.LOOP_TRANSIENT_LIMIT", 4)
+    monkeypatch.setattr("legion.worker.agents.transient_backoff", spy)
     rt, ad = runtime(tmp_path, idle_grace="5s", adapter=TransportFailureAdapter(tmp_path / "h"))
     await rt.setup(restore=False)
     rt.start_loop(start())

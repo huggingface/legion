@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from flock.worker.cgroup import MB, CgroupMem, fs_type
+from legion.worker.cgroup import MB, CgroupMem, fs_type
 
 
 def _w(p: Path, text: str) -> None:
@@ -47,9 +47,9 @@ def test_v2_smallest_limit_wins(tmp_path):
 def test_no_limit_not_armed_unless_env(tmp_path):
     v2(tmp_path, parent_max="max")
     assert not CgroupMem(tmp_path, env={}).armed
-    cg = CgroupMem(tmp_path, env={"FLOCK_MEMORY_LIMIT_MB": "4096"})
+    cg = CgroupMem(tmp_path, env={"LEGION_MEMORY_LIMIT_MB": "4096"})
     assert cg.armed and cg.limit_mb == 4096
-    both = {"SLURM_MEM_PER_NODE": "7168", "FLOCK_MEMORY_LIMIT_MB": "4096"}
+    both = {"SLURM_MEM_PER_NODE": "7168", "LEGION_MEMORY_LIMIT_MB": "4096"}
     assert CgroupMem(tmp_path, env=both).limit_mb == 7168  # Slurm's job limit first
     assert not CgroupMem(tmp_path / "nothing", env={}).armed
 
@@ -109,13 +109,13 @@ def test_oom_score_adj_is_raised_for_the_sandbox(tmp_path):
     import sys
 
 
-    code = ("from pathlib import Path; from flock.isolation import set_oom_score_adj as s; "
+    code = ("from pathlib import Path; from legion.isolation import set_oom_score_adj as s; "
             "print(s(1000), Path('/proc/self/oom_score_adj').read_text().strip())")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                          check=True).stdout.split()
     if out[0] != "True":
         pytest.skip("/proc/self/oom_score_adj is not writable here")
     assert out[1] == "1000"
-    from flock.isolation import set_oom_score_adj
+    from legion.isolation import set_oom_score_adj
 
     assert not set_oom_score_adj(path=str(tmp_path / "missing" / "oom_score_adj"))

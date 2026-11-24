@@ -5,8 +5,8 @@ import json
 import yaml
 from typer.testing import CliRunner
 
-from flock import cli, ops
-from flock.client import Client
+from legion import cli, ops
+from legion.client import Client
 
 from .conftest import HB, TOKEN, make_spec, wire, write_spec
 
@@ -62,7 +62,7 @@ def test_apply_inlines_system_prompt_file(tmp_path, monkeypatch, app, store):
 def _provider_app(store, clock, tool_call: bool):
     import httpx
 
-    from flock.controller.api import create_app
+    from legion.controller.api import create_app
 
     from .test_inference_controller import fake_provider
 
@@ -136,7 +136,7 @@ def test_apply_with_passing_preflight(tmp_path, monkeypatch, store, clock):
     assert r.exit_code == 0 and "ok" in r.output and "chat_completions" in r.output, r.output
     assert store.get_swarm("op")["spec"].types["worker"].provider_name == "inference"
     assert len(seen) == 2  # one probe: a tool call plus a follow-up turn
-    r = runner.invoke(cli.app, ["update", "--check", str(spec_file)])  # was `flock preflight`
+    r = runner.invoke(cli.app, ["update", "--check", str(spec_file)])  # was `legion preflight`
     assert r.exit_code == 0 and "preflight inference:Qwen/Small: ok" in r.output and len(seen) == 4
     # a spec with no types has no model to probe
     empty = tmp_path / "empty.yaml"
@@ -148,7 +148,7 @@ def test_apply_with_passing_preflight(tmp_path, monkeypatch, store, clock):
 def test_unverified_models_warn_and_apply_unless_strict(tmp_path, monkeypatch, store, clock):
     import httpx
 
-    from flock.controller.api import create_app
+    from legion.controller.api import create_app
 
     from .test_inference_controller import fake_provider
 
@@ -201,14 +201,14 @@ def test_apply_sends_its_git_source(tmp_path, monkeypatch, app, store):
     assert runner.invoke(cli.app, ["launch", str(spec_file)]).exit_code == 0
     (gen1,) = store.spec_history("demo")
     assert gen1["source"] == {"by": "alice", "git_sha": sha, "ref": "exp", "dirty": False}
-    assert json.loads(ops.source_header(spec_file.parent / "x" / "spec.yaml")["X-Flock-Source"]) == {
+    assert json.loads(ops.source_header(spec_file.parent / "x" / "spec.yaml")["X-Legion-Source"]) == {
         "by": "alice"}  # not a repo (the folder does not exist)
     spec_file.write_text(spec_file.read_text().replace("replicas: 3", "replicas: 4"))
-    assert json.loads(ops.source_header(spec_file)["X-Flock-Source"])["dirty"] is True
+    assert json.loads(ops.source_header(spec_file)["X-Legion-Source"])["dirty"] is True
 
 
 def test_hidden_world_app_and_plain_help():
-    """`flock world serve` works but is not listed; help is not re-wrapped by rich."""
+    """`legion world serve` works but is not listed; help is not re-wrapped by rich."""
     r = runner.invoke(cli.app, ["world", "serve", "--help"])
     assert r.exit_code == 0 and "module:Class" in r.output
     out = runner.invoke(cli.app, ["--help"]).output

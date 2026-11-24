@@ -1,4 +1,4 @@
-"""`POST /swarms/{swarm}/prompts` and `flock prompt --swarm S --type T`: one request prompts
+"""`POST /swarms/{swarm}/prompts` and `legion prompt --swarm S --type T`: one request prompts
 every agent of a type; prompts are held and admitted exactly as single prompts are."""
 
 from __future__ import annotations
@@ -8,9 +8,9 @@ import json
 import yaml
 from typer.testing import CliRunner
 
-from flock import cli
-from flock.client import Client
-from flock.models import AgentHeartbeat
+from legion import cli
+from legion.client import Client
+from legion.models import AgentHeartbeat
 
 from .conftest import HB, make_spec, wire
 from .test_api import W0, apply, hb_body
@@ -56,7 +56,7 @@ async def test_bulk_prompt_by_type_and_state(client, store, clock, tick):
 async def test_agent_tokens_cannot_bulk_prompt(client, app, store, tick):
     import httpx
 
-    from flock.controller.spawn import agent_may
+    from legion.controller.spawn import agent_may
 
     await apply(client)
     tick()

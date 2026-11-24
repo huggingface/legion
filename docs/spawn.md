@@ -10,7 +10,7 @@ it with the `spawn.*` tools ("Harbor agents" below). Design: [design.md](design.
 
 ```yaml
 agents:
-  roles:                                 # a Harbor spec's roles become flock types
+  roles:                                 # a Harbor spec's roles become legion types
     leader:
       count: 1
       workers:
@@ -57,7 +57,7 @@ limits:                                  # optional
 Caps count a parent's existing children, so removing a child frees its place. A child's own
 per-prompt `max_turns` and `max_budget_usd` come from its type, as for replicas.
 
-`flock launch` (and the controller) reject: an unknown type in `spawn:`, a cycle (a type that can
+`legion launch` (and the controller) reject: an unknown type in `spawn:`, a cycle (a type that can
 reach itself, including spawning its own type), a spawnable type without `workers`, the list form
 without `max`, an unknown key under `spawn.<type>`, and negative `depth`, caps, `workers` or
 limits. The controller also refuses (409) a re-apply that lowers a type's `initial + max_extra`
@@ -86,7 +86,7 @@ construction. `depth` is what is left, so a child of a `depth: 1` leader shows `
   its type or swarm. Removal cascades to the whole subtree; every removed agent gets an unassign
   (final sync; its bucket state is kept) and its token is revoked.
 - **Idle:** a child idles like any agent; an idle parent does not stop it.
-- **Persistence:** spawned rows live in the controller's SQLite, in `FLOCK_DATA` (default
+- **Persistence:** spawned rows live in the controller's SQLite, in `LEGION_DATA` (default
   `./data`; the controller image sets `/data`). Turn on the Space's persistent storage so `/data`
   survives redeploys: unlike replicas, spawned agents cannot be rebuilt from the spec.
 
@@ -110,7 +110,7 @@ spawn:
     max: 2
 ```
 
-A Harbor spec (flock.harbor.spec) does not expose `ephemeral` yet: it is a key of the compiled
+A Harbor spec (legion.harbor.spec) does not expose `ephemeral` yet: it is a key of the compiled
 type.
 
 - **When.** The controller removes the agent when a worker heartbeat reports it idle (or
@@ -123,7 +123,7 @@ type.
   freed, since caps count live children. The worker then deletes the agent's workdir, session
   log, state and the harness's own session dir (`AgentRuntime.purge`).
 - **After.** A new spawn is a new agent with a new name (the per-swarm counter) and a fresh
-  session. A run bundle (`flock launch`) keeps removed agents' events (`events/<name>.jsonl`) and
+  session. A run bundle (`legion launch`) keeps removed agents' events (`events/<name>.jsonl`) and
   lists them in `run.json` under `removed_agents`, each with its type, tokens and `cost_usd`
   (priced from its turns' tokens, as the swarm's total counts it).
 - **Refused:** `ephemeral: true` with `replicas` above 0 (replicas are never removed).
@@ -142,12 +142,12 @@ Harbor spec takes `words` (its default) or `consecutive-id`; it cannot change in
 | `numeric` (a swarm spec's default) | `<type>-NNNN` (the slot) | `<parent>-<type>-NNNN` (the per-swarm counter) |
 
 **For task authors:** agent names are opaque strings. Verifiers and instructions must not
-assume a format; flock's default names are random words. `naming: consecutive-id` exists for tasks
+assume a format; legion's default names are random words. `naming: consecutive-id` exists for tasks
 that already expect `agent-NNN` (experiments/mini-swarm). With it, only the last role's count
 may change in a running swarm: names run across the roles, so an earlier role's change would
-rename running agents, and `flock update` refuses it. With words, each agent's instructions list
+rename running agents, and `legion update` refuses it. With words, each agent's instructions list
 its teammates and their roles as the controller has named them when the agent's Trial starts:
-every role's replicas, a ramp's up to its max. Replicas added later by `flock update` are
+every role's replicas, a ramp's up to its max. Replicas added later by `legion update` are
 missing from the instructions of agents already running (they still meet on the board).
 
 ```yaml
@@ -159,7 +159,7 @@ types:
 ```
 
 A Harbor spec sets it per role (`agents.roles.<role>.name_prefix`, words only), e.g.
-`steward: {name_prefix: steward-, ...}` in experiments/pybot. Changing it with `flock update`
+`steward: {name_prefix: steward-, ...}` in experiments/pybot. Changing it with `legion update`
 affects only new names: running agents and reserved names keep theirs.
 
 - **Words.** About 190 adjectives (colors, simple qualities) and 340 nouns (animals, fruits,
@@ -173,7 +173,7 @@ affects only new names: running agents and reserved names keep theirs.
 - **The counter.** Spawned children still take the per-swarm counter (`limits.spawned_total`
   counts it); with `words` it is not part of the name.
 - **Everywhere.** The name is the agent's identity: board handle, events, run bundle, status,
-  `X-Flock-Agent` for worlds, `flock-agent remove <name>`. A words name says nothing about the
+  `X-Legion-Agent` for worlds, `legion-agent remove <name>`. A words name says nothing about the
   parent: a world that needs it keeps its own records (e.g. a world that books work to the first agent
   that uses it).
 - The CLI tells an agent from a swarm by looking the name up (a swarm wins a tie).
@@ -197,7 +197,7 @@ the controller. The worker's `session_started` / `session_resumed` / `session_re
 
 ## Agent tokens
 
-Every agent gets its own token. The worker keeps it (with `FLOCK_AGENT`, `FLOCK_PARENT`) and
+Every agent gets its own token. The worker keeps it (with `LEGION_AGENT`, `LEGION_PARENT`) and
 sends the agent's controller calls with it; it never enters a Trial's container.
 
 An agent token may: read its own status and events and call `whoami`; spawn under itself and
@@ -207,12 +207,12 @@ any agent in its subtree; prompt its parent. Everything else is
 controller token keeps full access.
 
 The controller stores a hash and a nonce per agent, never the token: the token is an HMAC of the
-agent's name and nonce under a key derived from `FLOCK_TOKEN`, so every assign of the agent (a
-relaunched worker) carries the same value. Removing the agent revokes it. Rotating `FLOCK_TOKEN`
+agent's name and nonce under a key derived from `LEGION_TOKEN`, so every assign of the agent (a
+relaunched worker) carries the same value. Removing the agent revokes it. Rotating `LEGION_TOKEN`
 invalidates every agent token; agents get the new one with their next assign.
 
 The worker accepts only the routes an agent token may use (`controller_call` in
-flock.worker.main):
+legion.worker.main):
 
 | Method | Path |
 |---|---|
@@ -221,15 +221,15 @@ flock.worker.main):
 | DELETE | `/agents/{name}` |
 
 It sends the call through its own controller client, which re-reads the controller's address
-(`FLOCK_CTL_HOST_FILE` on Slurm) before every heartbeat and after any connection error, and
+(`LEGION_CTL_HOST_FILE` on Slurm) before every heartbeat and after any connection error, and
 retries there; a POST that may have reached the controller is not sent again. A call that still
 fails (unreachable, or 5xx) is an error for the tool and a `controller_call_failed {path,
-error}` event on the agent's stream (`flock status <agent> --events`).
+error}` event on the agent's stream (`legion status <agent> --events`).
 
 ## Operator CLI
 
-With the controller token, `flock-agent spawn <type> --parent <agent>` spawns on an agent's
-behalf, `flock-agent remove <agent>` removes a descendant and its subtree, `flock status <swarm>
+With the controller token, `legion-agent spawn <type> --parent <agent>` spawns on an agent's
+behalf, `legion-agent remove <agent>` removes a descendant and its subtree, `legion status <swarm>
 --parent <agent>` lists children, and `status` takes an agent name when the name is not a
 swarm. The CLI retries HTTP 429 and 502/503/504 (and, for reads, 500 and dropped connections) up
 to 5 attempts with exponential backoff and jitter, never sooner than `Retry-After`.
@@ -238,7 +238,7 @@ to 5 attempts with exponential backoff and jitter, never sooner than `Retry-Afte
 
 An agent runs in a Trial (the task's container), so it calls the controller through the `spawn`
 resource and the `spawn.*` tools
-(`flock.harbor.builtin`, copied into the run's `resources/` and `tools/` like `message_board`):
+(`legion.harbor.builtin`, copied into the run's `resources/` and `tools/` like `message_board`):
 
 ```yaml
 resources:
@@ -268,7 +268,7 @@ limits:
 | `spawn.status {agent?}` | `GET /agents/<agent>` (yourself by default: `parent`, `children`, `depth`) |
 | `spawn.remove {agent}` | `DELETE /agents/<agent>`: a descendant and its subtree |
 
-- **Auth.** Each agent's Trial mounts its own Unix socket (`/run/flock-spawn.sock`), served on
+- **Auth.** Each agent's Trial mounts its own Unix socket (`/run/legion-spawn.sock`), served on
   the worker. The worker sends each call with that agent's own token (the route allow-list
   above): the socket, never the request, decides whose token is used, and the controller
   checks the token's scope and the caps (`spawn:`, `workers`, `limits`) exactly as for any

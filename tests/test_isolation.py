@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from flock import isolation
+from legion import isolation
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -22,7 +22,7 @@ def kernel_namespaces():
     result = subprocess.run([executable, "--user", "--map-root-user", "--pid", "--fork", "--mount-proc", "/bin/true"],
                             capture_output=True, timeout=5, check=False) if executable else None
     if result is None or result.returncode:
-        if os.environ.get("FLOCK_REQUIRE_ISOLATION") == "1":
+        if os.environ.get("LEGION_REQUIRE_ISOLATION") == "1":
             pytest.fail("process isolation requires working user/PID/mount namespaces in this image")
         pytest.skip("this host denies unprivileged namespaces; required by the cluster dry run")
 
@@ -125,7 +125,7 @@ def test_failed_isolation_never_executes_bot_without_it(tmp_path, monkeypatch, b
 def test_dumpability_blocks_a_same_uid_child_from_supervisor_credentials():
     script = r'''
 import subprocess, sys
-from flock.isolation import protect_supervisor
+from legion.isolation import protect_supervisor
 protect_supervisor()
 child = r"""
 import os
@@ -451,7 +451,7 @@ def test_enter_mounts_a_capped_tmpfs_and_binds_tmp_from_disk(tmp_path, monkeypat
 
 
 def test_mountinfo_check_accepts_the_tmp_bind_only_when_planned():
-    root = "/run/flock-root"
+    root = "/run/legion-root"
     info = (f"30 22 0:50 / {root} rw - tmpfs tmpfs rw\n"
             f"31 30 259:1 /state/pi/a/tmp {root}/tmp rw,relatime - ext4 /dev/x rw\n")
     mounts = isolation.parse_mountinfo(info)

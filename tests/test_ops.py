@@ -1,4 +1,4 @@
-"""flock.ops: `flock launch` / `flock update` as library calls (no printing, no typer)."""
+"""legion.ops: `legion launch` / `legion update` as library calls (no printing, no typer)."""
 
 from __future__ import annotations
 
@@ -7,11 +7,11 @@ import os
 import pytest
 from typer.testing import CliRunner
 
-from flock import cli, ops
-from flock.client import Client, ClientError
-from flock.current import write_current
-from flock.ops import SpecError, launch, read_spec
-from flock.worker.agents import VERIFY_WAIT
+from legion import cli, ops
+from legion.client import Client, ClientError
+from legion.current import write_current
+from legion.ops import SpecError, launch, read_spec
+from legion.worker.agents import VERIFY_WAIT
 
 from .conftest import make_spec, write_spec
 
@@ -37,22 +37,22 @@ def test_a_failed_call_after_the_preflight_keeps_what_was_done(api, tmp_path, mo
 
 def test_start_local_refuses_another_swarms_run(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("FLOCK_URL", raising=False)
-    monkeypatch.delenv("FLOCK_CURRENT", raising=False)
-    write_current(tmp_path / ".flock", {"url": "http://127.0.0.1:1", "token": "t",
+    monkeypatch.delenv("LEGION_URL", raising=False)
+    monkeypatch.delenv("LEGION_CURRENT", raising=False)
+    write_current(tmp_path / ".legion", {"url": "http://127.0.0.1:1", "token": "t",
                                         "pid": os.getpid(), "swarm": "other"})
     with pytest.raises(SpecError, match="a local run of other is up"):
         ops.start_local(make_spec(), "spec.yaml")
     assert ops.start_local(make_spec("other"), "spec.yaml") is None  # already serves it
-    monkeypatch.setenv("FLOCK_URL", "http://elsewhere:1")
+    monkeypatch.setenv("LEGION_URL", "http://elsewhere:1")
     assert ops.start_local(make_spec(), "spec.yaml") is None  # an explicit controller
 
 
 @pytest.mark.parametrize("loop", [None, {"prompt": "go"}])
 def test_start_local_ends_a_looped_run_when_idle(tmp_path, monkeypatch, loop):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("FLOCK_URL", raising=False)
-    monkeypatch.delenv("FLOCK_CURRENT", raising=False)
+    monkeypatch.delenv("LEGION_URL", raising=False)
+    monkeypatch.delenv("LEGION_CURRENT", raising=False)
     cmds = []
 
     def popen(cmd, **_):

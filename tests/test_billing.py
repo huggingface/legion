@@ -9,15 +9,15 @@ from huggingface_hub.utils import HfHubHTTPError
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
-from flock import cli, rundir
-from flock.client import Client
-from flock.controller import localrun
-from flock.controller.jobs import HubJobsClient
-from flock.controller.localrun import state_env
-from flock.controller.reconcile import reconcile
-from flock.models import SwarmSpec
-from flock.ops import launch, read_spec, up, update
-from flock.worker.sync import HubBucketStore
+from legion import cli, rundir
+from legion.client import Client
+from legion.controller import localrun
+from legion.controller.jobs import HubJobsClient
+from legion.controller.localrun import state_env
+from legion.controller.reconcile import reconcile
+from legion.models import SwarmSpec
+from legion.ops import launch, read_spec, up, update
+from legion.worker.sync import HubBucketStore
 
 from .conftest import TOKEN, make_spec, wire, write_spec
 from .fake_hub_jobs import FakeHubJobs
@@ -93,7 +93,7 @@ def test_launch_resolves_and_creates_bucket_before_workers(
     # Checkpoint and agent prefixes work on the resolved ID without a further whoami.
     env, _ = state_env({"HF_TOKEN": "infrastructure-key"}, stored)
     before = hub.whoamis
-    checkpoint = HubBucketStore(env["FLOCK_STATE_URL"], token="infrastructure-key")
+    checkpoint = HubBucketStore(env["LEGION_STATE_URL"], token="infrastructure-key")
     checkpoint.upload([(tmp_path / "state.db", "state.db")])
     agents = HubBucketStore(stored.bucket_id, token="infrastructure-key")
     agents.upload([(tmp_path / "session", "demo/researcher/a/session")])
@@ -127,8 +127,8 @@ def test_cli_update_uses_launch_env_files_without_retargeting_bucket(
         app, store, tmp_path, monkeypatch, token_file, saved_login):
     wire(monkeypatch, app)
     monkeypatch.delenv("HF_TOKEN", raising=False)
-    monkeypatch.delenv("FLOCK_RUN_DIR", raising=False)
-    monkeypatch.delenv("FLOCK_URL", raising=False)
+    monkeypatch.delenv("LEGION_RUN_DIR", raising=False)
+    monkeypatch.delenv("LEGION_URL", raising=False)
     tokens = []
 
     def hf_api(token=None):
@@ -143,7 +143,7 @@ def test_cli_update_uses_launch_env_files_without_retargeting_bucket(
     run = tmp_path / "run"
     (run / "hosts").mkdir(parents=True)
     (run / "hosts" / "controller.host").write_text("http://controller.invalid\n")
-    (run / "run.env").write_text(f"FLOCK_TOKEN={TOKEN}\n")
+    (run / "run.env").write_text(f"LEGION_TOKEN={TOKEN}\n")
     with (run / token_file).open("a") as f:
         f.write("HF_TOKEN=file-only-token\n")
     args = ["--env", str(run / token_file)] if token_file == "explicit.env" else []
@@ -172,7 +172,7 @@ def test_local_start_uses_the_resolved_bucket_and_token_from_env_file(monkeypatc
 
     def start(_cmd, **kwargs):
         assert kwargs["env"]["HF_TOKEN"] == "infrastructure-key"
-        assert kwargs["env"]["FLOCK_STATE_URL"] == "hf://buckets/ns/sh/controller/demo"
+        assert kwargs["env"]["LEGION_STATE_URL"] == "hf://buckets/ns/sh/controller/demo"
         raise RuntimeError("checked subprocess environment")
 
     monkeypatch.setattr("subprocess.Popen", start)
@@ -191,7 +191,7 @@ def test_foreground_localrun_prepares_bare_bucket_with_env_file(tiny, monkeypatc
     monkeypatch.setattr("huggingface_hub.HfApi", hf_api)
     monkeypatch.delenv("HF_TOKEN", raising=False)
     if checkpoint:
-        monkeypatch.delenv("FLOCK_STATE_URL")
+        monkeypatch.delenv("LEGION_STATE_URL")
     source = tiny.root / "run.env"
     source.write_text("HF_TOKEN=file-only-token\n")
     path = tiny.root / tiny.spec()
@@ -199,7 +199,7 @@ def test_foreground_localrun_prepares_bare_bucket_with_env_file(tiny, monkeypatc
     result = CliRunner().invoke(localrun.app, [str(path), "--env", str(source),
         "--until", "1s", "--grace", "0", "--skip-preflight"])
     assert result.exit_code == 0, result.output
-    bundle = json.loads(next((tiny.root / ".flock").glob("*/run.json")).read_text())
+    bundle = json.loads(next((tiny.root / ".legion").glob("*/run.json")).read_text())
     assert bundle["spec"]["bucket_id"] == "launcher/runs" and bundle["spec"]["namespace"] == ""
     assert hub.buckets == [("launcher/runs", True, True)] and hub.whoamis == 1
     assert tokens and set(tokens) == {"file-only-token"}
@@ -213,7 +213,7 @@ def test_local_launch_requires_bucket_credentials_even_when_checkpointing_is_off
     wire(monkeypatch, app)
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.setattr("huggingface_hub.get_token", lambda: None)
-    monkeypatch.setenv("FLOCK_STATE_URL", "")
+    monkeypatch.setenv("LEGION_STATE_URL", "")
 
     class NoCredentials(BillingHub):
         def whoami(self):
@@ -228,18 +228,18 @@ def test_local_launch_requires_bucket_credentials_even_when_checkpointing_is_off
     path = write_spec(tmp_path / "spec.yaml", spec)
     result = CliRunner().invoke(cli.app, ["launch", path, "--skip-preflight"])
     assert result.exit_code == 1 and "HF token required" in result.output
-    assert not (tmp_path / ".flock").exists()
+    assert not (tmp_path / ".legion").exists()
 
 
 def test_localrun_no_apply_refuses_unprepared_bucket_before_creating_state(tmp_path, monkeypatch):
-    monkeypatch.delenv("FLOCK_STATE_URL", raising=False)
+    monkeypatch.delenv("LEGION_STATE_URL", raising=False)
     spec = SwarmSpec.model_validate({**make_spec().model_dump(), "compute": "local",
                                      "bucket_id": "runs"})
     path = write_spec(tmp_path / "spec.yaml", spec)
     data = tmp_path / "data"
     result = CliRunner().invoke(localrun.app, [path, "--no-apply", "--skip-preflight",
                                              "--data-dir", str(data)])
-    assert result.exit_code == 1 and "requires FLOCK_STATE_URL" in result.output
+    assert result.exit_code == 1 and "requires LEGION_STATE_URL" in result.output
     assert not data.exists()
 
 

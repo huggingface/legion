@@ -10,9 +10,9 @@ from datetime import timedelta
 import httpx
 import pytest
 
-from flock.controller.api import create_app
-from flock.controller.reconcile import worker_state
-from flock.models import (
+from legion.controller.api import create_app
+from legion.controller.reconcile import worker_state
+from legion.models import (
     AgentHeartbeat,
     AgentState,
     AssignCommand,
@@ -20,9 +20,9 @@ from flock.models import (
     WorkerHeartbeat,
     WorkerState,
 )
-from flock.worker import main as wmain
-from flock.worker.events import utcnow
-from flock.worker.main import RETRY_CAP, ControllerClient
+from legion.worker import main as wmain
+from legion.worker.events import utcnow
+from legion.worker.main import RETRY_CAP, ControllerClient
 
 from .conftest import TOKEN, make_spec
 from .test_worker_main import WID, FakeController, make_worker

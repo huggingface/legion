@@ -1,4 +1,4 @@
-"""`flock launch` / `flock stop` (docs/live.md "Lifecycle"): release with verified final syncs,
+"""`legion launch` / `legion stop` (docs/live.md "Lifecycle"): release with verified final syncs,
 the fresh-run guard, resume ignoring replicas, and
 `update --replicas spec` never lowering a ramp type."""
 
@@ -11,12 +11,12 @@ import pytest
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from flock import cli, ops
-from flock.controller.api import create_app
-from flock.controller.reconcile import reconcile, record_heartbeat
-from flock.controller.state import StateSync
-from flock.controller.store import Store
-from flock.models import (
+from legion import cli, ops
+from legion.controller.api import create_app
+from legion.controller.reconcile import reconcile, record_heartbeat
+from legion.controller.state import StateSync
+from legion.controller.store import Store
+from legion.models import (
     AssignCommand,
     DrainCommand,
     PromptCommand,
@@ -102,7 +102,7 @@ def test_stop_release_drains_every_worker_waits_and_reports_unsynced(
         clock.advance(120)
         tick()
 
-    monkeypatch.setattr("flock.ops._sleep", workers_drain_and_exit)
+    monkeypatch.setattr("legion.ops._sleep", workers_drain_and_exit)
     r = runner.invoke(cli.app, ["stop", "demo", "--release", "--reason", "night"])
     assert r.exit_code == 1, r.output
     assert "NOT synced: researcher-0001: drain sync failed: OSError: 503" in r.output
@@ -110,7 +110,7 @@ def test_stop_release_drains_every_worker_waits_and_reports_unsynced(
     st = runner.invoke(cli.app, ["status", "demo"]).output
     assert "RELEASED since" in st and "NOT synced: researcher-0001" in st, st
     assert any(e["type"] == "sync_failed" for e in store.read_events("_swarm.demo", 0))
-    # released: rows kept, nothing relaunches until `flock launch`
+    # released: rows kept, nothing relaunches until `legion launch`
     clock.advance(600)
     tick()
     assert len(jobs.launches) == 2 and len(store.list_agents("demo")) == 3
@@ -183,7 +183,7 @@ def test_update_replicas_spec_never_lowers_a_ramp_type_and_check_lists_deletions
 def test_the_bucket_guard_stops_at_the_first_file(monkeypatch):
     from huggingface_hub import BucketFile
 
-    from flock.worker.sync import HubBucketStore
+    from legion.worker.sync import HubBucketStore
 
     def tree(bucket_id, prefix, recursive):
         f = BucketFile.__new__(BucketFile)
@@ -199,7 +199,7 @@ def test_the_bucket_guard_stops_at_the_first_file(monkeypatch):
 def test_a_worker_killed_mid_release_reports_its_agents_unsynced(store, jobs, settings, clock):
     store.put_swarm(make_spec(), clock().timestamp())
     reconcile(store, jobs, clock(), settings)
-    from flock.controller.loop import LoopEngine
+    from legion.controller.loop import LoopEngine
 
     LoopEngine(store, send=lambda *a: None, clock=clock).pause("demo", release=True)
     reconcile(store, jobs, clock(), settings)  # drains sent
@@ -215,7 +215,7 @@ def test_a_worker_killed_mid_release_reports_its_agents_unsynced(store, jobs, se
 
 
 def test_resume_diff_ignores_where_the_folder_is():
-    from flock.models import SwarmSpec
+    from legion.models import SwarmSpec
 
     base = make_spec().model_dump(mode="json")
 
@@ -231,8 +231,8 @@ def test_resume_keeps_a_harbor_runs_roster_with_its_live_replicas():
     """With `naming: consecutive-id` the roster lists every type's agents from the file's counts
     (`agent-001`, ... across the roles): a resume (live replicas kept) keeps the running roster;
     an update keeps a kept type's agents and takes a new or changed type's from the file."""
-    from flock import live
-    from flock.models import SwarmSpec
+    from legion import live
+    from legion.models import SwarmSpec
 
     def harbor(**counts):
         roles = [t for t, n in counts.items() for _ in range(n)]
@@ -245,7 +245,7 @@ def test_resume_keeps_a_harbor_runs_roster_with_its_live_replicas():
 
     old = harbor(writer=2, critic=1)
     assert ops.resume_diff(old, harbor(writer=2, critic=3)) == []  # the last role grew
-    new = harbor(writer=2, critic=1, scout=1)  # `flock update`: a role added last
+    new = harbor(writer=2, critic=1, scout=1)  # `legion update`: a role added last
     live.keep_replicas(old, new)
     ops.keep_pins(old, new)
     assert new.types["scout"].harbor.roster == {
@@ -260,8 +260,8 @@ def test_resume_keeps_a_harbor_runs_roster_with_its_live_replicas():
 
 
 def test_the_losing_launch_discards_its_candidate_world(monkeypatch, store, clock):
-    import flock.controller.api as api_mod
-    from flock.world.host import WorldHost
+    import legion.controller.api as api_mod
+    from legion.world.host import WorldHost
 
     class Host(WorldHost):
         def __init__(self):
@@ -286,16 +286,16 @@ def test_the_losing_launch_discards_its_candidate_world(monkeypatch, store, cloc
 
 
 def test_local_runs_checkpoint_to_the_bucket_by_default():
-    from flock.controller.localrun import state_env
+    from legion.controller.localrun import state_env
 
     spec_, saved, none = make_spec(), lambda: "hf_saved", lambda: None
     env, note = state_env({}, spec_, saved)  # the saved hub token is enough
-    assert env["FLOCK_STATE_URL"] == "hf://buckets/ns/sh/controller/demo" and note is None
+    assert env["LEGION_STATE_URL"] == "hf://buckets/ns/sh/controller/demo" and note is None
     env, _ = state_env({"HF_TOKEN": "t"}, spec_, none)
-    assert env["FLOCK_STATE_URL"] == "hf://buckets/ns/sh/controller/demo"
+    assert env["LEGION_STATE_URL"] == "hf://buckets/ns/sh/controller/demo"
     env, note = state_env({}, spec_, none)  # a laptop without a token: off, said once
-    assert "FLOCK_STATE_URL" not in env and note.startswith("checkpoint: off (no HF token")
-    assert state_env({"FLOCK_STATE_URL": ""}, spec_, saved)[0]["FLOCK_STATE_URL"] == ""  # off
-    assert state_env({"FLOCK_STATE_URL": "hf://x/y"}, spec_, none)[0]["FLOCK_STATE_URL"] == "hf://x/y"
+    assert "LEGION_STATE_URL" not in env and note.startswith("checkpoint: off (no HF token")
+    assert state_env({"LEGION_STATE_URL": ""}, spec_, saved)[0]["LEGION_STATE_URL"] == ""  # off
+    assert state_env({"LEGION_STATE_URL": "hf://x/y"}, spec_, none)[0]["LEGION_STATE_URL"] == "hf://x/y"
     nob = make_spec().model_copy(update={"bucket_id": ""})
     assert state_env({}, nob, saved) == ({}, None)

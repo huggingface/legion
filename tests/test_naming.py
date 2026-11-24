@@ -7,9 +7,9 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from flock.controller import naming
-from flock.controller.store import Store
-from flock.models import SwarmSpec
+from legion.controller import naming
+from legion.controller.store import Store
+from legion.models import SwarmSpec
 
 from .test_spawn_api import apply, spawn, spawn_spec
 

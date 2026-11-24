@@ -1,4 +1,4 @@
-"""Live changes (docs/live.md): the `flock update` diff, what heartbeats carry, the
+"""Live changes (docs/live.md): the `legion update` diff, what heartbeats carry, the
 runtime side (prompts at the next turn boundary, with a note), the CLI commands against the
 in-process app."""
 
@@ -11,18 +11,18 @@ from pathlib import Path
 import yaml
 from typer.testing import CliRunner
 
-from flock import cli
-from flock.live import (
+from legion import cli
+from legion.live import (
     diff_specs,
     keep_replicas,
     world_tool_changes,
 )
-from flock.models import (
+from legion.models import (
     AgentHeartbeat,
     SwarmSpec,
     type_spec_rev,
 )
-from flock.tools.bundle import pack
+from legion.tools.bundle import pack
 
 from .conftest import HB, make_spec, wire
 
@@ -184,7 +184,7 @@ async def test_an_effective_apply_bumps_the_generation_and_keeps_the_spec(client
                                                                          tmp_path):
     spec = await applied(client, tmp_path, tick)
     src = {"git_sha": "abc123", "ref": "main", "dirty": 1, "by": "alice", "extra": "dropped"}
-    hdr = {"x-flock-source": json.dumps(src)}
+    hdr = {"x-legion-source": json.dumps(src)}
     r = await client.put("/swarms/demo", json=spec.model_dump(mode="json"), headers=hdr)
     assert r.json()["generation"] == 1  # nothing changed: same generation, no history entry
     n = spec.types["researcher"].replicas

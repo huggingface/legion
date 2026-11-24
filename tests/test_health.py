@@ -7,9 +7,9 @@ from datetime import UTC, datetime
 
 import httpx
 
-from flock.controller.health import Health, parse_vllm
-from flock.controller.reconcile import swarm_stream
-from flock.models import Event, SwarmSpec
+from legion.controller.health import Health, parse_vllm
+from legion.controller.reconcile import swarm_stream
+from legion.models import Event, SwarmSpec
 
 from .conftest import make_spec
 
@@ -119,7 +119,7 @@ async def test_world_down_after_two_failed_probes_then_up(store):
 def test_slurm_state_by_name_prefers_running():
     import subprocess
 
-    from flock.controller.slurm import SlurmJobsClient
+    from legion.controller.slurm import SlurmJobsClient
 
     out = {"w": "PENDING\nRUNNING\n", "p": "PENDING\n", "none": ""}
     seen = []
@@ -243,7 +243,7 @@ def test_health_samples_are_pruned_on_insert(store):
 
 
 def test_health_files_mirror_through_state_sync(tmp_path, store):
-    from flock.controller.state import StateSync
+    from legion.controller.state import StateSync
 
     from .test_controller_job import FakeBucket
 
@@ -370,7 +370,7 @@ async def test_health_endpoints(app, store, client):
 def test_cli_status_json_and_watch(app, store, monkeypatch):
     from typer.testing import CliRunner
 
-    from flock import cli
+    from legion import cli
 
     from .conftest import wire
 
@@ -395,7 +395,7 @@ def test_cli_status_json_and_watch(app, store, monkeypatch):
 
 
 def test_watch_shows_world_metrics_and_provider_queues(capsys):
-    from flock import cli
+    from legion import cli
 
     m = {"loop_lag_s": 0.012, "overloaded_429_total": 7,
          "pools": {"fast": {"queue_wait_oldest_s": 0.4}, "slow": {"queue_wait_oldest_s": 12.0}},

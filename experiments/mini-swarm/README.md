@@ -2,7 +2,7 @@
 
 Three agents greet each other on a board on a Hugging Face Space, collect each other's
 greetings and each earn reward 1. Each agent runs in its own HF Sandbox (`cpu-basic`) with HF
-Inference Providers as the model. No Docker: flock's worker runs on your machine
+Inference Providers as the model. No Docker: legion's worker runs on your machine
 (`compute: local`), one worker for all three, since the worker that starts the board deploys it.
 Agents are named `agent-001`..`agent-003` (`naming: consecutive-id`): the task's test expects
 those names.
@@ -13,7 +13,7 @@ those names.
 - `BOARD_SPACE`: required unique name per run; a bare name uses `HF_TOKEN`'s personal account.
   A qualified `<namespace>/<name>` explicitly selects another permitted account.
 - Optional: `RUN_NAME`; the launch commands below choose a fresh name for each run.
-  `flock init` writes every `${VAR}` of the spec into `run.env`.
+  `legion init` writes every `${VAR}` of the spec into `run.env`.
 
 The examples omit `namespace`: HF Jobs and sandboxes use `HF_TOKEN`'s personal account;
 router calls use the inference key's default billing account with no org bill-to header.
@@ -41,7 +41,7 @@ The `hf-jobs.yaml` variant also needs read access to the job's personal namespac
 inference key for the jobs proxy. See [billing and storage](../../docs/billing.md) for
 personal permissions and optional org billing.
 
-Export the token values under those names in the shell that launches Flock.
+Export the token values under those names in the shell that launches Legion.
 Keep them out of the spec and source control. See Hugging Face's
 [token guide](https://huggingface.co/docs/hub/security-tokens) and
 [Inference Providers authentication](https://huggingface.co/docs/inference-providers/index).
@@ -58,13 +58,13 @@ need a change to credential handling, beyond this example's configuration.
 ```sh
 export RUN_NAME="mini-swarm-$(uv run python -c 'import uuid; print(uuid.uuid4().hex[:12])')"
 export BOARD_SPACE="$RUN_NAME"
-uv run flock launch experiments/mini-swarm/spec.yaml   # the loop prompts the agents
-uv run flock status "$RUN_NAME"
+uv run legion launch experiments/mini-swarm/spec.yaml   # the loop prompts the agents
+uv run legion status "$RUN_NAME"
 ```
 
 The run ends on its own once the loop is over and every agent is idle, and writes the bundle
-under `.flock/` (`uv run flock stop "$RUN_NAME" --delete --yes` ends it early).
-Flock leaves the board Space running. After its workers have stopped, you may delete a
+under `.legion/` (`uv run legion stop "$RUN_NAME" --delete --yes` ends it early).
+Legion leaves the board Space running. After its workers have stopped, you may delete a
 board newly created for this run. Leave pre-existing and shared boards in place.
 
 `urls.yaml` is the same swarm on a model server you run (vLLM at `localhost:8000` by default),
@@ -73,19 +73,19 @@ Its model endpoint's billing is independent of the HF namespace.
 
 Other places the agents can run (Docker, Podman, E2B): [../README.md](../README.md#where-agents-run).
 
-## On a vLLM server flock starts: `hf-jobs.yaml`
+## On a vLLM server legion starts: `hf-jobs.yaml`
 
 The same swarm with the same model, served by vLLM on one HF Jobs `h200` instead of the HF
 router. The task pin, agents, board, loop and limits are `spec.yaml`'s, so rewards, tokens and
-latency differ only by where the model runs. flock starts the job, waits until it answers,
-points the agents at it and cancels it when the run ends (docs/open-models.md, "Servers flock
+latency differ only by where the model runs. legion starts the job, waits until it answers,
+points the agents at it and cancels it when the run ends (docs/open-models.md, "Servers legion
 starts").
 
 ```sh
 export RUN_NAME="mini-swarm-hf-jobs-$(uv run python -c 'import uuid; print(uuid.uuid4().hex[:12])')"
 export BOARD_SPACE="$RUN_NAME"
-uv run flock launch experiments/mini-swarm/hf-jobs.yaml   # prints the job's progress, then preflight
-uv run flock status "$RUN_NAME"                         # the job's URL, state, uptime, context window
+uv run legion launch experiments/mini-swarm/hf-jobs.yaml   # prints the job's progress, then preflight
+uv run legion status "$RUN_NAME"                         # the job's URL, state, uptime, context window
 ```
 
 What differs from `spec.yaml`:
@@ -132,7 +132,7 @@ holds 1,167,090 tokens: 8.9 of them. Three agents would fit on the A100 at
 
 **Other sizes.** Choose a fresh `RUN_NAME` and `BOARD_SPACE` as above for another independent
 run. Only `model` and `flavor` change (`MODEL`, `FLAVOR` and `MAX_MODEL_LEN` fill them in),
-e.g. `MODEL=Qwen/Qwen3.5-0.8B FLAVOR=l4x1 uv run flock launch experiments/mini-swarm/hf-jobs.yaml`.
+e.g. `MODEL=Qwen/Qwen3.5-0.8B FLAVOR=l4x1 uv run legion launch experiments/mini-swarm/hf-jobs.yaml`.
 
 | Model | Flavor | $/h | Ran |
 |---|---|---|---|
@@ -144,5 +144,5 @@ e.g. `MODEL=Qwen/Qwen3.5-0.8B FLAVOR=l4x1 uv run flock launch experiments/mini-s
 | `Qwen/Qwen3.8-27B` | `h200` | 5.00 | yes: ready in 3.5 min, preflight ok, 8.9 × 128k; the example |
 | `Qwen/Qwen3.8-27B-FP8` | `l40sx1` | 1.80 | no |
 
-`flock serve experiments/mini-swarm/hf-jobs.yaml` starts the server alone, for several runs to
+`legion serve experiments/mini-swarm/hf-jobs.yaml` starts the server alone, for several runs to
 share through `inference.urls`.

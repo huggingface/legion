@@ -1,4 +1,4 @@
-"""flock.harbor.envs, built through Harbor's factory as a Trial builds them: HFSandbox on a
+"""legion.harbor.envs, built through Harbor's factory as a Trial builds them: HFSandbox on a
 fake Sandbox.create (`kwargs.namespace` and the secrets file's HF token reach it; unset: None,
 Harbor's default), and the docker and podman environments on a fake subprocess (no secret value
 in an argv)."""
@@ -18,9 +18,9 @@ from harbor.models.task.config import EnvironmentConfig
 from harbor.models.trial.config import EnvironmentConfig as TrialEnvironmentConfig
 from harbor.models.trial.paths import TrialPaths
 
-from flock import secrets_file
-from flock.harbor import envs
-from flock.harbor.envs import E2B, ENVIRONMENTS, HFSandbox, sandbox_name
+from legion import secrets_file
+from legion.harbor import envs
+from legion.harbor.envs import E2B, ENVIRONMENTS, HFSandbox, sandbox_name
 
 
 @pytest.mark.parametrize("kwargs, namespace, file_token, token", [
@@ -43,7 +43,7 @@ async def test_namespace_and_token_reach_sandbox_create(
     monkeypatch.setattr(HFSandbox, "_upload_environment_dir_after_start", lambda self: _done())
     (tmp_path / "environment").mkdir()
     env = EnvironmentFactory.create_environment_from_config(
-        TrialEnvironmentConfig(type="hf-sandbox", import_path="flock.harbor.envs:HFSandbox",
+        TrialEnvironmentConfig(type="hf-sandbox", import_path="legion.harbor.envs:HFSandbox",
                                kwargs=kwargs),
         environment_dir=tmp_path / "environment", environment_name="t", session_id="s",
         trial_paths=TrialPaths(tmp_path / "trial"),
@@ -104,7 +104,7 @@ def test_the_copied_start_matches_the_pinned_harbor():
 
 
 def compose(monkeypatch, tmp_path, backend, secret_names):
-    """flock's docker or podman environment, as a Trial builds it, on a fake subprocess; the
+    """legion's docker or podman environment, as a Trial builds it, on a fake subprocess; the
     list gets each compose call's (argv, env)."""
     runs = []
 

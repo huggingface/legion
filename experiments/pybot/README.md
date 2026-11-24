@@ -35,13 +35,13 @@ account without an org bill-to header. See [billing and storage](../../docs/bill
   public: agents clone it without a token.
 - `PYBOT_TASK_REVISION`: the commit of `HuggingFaceSwarms/pybot` to run. The task dataset is
   private: `HF_TOKEN` needs read access to it.
-- `WORLD_URL` and `PYBOT_WORLD_TOKEN`: the running world's URL and its `FLOCK_WORLD_TOKEN`
+- `WORLD_URL` and `PYBOT_WORLD_TOKEN`: the running world's URL and its `LEGION_WORLD_TOKEN`
   (a new one per run).
 - `BOARD_URL` and `MSGBOARD_OPERATOR_TOKEN`: a dedicated public msgboard Space in your personal account and its operator token;
   the channels (general and one per lane) are created at start.
 - `BUCKET_ID` (`[<ns>/]<name>`, created private at launch if missing); optional `RUN_NAME`.
-  A bare name uses `HF_TOKEN`'s account, e.g. `flock-runs` becomes
-  `<your-username>/flock-runs`. `flock init` writes every
+  A bare name uses `HF_TOKEN`'s account, e.g. `legion-runs` becomes
+  `<your-username>/legion-runs`. `legion init` writes every
   `${VAR}` of the spec into `run.env`.
 
 The board's rules (post gap, length, threads, channel limits) are not enforced on hf-sandbox:
@@ -59,10 +59,10 @@ run. A 1,000-agent run needs your own GPU inference, about 108 `cpu-basic` worke
 The controller runs as an HF Job (README "Run the controller", docs/deploy-job.md).
 
 ```sh
-uv run flock init $PWD/runs/pybot-1 --from experiments/pybot   # fill in run.env; rerun to check
-export FLOCK_RUN_DIR=$PWD/runs/pybot-1
-uv run flock launch runs/pybot-1/experiment
-uv run flock status pybot-1
+uv run legion init $PWD/runs/pybot-1 --from experiments/pybot   # fill in run.env; rerun to check
+export LEGION_RUN_DIR=$PWD/runs/pybot-1
+uv run legion launch runs/pybot-1/experiment
+uv run legion status pybot-1
 ```
 
-`uv run flock stop pybot-1 --delete --yes` ends it early and writes the bundle.
+`uv run legion stop pybot-1 --delete --yes` ends it early and writes the bundle.

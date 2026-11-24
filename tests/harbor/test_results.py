@@ -1,4 +1,4 @@
-from flock.harbor.results import safe_error
+from legion.harbor.results import safe_error
 
 
 def test_safe_error_redacts_environment_and_runtime_credentials(monkeypatch):

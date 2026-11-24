@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from flock.worker.adapters.base import AdapterEvent
+from legion.worker.adapters.base import AdapterEvent
 
 from .test_loop_worker import custom, start
 from .worker_fakes import ScriptedAdapter, runtime, until
@@ -27,7 +27,7 @@ class OomOnce(ScriptedAdapter):
 
 
 async def test_oom_killed_turn_is_transient(tmp_path, monkeypatch):
-    monkeypatch.setattr("flock.worker.agents.LOOP_TRANSIENT_BACKOFF", 0.01)
+    monkeypatch.setattr("legion.worker.agents.LOOP_TRANSIENT_BACKOFF", 0.01)
     ad = OomOnce(tmp_path / "home")
     rt, _ = runtime(tmp_path, adapter=ad, idle_grace="5s")
     await rt.setup(restore=False)

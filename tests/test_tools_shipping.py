@@ -1,4 +1,4 @@
-"""Tools folder shipping: `flock launch` packs and uploads it, the controller stores and checks it,
+"""Tools folder shipping: `legion launch` packs and uploads it, the controller stores and checks it,
 assigns and heartbeats carry the version."""
 
 from __future__ import annotations
@@ -9,9 +9,9 @@ from pathlib import Path
 import yaml
 from typer.testing import CliRunner
 
-from flock import cli
-from flock.models import AssignCommand, SwarmSpec
-from flock.tools.bundle import pack
+from legion import cli
+from legion.models import AssignCommand, SwarmSpec
+from legion.tools.bundle import pack
 
 from .conftest import FAKE_INFERENCE, HB, wire
 
@@ -54,7 +54,7 @@ def write_spec(tmp_path: Path, raw: dict) -> Path:
 # --------------------------------------------------------------------------- apply + controller
 
 
-def test_apply_uploads_the_folder_and_pins_its_version(tmp_path, monkeypatch, app, store):
+def test_apply_uploads_the_folder_and_pins_its_version(tmp_path, monkeypatch, app, store, clock):
     wire(monkeypatch, app)
     folder(tmp_path)
     f = write_spec(tmp_path, raw_spec(tools=["add"]))
@@ -72,7 +72,8 @@ def test_apply_uploads_the_folder_and_pins_its_version(tmp_path, monkeypatch, ap
     folder(tmp_path, ADD_V2)
     f = write_spec(tmp_path, raw_spec(tools="all"))
     r = runner.invoke(cli.app, ["launch", str(f)])
-    assert r.exit_code == 1 and "run `flock update` first" in r.output
+    assert r.exit_code == 1 and "run `legion update` first" in r.output
+    clock.advance(1)
     r = runner.invoke(cli.app, ["update", str(f)])
     assert r.exit_code == 0, r.output
     v2 = store.get_swarm("demo")["spec"].tools_version
@@ -127,7 +128,7 @@ async def test_controller_checks_bundles_and_tells_workers(tmp_path, client, sto
 
 
 async def test_bundle_retention_keeps_the_current_version(store):
-    from flock.controller.store import Store
+    from legion.controller.store import Store
 
     spec = SwarmSpec.model_validate({**raw_spec(), "tools_version": f"{0:016x}"})
     store.put_swarm(spec, 0.0)

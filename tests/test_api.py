@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 
-from flock.models import AgentHeartbeat, Event, TokenUsage, WorkerHeartbeat
+from legion.models import AgentHeartbeat, Event, TokenUsage, WorkerHeartbeat
 
 from .conftest import make_spec
 
@@ -356,7 +356,7 @@ async def test_event_batches_wait_for_a_slot_then_get_503(monkeypatch, store, cl
     """A batch that gets no slot in EVENT_WAIT s is refused with 503 (the worker sends it again)."""
     import httpx
 
-    from flock.controller import api as api_mod
+    from legion.controller import api as api_mod
 
     from .conftest import TOKEN
 

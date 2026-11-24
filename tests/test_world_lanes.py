@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from flock.world.lanes import Lane, LaneBusy, Lanes
+from legion.world.lanes import Lane, LaneBusy, Lanes
 
 
 class Clock:

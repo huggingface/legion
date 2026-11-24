@@ -10,20 +10,20 @@ from pathlib import Path
 
 import pytest
 
-from flock.controller.reconcile import Settings, reconcile, record_heartbeat
-from flock.controller.slurm import (
+from legion.controller.reconcile import Settings, reconcile, record_heartbeat
+from legion.controller.slurm import (
     PREEMPT_EXIT,
     SlurmJobsClient,
     env_file_text,
     read_env_file,
     resolve,
 )
-from flock.models import AgentHeartbeat, SwarmSpec, WorkerHeartbeat
+from legion.models import AgentHeartbeat, SwarmSpec, WorkerHeartbeat
 
 from .conftest import FAKE_INFERENCE, HB, TOKEN
 
 W0 = "demo-researcher-w0000"
-SECRET_VALUES = {"FLOCK_TOKEN": TOKEN, "ANTHROPIC_API_KEY": "sk-secret-anthropic",
+SECRET_VALUES = {"LEGION_TOKEN": TOKEN, "ANTHROPIC_API_KEY": "sk-secret-anthropic",
                  "HF_TOKEN": "hf_secret_value"}
 
 
@@ -67,10 +67,10 @@ def heartbeat(store, clock, wid, preempted=False):
 def test_compute_spec_keys_and_resolution(tmp_path):
     spec = slurm_spec(tmp_path, types={"researcher": {"cpus": 2, "mem": "3500M"}})
     assert spec.compute.kind == "slurm" and spec.namespace == ""
-    env = {"FLOCK_SLURM_PARTITION": "other", "FLOCK_SLURM_CPUS": "8", "FLOCK_SLURM_TIME": "1:00:00",
-           "FLOCK_SLURM_MAX_CPUS": "64"}
+    env = {"LEGION_SLURM_PARTITION": "other", "LEGION_SLURM_CPUS": "8", "LEGION_SLURM_TIME": "1:00:00",
+           "LEGION_SLURM_MAX_CPUS": "64"}
     cfg = resolve(spec.compute, "researcher", env)
-    # defaults < FLOCK_SLURM_* env < spec < per-type entry: the spec wins
+    # defaults < LEGION_SLURM_* env < spec < per-type entry: the spec wins
     assert cfg["partition"] == "cpu" and cfg["cpus"] == "2" and cfg["mem"] == "3500M"
     assert cfg["time"] == "1:00:00" and cfg["account"] == "acct"  # unset in the spec: env
     assert cfg["max_cpus"] == "64"  # the spec's default is not a value it sets
@@ -98,7 +98,7 @@ def test_state_mapping_lifecycle(tmp_path, slurm):
     jobs = SlurmJobsClient(env={})
     spec = slurm_spec(tmp_path)
     ts = spec.types["researcher"]
-    job = jobs.launch(W0, ts, {"TYPE": "researcher", "FLOCK_URL": "http://h:7860",
+    job = jobs.launch(W0, ts, {"TYPE": "researcher", "LEGION_URL": "http://h:7860",
                                "WORKER_ID": W0}, {}, {"worker": W0}, 3600, namespace="",
                       compute=spec.compute)
     assert jobs.inspect(job).stage == "SCHEDULING"  # PENDING (autoscaling): never a failure
@@ -114,7 +114,7 @@ def test_state_mapping_lifecycle(tmp_path, slurm):
     assert (st.stage, st.message, st.preempted) == ("ERROR", "FAILED exit 1", False)
     slurm.set(job, "FAILED", f"{PREEMPT_EXIT}:0")  # the worker's own preemption exit code
     assert jobs.inspect(job).preempted
-    slurm.set(job, "CANCELLED by 0")  # a Spot reclaim: nobody at flock asked for it
+    slurm.set(job, "CANCELLED by 0")  # a Spot reclaim: nobody at legion asked for it
     st = jobs.inspect(job)
     assert st.preempted and "not requested" in st.message
     slurm.set(job, "COMPLETED")
@@ -128,7 +128,7 @@ def test_state_mapping_lifecycle(tmp_path, slurm):
 def test_cancel_requested_is_canceled_also_after_restart(tmp_path, slurm):
     spec = slurm_spec(tmp_path)
     jobs = SlurmJobsClient(env={})
-    job = jobs.launch(W0, spec.types["researcher"], {"TYPE": "researcher", "FLOCK_URL": "x"},
+    job = jobs.launch(W0, spec.types["researcher"], {"TYPE": "researcher", "LEGION_URL": "x"},
                       {}, {"worker": W0}, 60, namespace="", compute=spec.compute)
     slurm.set(job, "RUNNING")
     jobs.cancel(job)
@@ -136,7 +136,7 @@ def test_cancel_requested_is_canceled_also_after_restart(tmp_path, slurm):
     st = jobs.inspect(job)
     assert (st.stage, st.preempted) == ("CANCELED", False)
     # a restarted controller knows its cancels from the markers in the launch dir
-    again = SlurmJobsClient(env={"FLOCK_SLURM_LAUNCH_DIR": str(tmp_path / "launch")})
+    again = SlurmJobsClient(env={"LEGION_SLURM_LAUNCH_DIR": str(tmp_path / "launch")})
     assert again.inspect(job).stage == "CANCELED"
 
 
@@ -144,7 +144,7 @@ def test_list_and_logs_tail(tmp_path, slurm):
     spec = slurm_spec(tmp_path)
     jobs = SlurmJobsClient(env={})
     job = jobs.launch(W0, spec.types["researcher"],
-                      {"TYPE": "researcher", "FLOCK_URL": "x", "DEADLINE": "2026-10-15T09:00:00+00:00"},
+                      {"TYPE": "researcher", "LEGION_URL": "x", "DEADLINE": "2026-10-15T09:00:00+00:00"},
                       {}, {"swarm": "demo", "type": "researcher", "worker": W0}, 60,
                       namespace="", compute=spec.compute)
     slurm.set(job, "RUNNING")
@@ -170,7 +170,7 @@ def test_env_file_quoting_round_trips(tmp_path):
 
     env = {"A": "plain", "B": "http://${CTL_HOST}:7860", "C": "it's a b", "D": ""}
     path = tmp_path / "x.env"
-    path.write_text(env_file_text(env, ["FLOCK_TOKEN"]))
+    path.write_text(env_file_text(env, ["LEGION_TOKEN"]))
     assert read_env_file(path) == env
     script = f'set -a; . {path}; set +a; printf "%s|" "$A" "$B" "$C" "$D"'
     out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True,
@@ -179,13 +179,13 @@ def test_env_file_quoting_round_trips(tmp_path):
 
 
 def test_space_mode_honours_worker_url():
-    from flock.controller.main import deployment
+    from legion.controller.main import deployment
 
-    d = deployment({"FLOCK_URL": "http://ip-10-0-0-1:7860",
-                    "FLOCK_WORKER_URL": "http://${CTL_HOST}:7860"})
+    d = deployment({"LEGION_URL": "http://ip-10-0-0-1:7860",
+                    "LEGION_WORKER_URL": "http://${CTL_HOST}:7860"})
     assert d.mode == "space" and d.public_url == "http://ip-10-0-0-1:7860"
     assert d.worker_url == "http://${CTL_HOST}:7860"
-    assert deployment({"FLOCK_URL": "http://h:1"}).worker_url == "http://h:1"
+    assert deployment({"LEGION_URL": "http://h:1"}).worker_url == "http://h:1"
 
 
 # --------------------------------------------------------------------------- planned restarts
@@ -197,8 +197,8 @@ async def test_preempt_flag_cancelled_relaunch_same_name_registers_fresh(tmp_pat
     incarnation gets 409. No backoff, no crash count, the cut turn resumes."""
     import httpx
 
-    from flock.controller.api import create_app
-    from flock.models import AssignCommand
+    from legion.controller.api import create_app
+    from legion.models import AssignCommand
 
     spec = slurm_spec(tmp_path)
     store.put_swarm(spec, 0)
@@ -255,7 +255,7 @@ async def test_preempt_flag_cancelled_relaunch_same_name_registers_fresh(tmp_pat
 async def test_reused_worker_id_while_old_job_runs_stays_409(tmp_path, slurm, store, clock):
     import httpx
 
-    from flock.controller.api import create_app
+    from legion.controller.api import create_app
 
     store.put_swarm(slurm_spec(tmp_path), 0)
     jobs = SlurmJobsClient(env={})
@@ -304,7 +304,7 @@ def test_spot_churn_never_crashloops_and_timeout_is_planned(tmp_path, slurm, sto
 
 
 def test_size_guard_at_apply_and_at_launch(tmp_path, slurm, store, clock):
-    from flock.models import mem_mb
+    from legion.models import mem_mb
 
     assert mem_mb("54G") == 54 * 1024 and mem_mb("3500M") == 3500 and mem_mb("1T") == 1024**2
     assert mem_mb("512") == 512 and mem_mb("2048K") == 2
@@ -319,8 +319,8 @@ def test_size_guard_at_apply_and_at_launch(tmp_path, slurm, store, clock):
     assert slurm_spec(tmp_path, cpus=99).compute.cpus == 99  # no node limits: nothing checked
     # an env override that does not fit the profile's node limits: refused at launch
     store.put_swarm(slurm_spec(tmp_path), 0)
-    actions = reconcile(store, SlurmJobsClient(env={"FLOCK_SLURM_MEM": "100G",
-                                                    "FLOCK_SLURM_MAX_MEM": "54G"}), clock(),
+    actions = reconcile(store, SlurmJobsClient(env={"LEGION_SLURM_MEM": "100G",
+                                                    "LEGION_SLURM_MAX_MEM": "54G"}), clock(),
                         settings())
     refused = [a for a in actions if a.kind == "launch_refused"]
     assert refused and "max_mem" in refused[0].detail and slurm.ids() == []
@@ -334,7 +334,7 @@ def test_crash_log_tail_survives_a_controller_restart(tmp_path, slurm, store, cl
     w = store.get_worker(W0)
     assert w["log_path"] == str(tmp_path / "logs" / f"{W0}-{job}.out")
     env = read_env_file(next((tmp_path / "launch").glob(f"{W0}-*.env")))  # no container_root:
-    assert env["WORK_ROOT"] == f"/tmp/flock/{W0}/work" and "HOME" not in env  # node-local
+    assert env["WORK_ROOT"] == f"/tmp/legion/{W0}/work" and "HOME" not in env  # node-local
     (tmp_path / "logs" / f"{W0}-{job}.out").write_text("start\nImportError: no module x\n")
     slurm.set(job, "FAILED", "1:0")
     clock.advance(100)
@@ -343,16 +343,16 @@ def test_crash_log_tail_survives_a_controller_restart(tmp_path, slurm, store, cl
     kinds = [a.kind for a in reconcile(store, fresh, clock(), s)]
     assert "crash" in kinds
     assert "ImportError: no module x" in store.get_worker(W0)["last_error"]
-    # with FLOCK_SLURM_LOG_DIR the client finds it on its own too
-    again = SlurmJobsClient(env={"FLOCK_SLURM_LOG_DIR": str(tmp_path / "logs")})
+    # with LEGION_SLURM_LOG_DIR the client finds it on its own too
+    again = SlurmJobsClient(env={"LEGION_SLURM_LOG_DIR": str(tmp_path / "logs")})
     assert again.logs_tail(job)[-1] == "ImportError: no module x"
 
 
 def test_unknown_compute_kind_is_a_hard_error(tmp_path):
-    from flock.controller.main import build
+    from legion.controller.main import build
 
-    env = {"FLOCK_TOKEN": TOKEN, "FLOCK_DATA": str(tmp_path / "d"), "FLOCK_COMPUTE": "slrum"}
-    with pytest.raises(SystemExit, match="FLOCK_COMPUTE='slrum' is not one of"):
+    env = {"LEGION_TOKEN": TOKEN, "LEGION_DATA": str(tmp_path / "d"), "LEGION_COMPUTE": "slrum"}
+    with pytest.raises(SystemExit, match="LEGION_COMPUTE='slrum' is not one of"):
         build(env)
     assert not (tmp_path / "d").exists()  # refused before anything was opened
 
@@ -363,5 +363,5 @@ def test_harbor_workers_run_on_the_node_and_say_so(tmp_path, slurm, store, clock
     store.put_swarm(slurm_spec(tmp_path, container_root="/work", container_image="/shared/img.sqsh"), 0)
     reconcile(store, SlurmJobsClient(env={}), clock(), settings())
     harbor = read_env_file(next((tmp_path / "launch").glob(f"{W0}-*.env")))
-    assert harbor["FLOCK_HARNESS"] == "harbor" and "FLOCK_CONTAINER_IMAGE" not in harbor
-    assert harbor["WORK_ROOT"] == f"/tmp/flock/{W0}/work" and "HOME" not in harbor
+    assert harbor["LEGION_HARNESS"] == "harbor" and "LEGION_CONTAINER_IMAGE" not in harbor
+    assert harbor["WORK_ROOT"] == f"/tmp/legion/{W0}/work" and "HOME" not in harbor

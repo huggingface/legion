@@ -1,7 +1,7 @@
-"""Tiny real runs (AGENTS.md "Tests"): a Harbor spec run in a temp folder, driven by the `flock`
-CLI in-process (the same `flock.ops`/`flock.client` calls a Python API makes). The controller and
+"""Tiny real runs (AGENTS.md "Tests"): a Harbor spec run in a temp folder, driven by the `legion`
+CLI in-process (the same `legion.ops`/`legion.client` calls a Python API makes). The controller and
 its workers are real processes running `harness: harbor`; only Harbor is faked, in each of them
-(tests/harbor/site/sitecustomize.py): every agent's Trial is the real FlockPi on a fake
+(tests/harbor/site/sitecustomize.py): every agent's Trial is the real LegionPi on a fake
 environment whose `pi` answers `reply-N` (tests/harbor/test_adapter.py), and the task pin and
 download need no Hub. The `tiny` fixture (conftest.py) gives one per test, in its own working
 directory, and kills whatever is left at the end."""
@@ -20,8 +20,8 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from flock import cli
-from flock.client import Client
+from legion import cli
+from legion.client import Client
 
 LOCAL = "{kind: local, worker_unknown_after: 10s, worker_dead_after: 11s, crash_backoff: 100ms}"
 # A Harbor spec, one role `writer`. USD per 1M tokens: a fake turn (1500 tokens in, 100 out)
@@ -57,8 +57,8 @@ class TinyRun:
         (self.root / "spec.yaml").write_text(text)
         return "spec.yaml"
 
-    def flock(self, *args: str, code: int = 0) -> str:
-        """`flock ARGS` (`flock-agent` for spawn and remove) in-process; asserts the exit code,
+    def legion(self, *args: str, code: int = 0) -> str:
+        """`legion ARGS` (`legion-agent` for spawn and remove) in-process; asserts the exit code,
         returns stdout and stderr."""
         r = CliRunner().invoke(cli.agent_app if args[0] in ("spawn", "remove") else cli.app,
                                list(args))
@@ -66,7 +66,7 @@ class TinyRun:
         return r.output
 
     def names(self, type_name: str, n: int, swarm: str = "tiny") -> list[str]:
-        """The names of `n` replicas of the type, sorted, once they exist: flock's random words,
+        """The names of `n` replicas of the type, sorted, once they exist: legion's random words,
         so tests look them up."""
         def got():
             agents = [a["name"] for a in Client().agents(swarm, type=type_name)
@@ -75,7 +75,7 @@ class TinyRun:
         return self.wait(got)
 
     def agent(self, name: str) -> dict:
-        return json.loads(self.flock("status", name))
+        return json.loads(self.legion("status", name))
 
     def wait(self, what, timeout: float = 30.0):
         """Poll `what()` until it returns something truthy, and return that. A check that
@@ -101,9 +101,9 @@ class TinyRun:
                          and len(self.events(name, "agent.turn_ended")) >= n and a)
 
     def events(self, name: str, only: str = "") -> list[dict]:
-        """`flock status NAME --events --json`: the normalised events whose name starts with
+        """`legion status NAME --events --json`: the normalised events whose name starts with
         `only`."""
-        out = self.flock("status", name, "--events", "--json", "--only", only)
+        out = self.legion("status", name, "--events", "--json", "--only", only)
         return [json.loads(x) for x in out.splitlines()]
 
     def said(self, agent: str) -> list[str]:
@@ -115,7 +115,7 @@ class TinyRun:
         return [json.loads(x)["prompt"] for x in kept.read_text().splitlines()]
 
     def controller(self, data: Path, port: int = 0, compute: str = "local") -> int:
-        """Start `flock-controller` for `compute` with its state in `data` (a controller that
+        """Start `legion-controller` for `compute` with its state in `data` (a controller that
         can crash, unlike the local run's) on `port` (0: a free one), point the CLI at it and
         wait until it answers. Returns the port."""
         if not port:
@@ -123,15 +123,15 @@ class TinyRun:
                 s.bind(("127.0.0.1", 0))
                 port = s.getsockname()[1]
         url = f"http://127.0.0.1:{port}"  # also what its workers use (not SPACE_HOST)
-        env = {**os.environ, "FLOCK_URL": url, "FLOCK_TOKEN": "tiny-token", "FLOCK_COMPUTE":
-               compute, "FLOCK_DATA": str(data), "PORT": str(port),
-               "FLOCK_RECONCILE_INTERVAL": "0.2"}
+        env = {**os.environ, "LEGION_URL": url, "LEGION_TOKEN": "tiny-token", "LEGION_COMPUTE":
+               compute, "LEGION_DATA": str(data), "PORT": str(port),
+               "LEGION_RECONCILE_INTERVAL": "0.2"}
         with (data.parent / "controller.log").open("ab") as log:
             self.procs.append(subprocess.Popen(
-                [sys.executable, "-m", "flock.controller.main"], env=env, stdout=log,
+                [sys.executable, "-m", "legion.controller.main"], env=env, stdout=log,
                 stderr=log, stdin=subprocess.DEVNULL, start_new_session=True))
-        self.mp.setenv("FLOCK_URL", url)
-        self.mp.setenv("FLOCK_TOKEN", "tiny-token")
+        self.mp.setenv("LEGION_URL", url)
+        self.mp.setenv("LEGION_TOKEN", "tiny-token")
         self.wait(Client().answers)
         return port
 

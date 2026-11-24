@@ -12,19 +12,19 @@ from pathlib import Path
 import httpx
 import pytest
 
-import flock.harbor
-from flock.controller import localrun
-from flock.controller.naming import HANDLE_RE
-from flock.harbor.spec import Spec, compile_spec
-from flock.harbor.tools.bundle import build_tool_bundle
-from flock.harbor.tools.runner import load_module
-from flock.ops import check_spec, read_spec
+import legion.harbor
+from legion.controller import localrun
+from legion.controller.naming import HANDLE_RE
+from legion.harbor.spec import Spec, compile_spec
+from legion.harbor.tools.bundle import build_tool_bundle
+from legion.harbor.tools.runner import load_module
+from legion.ops import check_spec, read_spec
 
 from ..test_agent_controller_calls import AGENT, AgentRoutes, gateway_worker
 from .test_adapter import TASK
 from .test_cli_launch import pins  # noqa: F401 - the fixture
 
-PLUGINS = Path(flock.harbor.__file__).with_name("builtin")
+PLUGINS = Path(legion.harbor.__file__).with_name("builtin")
 tools = load_module(PLUGINS / "tools" / "spawn.py")
 resource_module = load_module(PLUGINS / "resources" / "spawn.py")
 SpawnResource = resource_module.Resource
@@ -63,7 +63,7 @@ async def test_spawn_goes_to_the_controller_as_the_agent(proxied):
     ctrl, _ = proxied
     ack = await asyncio.to_thread(tools.spawn, "analyst", prompt="go", key="a1")
     assert ack == {"name": f"{AGENT}-analyst-0001", "created": True}
-    assert ctrl.agent_calls == [("POST", f"/agents/{AGENT}/spawn", "Bearer flock_at_leader", {})]
+    assert ctrl.agent_calls == [("POST", f"/agents/{AGENT}/spawn", "Bearer legion_at_leader", {})]
     status = await asyncio.to_thread(tools.status)
     assert status["name"] == AGENT
 
@@ -81,7 +81,7 @@ async def test_the_socket_names_the_agent_not_the_request(proxied, monkeypatch):
     await asyncio.to_thread(tools.spawn, "analyst")
     # still AGENT's token: the controller's scope check refuses another agent's subtree
     assert ctrl.agent_calls[-1] == ("POST", "/agents/other-0001/spawn",
-                                    "Bearer flock_at_leader", {})
+                                    "Bearer legion_at_leader", {})
     with pytest.raises(RuntimeError, match="not allowed for an agent"):
         await asyncio.to_thread(tools._call, "GET", "/workers")
 
@@ -157,7 +157,7 @@ limits: {run_timeout_seconds: 900}
 
 @pytest.mark.usefixtures("pins")
 def test_a_leader_spawns_a_child_that_runs_a_turn(tmp_path, monkeypatch):
-    """A local run (controller, worker processes, HarborAdapter, FlockPi on fakes): the
+    """A local run (controller, worker processes, HarborAdapter, LegionPi on fakes): the
     leader's first turn calls spawn.spawn; the controller creates the child, places it on a
     helper worker, and the child answers its first prompt. The workers unpack the shipped tools
     and resources folders, not the experiment's."""
@@ -175,7 +175,7 @@ def test_a_leader_spawns_a_child_that_runs_a_turn(tmp_path, monkeypatch):
     shutil.rmtree(exp)  # the workers unpack the shipped folders, not these
     out = StringIO()
     result = asyncio.run(localrun.run_local(localrun.RunOptions(
-        spec=spec, data_dir=tmp_path / ".flock", until=60, until_idle=True, prompt="go",
+        spec=spec, data_dir=tmp_path / ".legion", until=60, until_idle=True, prompt="go",
         refresh=0.2, reconcile_interval=0.2, out=out, tools=folders.data,
         worker_command=[sys.executable, str(Path(__file__).with_name("fake_spawn_worker.py"))])))
     assert result.reason == "idle" and result.exit_code == 0, out.getvalue()

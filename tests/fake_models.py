@@ -1,5 +1,5 @@
 """A fake model server's `GET /v1/models` (and the HF router's), for the controller's inference
-check (flock.controller.inference): every test's apply and every tiny run's controller use it
+check (legion.controller.inference): every test's apply and every tiny run's controller use it
 (conftest.py, tests/harbor/fake_worker.py), so no test reaches a real server."""
 
 from __future__ import annotations

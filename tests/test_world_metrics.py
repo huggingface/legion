@@ -10,12 +10,12 @@ from typing import ClassVar
 import httpx
 from fastapi.testclient import TestClient
 
-from flock.world import ToolError, World, server, tool
-from flock.world.server import WINDOW_S, _Metrics, create_app
+from legion.world import ToolError, World, server, tool
+from legion.world.server import WINDOW_S, _Metrics, create_app
 
 from .test_world import SECRET, Served
 
-H = {"X-World-Token": SECRET, "X-Flock-Agent": "dev-0001"}
+H = {"X-World-Token": SECRET, "X-Legion-Agent": "dev-0001"}
 
 
 class Hinted(World):
@@ -70,10 +70,10 @@ def test_metrics_json_and_prometheus_text():
     text = c.get("/metrics", headers={**H, "Accept": "text/plain"})
     assert text.headers["content-type"].startswith("text/plain")
     lines = text.text.splitlines()
-    assert 'flock_world_tool_calls{tool="echo"} 1' in lines
-    assert 'flock_world_tool_errors{tool="later",code="open_budget"} 1' in lines
-    assert 'flock_world_pool_limit{pool="slow"} 64' in lines
-    assert "flock_world_world_open_prs 3" in lines and "flock_world_overloaded_429_total 0" in lines
+    assert 'legion_world_tool_calls{tool="echo"} 1' in lines
+    assert 'legion_world_tool_errors{tool="later",code="open_budget"} 1' in lines
+    assert 'legion_world_pool_limit{pool="slow"} 64' in lines
+    assert "legion_world_world_open_prs 3" in lines and "legion_world_overloaded_429_total 0" in lines
 
 
 def test_metrics_window_and_percentiles_with_a_fake_clock():
@@ -126,7 +126,7 @@ class Crowded(World):
 
     def manifest(self) -> dict:
         m = super().manifest()
-        m["tools"][1]["x-flock-workspace"] = {"arg": "path"}
+        m["tools"][1]["x-legion-workspace"] = {"arg": "path"}
         return m
 
     def call_workspace(self, name, args, agent, snapshot):
@@ -137,8 +137,8 @@ class Crowded(World):
 async def test_admission_refuses_a_full_pool_with_retry_after(monkeypatch):
     monkeypatch.setattr(server, "SLOW_THREADS", 2)
     monkeypatch.setattr(server, "FAST_THREADS", 1)
-    monkeypatch.setenv("FLOCK_WORLD_SLOW_QUEUE", "1")
-    monkeypatch.setenv("FLOCK_WORLD_FAST_MAX_WAIT_S", "0.3")
+    monkeypatch.setenv("LEGION_WORLD_SLOW_QUEUE", "1")
+    monkeypatch.setenv("LEGION_WORLD_FAST_MAX_WAIT_S", "0.3")
     served = Served(Crowded())
     try:
         async with httpx.AsyncClient(base_url=served.url, headers=H, timeout=60) as c:
@@ -179,9 +179,9 @@ async def test_admission_refuses_a_full_pool_with_retry_after(monkeypatch):
 
 def test_refusals_log_their_pool_and_reason_at_most_every_10_s(monkeypatch, caplog):
     monkeypatch.setattr(server, "SLOW_THREADS", 2)
-    monkeypatch.setenv("FLOCK_WORLD_SLOW_QUEUE", "-2")  # the slow pool is always full
+    monkeypatch.setenv("LEGION_WORLD_SLOW_QUEUE", "-2")  # the slow pool is always full
     c = TestClient(create_app(Crowded(), SECRET))
-    with caplog.at_level(logging.WARNING, logger="flock.world"):
+    with caplog.at_level(logging.WARNING, logger="legion.world"):
         for _ in range(3):
             assert c.post("/tools/slow", json={"args": {}}, headers=H).status_code == 429
         monkeypatch.setattr(server, "REFUSAL_LOG_EVERY_S", 0)  # as if 10 s went by
@@ -195,8 +195,8 @@ def test_refusals_log_their_pool_and_reason_at_most_every_10_s(monkeypatch, capl
 
 
 def test_prometheus_groups_metrics_and_escapes_labels():
-    from flock.world.server import _prometheus
+    from legion.world.server import _prometheus
     text = _prometheus({"tools": {"a": {"calls": 1, "p": 2}, 'b"\\x': {"calls": 3, "p": 4}}})
     names = [l.split("{")[0] for l in text.splitlines()]
-    assert names == ["flock_world_tool_calls"] * 2 + ["flock_world_tool_p"] * 2
+    assert names == ["legion_world_tool_calls"] * 2 + ["legion_world_tool_p"] * 2
     assert 'tool="b\\"\\\\x"' in text

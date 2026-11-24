@@ -1,4 +1,4 @@
-"""FLOCK_WORKER_SECRETS_FILE: worker credentials from a 0600 file instead of the exec environment."""
+"""LEGION_WORKER_SECRETS_FILE: worker credentials from a 0600 file instead of the exec environment."""
 from __future__ import annotations
 
 import os
@@ -7,8 +7,8 @@ import sys
 
 import pytest
 
-from flock import secrets_file
-from flock.secrets_file import SecretsFileError, load, parse, read_file, secret_env
+from legion import secrets_file
+from legion.secrets_file import SecretsFileError, load, parse, read_file, secret_env
 
 
 @pytest.fixture(autouse=True)
@@ -46,34 +46,34 @@ def test_file_must_be_private(tmp_path):
 
 def test_file_values_win_and_leave_the_process_environment(tmp_path):
     path = write(tmp_path / "s.env", "HF_TOKEN=from-file\nOPENAI_API_KEY=key\n")
-    env = {"FLOCK_WORKER_SECRETS_FILE": str(path), "HF_TOKEN": "from-env", "FLOCK_TOKEN": "env-only"}
+    env = {"LEGION_WORKER_SECRETS_FILE": str(path), "HF_TOKEN": "from-env", "LEGION_TOKEN": "env-only"}
     assert load(env) == ["HF_TOKEN", "OPENAI_API_KEY"]
-    assert "HF_TOKEN" not in env and env["FLOCK_TOKEN"] == "env-only"
+    assert "HF_TOKEN" not in env and env["LEGION_TOKEN"] == "env-only"
     assert path.exists()
-    env2 = {"FLOCK_WORKER_SECRETS_FILE": str(path), "FLOCK_WORKER_SECRETS_FILE_UNLINK": "1"}
+    env2 = {"LEGION_WORKER_SECRETS_FILE": str(path), "LEGION_WORKER_SECRETS_FILE_UNLINK": "1"}
     load(env2)
     assert not path.exists()
 
 
 def test_without_the_file_secrets_come_from_the_environment(monkeypatch):
-    monkeypatch.delenv("FLOCK_WORKER_SECRETS_FILE", raising=False)
+    monkeypatch.delenv("LEGION_WORKER_SECRETS_FILE", raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "env-key")
     assert load() == [] and secret_env()["OPENAI_API_KEY"] == "env-key"
 
 
 def test_children_and_proc_environ_never_see_file_secrets(tmp_path):
-    path = write(tmp_path / "s.env", "FLOCK_WORLD_TOKEN=world-secret\n")
+    path = write(tmp_path / "s.env", "LEGION_WORLD_TOKEN=world-secret\n")
     script = (
         "import os, subprocess, sys\n"
-        "from flock.secrets_file import load, secret_env\n"
+        "from legion.secrets_file import load, secret_env\n"
         "load()\n"
-        "assert secret_env()['FLOCK_WORLD_TOKEN'] == 'world-secret'\n"
+        "assert secret_env()['LEGION_WORLD_TOKEN'] == 'world-secret'\n"
         "own = open(f'/proc/{os.getpid()}/environ', 'rb').read()\n"
         "child = subprocess.run([sys.executable, '-c', 'import os; print(sorted(os.environ))'],\n"
         "                       capture_output=True, text=True).stdout\n"
-        "print(b'world-secret' in own, 'FLOCK_WORLD_TOKEN' in child)\n")
-    env = {k: v for k, v in os.environ.items() if k != "FLOCK_WORLD_TOKEN"}
-    env["FLOCK_WORKER_SECRETS_FILE"] = str(path)
+        "print(b'world-secret' in own, 'LEGION_WORLD_TOKEN' in child)\n")
+    env = {k: v for k, v in os.environ.items() if k != "LEGION_WORLD_TOKEN"}
+    env["LEGION_WORKER_SECRETS_FILE"] = str(path)
     out = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True,
                          check=True).stdout
     assert out.split() == ["False", "False"]
@@ -83,7 +83,7 @@ async def test_agent_harness_env_reads_the_file_secrets(tmp_path, monkeypatch):
     from .worker_fakes import runtime
 
     path = write(tmp_path / "s.env", "MY_SECRET=file-value\n")
-    monkeypatch.setenv("FLOCK_WORKER_SECRETS_FILE", str(path))
+    monkeypatch.setenv("LEGION_WORKER_SECRETS_FILE", str(path))
     monkeypatch.setenv("MY_SECRET", "env-value")
     load()
     assert "MY_SECRET" not in os.environ

@@ -1,6 +1,6 @@
 """An in-memory msgboard for comms tests (no real board is ever called from tests).
 
-Follows the real board's API (`GET /v1/guide`) for the routes flock uses:
+Follows the real board's API (`GET /v1/guide`) for the routes legion uses:
 - POST /v1/join {code, name}: the code must be one of `invites` (code -> channel ids it is
   scoped to; default: `invite` for every channel); joining again with the same name gives the
   same principal and a new token, and the old token stops working (401). Joining adds the
@@ -48,7 +48,7 @@ class Board:
                  invites: dict[str, list[int]] | None = None, private: set[int] | None = None,
                  archived: set[int] | None = None) -> None:
         self.invite = invite
-        self.channels = dict(channels or {12: "flock-test"})
+        self.channels = dict(channels or {12: "legion-test"})
         self.invites = dict(invites) if invites is not None else {invite: list(self.channels)}
         self.private = set(private or ())
         self.archived = set(archived or ())

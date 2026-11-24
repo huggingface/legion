@@ -1,8 +1,8 @@
 #!/bin/bash
-# worker.sbatch <env file>: one flock worker slot as a CPU Slurm job.
+# worker.sbatch <env file>: one legion worker slot as a CPU Slurm job.
 #
-# Submitted BY THE CONTROLLER's Slurm jobs client (FLOCK_COMPUTE=slurm; controller.sbatch points
-# FLOCK_SLURM_WORKER_SCRIPT at <run dir>/slurm/worker.sbatch), roughly as
+# Submitted BY THE CONTROLLER's Slurm jobs client (LEGION_COMPUTE=slurm; controller.sbatch points
+# LEGION_SLURM_WORKER_SCRIPT at <run dir>/slurm/worker.sbatch), roughly as
 #   sbatch --parsable [-p <partition>] -c <cpus> --mem=<mem> --time=<time> --no-requeue \
 #          -J <worker id> --comment '<labels>' -o <run>/logs/<worker id>-%j.out \
 #          <run>/slurm/worker.sbatch <run>/launch/<worker id>-<incarnation>.env
@@ -12,36 +12,36 @@
 # - The run directory is the env file's <run>/launch/..; common.sh sources cluster.env, the
 #   secrets file and run.env, then the env file (settings only, no secret values).
 # - CTL_HOST is read from <run>/hosts/controller.host and exported BEFORE the env file is read, so
-#   FLOCK_URL='http://${CTL_HOST}:<port>' expands inside flock-worker (the file's host:port wins).
-# - flock-worker gets the secrets the env file's comment names in a private 0600 file and never in
+#   LEGION_URL='http://${CTL_HOST}:<port>' expands inside legion-worker (the file's host:port wins).
+# - legion-worker gets the secrets the env file's comment names in a private 0600 file and never in
 #   its exec environment, so /proc/<pid>/environ never shows them (docs/slurm.md "Worker secrets
-#   file"). The file sits next to WORK_ROOT; flock-worker deletes it once read.
-# - CONTAINER (an image from CONTAINER_IMAGE_<type> / FLOCK_CONTAINER_IMAGE / CONTAINER_IMAGE):
-#   flock-worker runs in an Enroot/Pyxis container through `srun ... worker.sbatch --inner`: home
+#   file"). The file sits next to WORK_ROOT; legion-worker deletes it once read.
+# - CONTAINER (an image from CONTAINER_IMAGE_<type> / LEGION_CONTAINER_IMAGE / CONTAINER_IMAGE):
+#   legion-worker runs in an Enroot/Pyxis container through `srun ... worker.sbatch --inner`: home
 #   not mounted, the shared disk read-only and limited to the venv, repo, slurm dir,
-#   CONTAINER_MOUNTS and <run>/hosts. Agent files go to /work/flock/agents/work on the
+#   CONTAINER_MOUNTS and <run>/hosts. Agent files go to /work/legion/agents/work on the
 #   container root (node disk, deleted with the container; not /tmp, a tmpfs counted against the
 #   job memory). The paths carry no worker id, so a slot relaunched under a new id restores its
 #   agents to the same absolute paths.
-#   Without an image flock-worker runs here, in this job's shell (exec), with the env file's paths.
-# - FLOCK_HARNESS=harbor (the env file): each agent is a Harbor Trial in a rootless podman
-#   container, which cannot run inside Enroot, so flock-worker runs here (never in CONTAINER) as
+#   Without an image legion-worker runs here, in this job's shell (exec), with the env file's paths.
+# - LEGION_HARNESS=harbor (the env file): each agent is a Harbor Trial in a rootless podman
+#   container, which cannot run inside Enroot, so legion-worker runs here (never in CONTAINER) as
 #   a child of this shell, with the standard rootless podman setup: the job's own
-#   podman storage under /tmp, podman's health checks run by flock.harbor.podman_healthchecks,
+#   podman storage under /tmp, podman's health checks run by legion.harbor.podman_healthchecks,
 #   the upstream git credential helper for huggingface.co (the token from a 0600 file there), and
-#   at exit the job's containers stopped. Unverified on compute nodes. FLOCK_RESULTS_DIR is
+#   at exit the job's containers stopped. Unverified on compute nodes. LEGION_RESULTS_DIR is
 #   <run>/results: each Trial's result.json, config.json and verifier/, and the board export,
 #   are copied there (shared disk), since WORK_ROOT goes with the node's /tmp.
 # - Spot reclaim (container): the watcher sends SIGUSR1 to this shell, to srun AND to every process
-#   of the step. flock-worker starts with USR1 ignored (SIG_IGN survives exec) until its own
+#   of the step. legion-worker starts with USR1 ignored (SIG_IGN survives exec) until its own
 #   handler (drain + sync) replaces it. The handler below forwards USR1 to the srun step, then
 #   SIGTERM 3 s later if the step is still alive (through slurmd: common.sh step_signal), and
-#   waits. NO requeue: the controller sees the job end and relaunches the slot. flock-worker may
+#   waits. NO requeue: the controller sees the job end and relaunches the slot. legion-worker may
 #   see USR1 two or three times: its handler is idempotent.
 # - A plain `scancel <id>` (the Slurm client's cancel) is fine: slurmd sends SIGTERM to
-#   flock-worker directly. Never `kill -TERM $SRUN_PID`: srun answers that with a SIGKILL.
+#   legion-worker directly. Never `kill -TERM $SRUN_PID`: srun answers that with a SIGKILL.
 #
-#SBATCH --job-name=flock-worker
+#SBATCH --job-name=legion-worker
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
@@ -52,22 +52,22 @@
 
 set -uo pipefail  # no -e: the traps and the wait loop must keep running after a signal
 
-# run_worker: make the agent dirs, write the secrets file, exec flock-worker without the secrets
+# run_worker: make the agent dirs, write the secrets file, exec legion-worker without the secrets
 # in its environment. Input: VENV WORK_ROOT SECRET_NAMES and the secrets.
 run_worker() {
   local f v
   local -a unset_args=()
   umask 077
   mkdir -p "$WORK_ROOT" || { echo "worker.sbatch: cannot create $WORK_ROOT" >&2; exit 2; }
-  f=$(mktemp "$(dirname "$WORK_ROOT")/flock-worker-secrets.XXXXXX") || exit 2
+  f=$(mktemp "$(dirname "$WORK_ROOT")/legion-worker-secrets.XXXXXX") || exit 2
   for v in $SECRET_NAMES; do  # only the names that are set: an empty NAME= would shadow nothing useful
     [ -z "${!v:-}" ] || printf '%s=%s\n' "$v" "${!v}" >> "$f" || exit 2
     unset_args+=(-u "$v")
   done
-  trap '' USR1  # until flock-worker's own handler
-  # FLOCK_WORLD_ADMIN_TOKEN (run.env): the world's /admin secret, never a worker's
-  exec env "${unset_args[@]}" -u FLOCK_WORLD_ADMIN_TOKEN FLOCK_WORKER_SECRETS_FILE="$f" \
-    FLOCK_WORKER_SECRETS_FILE_UNLINK=1 "$VENV/bin/flock-worker"
+  trap '' USR1  # until legion-worker's own handler
+  # LEGION_WORLD_ADMIN_TOKEN (run.env): the world's /admin secret, never a worker's
+  exec env "${unset_args[@]}" -u LEGION_WORLD_ADMIN_TOKEN LEGION_WORKER_SECRETS_FILE="$f" \
+    LEGION_WORKER_SECRETS_FILE_UNLINK=1 "$VENV/bin/legion-worker"
 }
 
 # podman_cleanup (EXIT, harbor): stop the health checks and this job's containers (the wrapper's
@@ -108,20 +108,20 @@ source_env_600 "$ENVFILE"   # the controller's settings for this slot (no secret
 SECRET_NAMES=$(sed -n 's/^# Secrets this worker expects[^:]*: //p' "$ENVFILE")
 export SECRET_NAMES
 # shellcheck disable=SC2086  # SECRET_NAMES: one name per word
-require_var FLOCK_URL WORKER_ID WORKER_INCARNATION SWARM TYPE DEADLINE DRAIN_WINDOW $SECRET_NAMES
+require_var LEGION_URL WORKER_ID WORKER_INCARNATION SWARM TYPE DEADLINE DRAIN_WINDOW $SECRET_NAMES
 case $WORKER_ID in *[!A-Za-z0-9._-]*|"") die "WORKER_ID=$WORKER_ID: unexpected characters";; esac
 export SYNC_INTERVAL=${SYNC_INTERVAL:-180} HEARTBEAT_INTERVAL=${HEARTBEAT_INTERVAL:-30} LOG_LEVEL=${LOG_LEVEL:-INFO}
 select_worker_image "$TYPE"        # per-type image (common.sh)
 PODMAN_LOCAL=
-[ "${FLOCK_HARNESS:-}" != harbor ] || CONTAINER_IMAGE=   # podman cannot run inside Enroot
-log "worker=$WORKER_ID incarnation=${WORKER_INCARNATION:0:8}... swarm=$SWARM type=$TYPE deadline=$DEADLINE ctl=$CTL_HOST container=${CONTAINER_IMAGE:-<none>} harness=${FLOCK_HARNESS:-?}"
-if [ "${FLOCK_HARNESS:-}" = harbor ]; then
+[ "${LEGION_HARNESS:-}" != harbor ] || CONTAINER_IMAGE=   # podman cannot run inside Enroot
+log "worker=$WORKER_ID incarnation=${WORKER_INCARNATION:0:8}... swarm=$SWARM type=$TYPE deadline=$DEADLINE ctl=$CTL_HOST container=${CONTAINER_IMAGE:-<none>} harness=${LEGION_HARNESS:-?}"
+if [ "${LEGION_HARNESS:-}" = harbor ]; then
   # ---------------------------------------------------------------- harbor: rootless podman here
   export PODMAN_COMPOSE_PROVIDER=$VENV/bin/podman-compose
-  export FLOCK_RESULTS_DIR=$RUN_DIR/results  # Trial results and exports outlive WORK_ROOT
-  [ -x "$PODMAN_COMPOSE_PROVIDER" ] || die "$PODMAN_COMPOSE_PROVIDER is missing: install flock in $VENV"
+  export LEGION_RESULTS_DIR=$RUN_DIR/results  # Trial results and exports outlive WORK_ROOT
+  [ -x "$PODMAN_COMPOSE_PROVIDER" ] || die "$PODMAN_COMPOSE_PROVIDER is missing: install legion in $VENV"
   PODMAN=$(command -v podman) || die "podman is not on PATH"
-  PODMAN_LOCAL=$(mktemp -d /tmp/flock-podman.XXXXXX) || die "cannot create the podman storage dir"
+  PODMAN_LOCAL=$(mktemp -d /tmp/legion-podman.XXXXXX) || die "cannot create the podman storage dir"
   trap podman_cleanup EXIT
   export XDG_RUNTIME_DIR=$PODMAN_LOCAL/runtime HF_XET_CACHE=$PODMAN_LOCAL/xet GIT_TERMINAL_PROMPT=0
   mkdir -p "$XDG_RUNTIME_DIR" "$PODMAN_LOCAL/bin" || die "cannot create $PODMAN_LOCAL"
@@ -166,14 +166,14 @@ EOF
   [ "$(podman info --format '{{.Store.GraphRoot}}')" = "$PODMAN_LOCAL/graphroot" ] \
     || die "podman does not use this job's storage $PODMAN_LOCAL/graphroot"
 elif [ -z "$CONTAINER_IMAGE" ]; then
-  run_worker  # exec: flock-worker is this job's shell from here on (signals reach it directly)
+  run_worker  # exec: legion-worker is this job's shell from here on (signals reach it directly)
 else
   # ---------------------------------------------------------------- the container
-  export WORK_ROOT=/work/flock/agents/work        # agents' workdirs WORK_ROOT/<agent>
-  container_srun_args "$HOSTS_DIR"   # -> CTR_SRUN; <run>/hosts ro for FLOCK_CTL_HOST_FILE
+  export WORK_ROOT=/work/legion/agents/work        # agents' workdirs WORK_ROOT/<agent>
+  container_srun_args "$HOSTS_DIR"   # -> CTR_SRUN; <run>/hosts ro for LEGION_CTL_HOST_FILE
 fi
 
-SRUN_PID= ; STOPPING=0   # SRUN_PID: the srun step, or flock-worker itself (harbor)
+SRUN_PID= ; STOPPING=0   # SRUN_PID: the srun step, or legion-worker itself (harbor)
 # term_worker: srun turns a SIGTERM into a SIGKILL of its task, so a step gets it through slurmd
 term_worker() {
   if [ -n "$PODMAN_LOCAL" ]; then kill -TERM "$SRUN_PID" 2>/dev/null; else step_signal TERM; fi
@@ -181,34 +181,34 @@ term_worker() {
 on_usr1() {  # Spot reclaim: the watcher cancels the job 30 s after this signal
   [ "$STOPPING" = usr1 ] && return 0
   STOPPING=usr1
-  log "SIGUSR1 (Spot reclaim): forwarding to the flock-worker step (srun pid ${SRUN_PID:-<none>}), SIGTERM in 3 s; no requeue"
+  log "SIGUSR1 (Spot reclaim): forwarding to the legion-worker step (srun pid ${SRUN_PID:-<none>}), SIGTERM in 3 s; no requeue"
   [ -n "$SRUN_PID" ] || return 0
   kill -USR1 "$SRUN_PID" 2>/dev/null
   sleep 3
   if kill -0 "$SRUN_PID" 2>/dev/null; then
-    log "flock-worker step still alive 3 s after USR1: SIGTERM"
+    log "legion-worker step still alive 3 s after USR1: SIGTERM"
     term_worker
   fi
 }
 on_term() {
   [ "$STOPPING" = 0 ] || return 0
   STOPPING=term
-  log "SIGTERM (scancel by the controller, preemption or time limit): forwarding to flock-worker"
+  log "SIGTERM (scancel by the controller, preemption or time limit): forwarding to legion-worker"
   [ -n "$SRUN_PID" ] && term_worker
 }
 trap on_usr1 USR1
 trap on_term TERM INT
 
-[ "$STOPPING" = 0 ] || { log "signal before flock-worker started: exit"; exit 0; }
+[ "$STOPPING" = 0 ] || { log "signal before legion-worker started: exit"; exit 0; }
 trap '' USR1  # srun starts with USR1 ignored, like every child here
 if [ -n "$PODMAN_LOCAL" ]; then
-  run_worker &  # exec in a subshell: SRUN_PID is flock-worker
+  run_worker &  # exec in a subshell: SRUN_PID is legion-worker
   SRUN_PID=$!
   # shellcheck disable=SC2086  # SECRET_NAMES: one name per word
-  unset $SECRET_NAMES FLOCK_WORLD_ADMIN_TOKEN  # flock-worker has them; the processes below never
+  unset $SECRET_NAMES LEGION_WORLD_ADMIN_TOKEN  # legion-worker has them; the processes below never
   # shortcut: not restarted if it fails (a `podman ps` error), after which health-gated compose
   # services stay `starting`; restart it in a loop if that shows up
-  "$VENV/bin/python" -m flock.harbor.podman_healthchecks &
+  "$VENV/bin/python" -m legion.harbor.podman_healthchecks &
   HEALTH_PID=$!
 else
   srun "${CTR_SRUN[@]}" bash "$SLURM_DIR/worker.sbatch" --inner &
@@ -219,5 +219,5 @@ while kill -0 "$SRUN_PID" 2>/dev/null; do
   wait "$SRUN_PID"
 done
 wait "$SRUN_PID"; rc=$?   # the real status even when the last wait was cut by a trap
-log "flock-worker step exited with $rc"
+log "legion-worker step exited with $rc"
 exit "$rc"

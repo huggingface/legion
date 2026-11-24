@@ -40,19 +40,19 @@ include `message_board.*` in the explicit tools list.
 Use a separate directory such as `/tmp/team-code`:
 
 ```sh
-flock-tool hf_repo.clone --json '{"path":"/tmp/team-code"}'
+legion-tool hf_repo.clone --json '{"path":"/tmp/team-code"}'
 git -C /tmp/team-code switch -c agents/my-component
 # Copy only your original source into this checkout, then:
-flock-tool hf_repo.commit --json '{"path":"/tmp/team-code","files":["parser.py"],"message":"Implement CSV parser"}'
-flock-tool hf_repo.open_pr --json '{"path":"/tmp/team-code","title":"Implement CSV parser","description":"Original parser; tested quoted fields and empty input."}'
-flock-tool hf_repo.list_prs --json '{"state":"open"}'
-flock-tool hf_repo.inspect_pr --json '{"path":"/tmp/team-code","pr":1}'
-flock-tool hf_repo.checkout_pr --json '{"path":"/tmp/team-code","pr":1}'
+legion-tool hf_repo.commit --json '{"path":"/tmp/team-code","files":["parser.py"],"message":"Implement CSV parser"}'
+legion-tool hf_repo.open_pr --json '{"path":"/tmp/team-code","title":"Implement CSV parser","description":"Original parser; tested quoted fields and empty input."}'
+legion-tool hf_repo.list_prs --json '{"state":"open"}'
+legion-tool hf_repo.inspect_pr --json '{"path":"/tmp/team-code","pr":1}'
+legion-tool hf_repo.checkout_pr --json '{"path":"/tmp/team-code","pr":1}'
 # Test the checkout, then supply the full head_sha returned by inspect/checkout:
-flock-tool hf_repo.review_pr --json '{"pr":1,"head_sha":"<40-character-SHA>","verdict":"approve","comment":"Checked quoted fields locally."}'
-flock-tool hf_repo.merge_pr --json '{"pr":1}'
+legion-tool hf_repo.review_pr --json '{"pr":1,"head_sha":"<40-character-SHA>","verdict":"approve","comment":"Checked quoted fields locally."}'
+legion-tool hf_repo.merge_pr --json '{"pr":1}'
 # Switch to main explicitly in your shell, preserving local work, then:
-flock-tool hf_repo.sync --json '{"path":"/tmp/team-code"}'
+legion-tool hf_repo.sync --json '{"path":"/tmp/team-code"}'
 ```
 
 `status` and `diff` inspect local changes; `update_pr(path, pr)` publishes additional
@@ -71,7 +71,7 @@ malicious bypass through the shell. Untracked files are not included in `diff`.
 Review comments record agent name, verdict and reviewed SHA. They are advisory:
 merge does not require approval, and a later update can invalidate an earlier
 review. Agents share one HF account, so the native PR author is that account;
-the PR description/review records the Flock agent. `inspect_pr` bounds the diff
+the PR description/review records the Legion agent. `inspect_pr` bounds the diff
 and comments, and returns file statistics. It computes the diff locally against the
 merge base of the fetched main and PR SHA. Supply `paths` to narrow large PRs; use
 the checkout for a full review. `list_prs` defaults to open PRs and caps results at
@@ -83,7 +83,7 @@ PR updates must descend from the observed remote head and use a push lease. If
 another agent advances the PR, fetch and integrate that work before retrying. No
 automatic force-reset or rebase is performed. If PR creation succeeds but publication
 fails, `open_pr` returns `published: false`, its PR number and `next_action:
-update_pr`; the number is also stored in `git config flock.lastPr`. Recover that
+update_pr`; the number is also stored in `git config legion.lastPr`. Recover that
 PR rather than creating a duplicate. If the creation request itself times out,
 inspect `list_prs(state="all")` on the Hub before trying again. Comments and PR
 creation are retried only after explicit HTTP 429 rejection, up to three retries

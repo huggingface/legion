@@ -8,12 +8,12 @@ import threading
 import httpx
 import pytest
 
-from flock.world import Agent, World, server, tool
-from flock.world.protocol import WorldManifest
+from legion.world import Agent, World, server, tool
+from legion.world.protocol import WorldManifest
 
 from .test_world import SECRET, Served
 
-H = {"X-World-Token": SECRET, "X-Flock-Agent": "dev-0001"}
+H = {"X-World-Token": SECRET, "X-Legion-Agent": "dev-0001"}
 
 
 class Jammed(World):

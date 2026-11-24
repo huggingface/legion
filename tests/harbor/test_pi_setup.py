@@ -4,8 +4,8 @@ from unittest.mock import AsyncMock
 import pytest
 from harbor.trial.hooks import TrialEvent
 
-from flock.harbor.harnesses.pi import HF_CHAT_EXTENSION, PI_CONFIG_DIR, attach_pi_setup
-from flock.models import Inference
+from legion.harbor.harnesses.pi import HF_CHAT_EXTENSION, PI_CONFIG_DIR, attach_pi_setup
+from legion.models import Inference
 
 
 def make_trial():
@@ -27,7 +27,7 @@ async def test_hf_reasoning_installs_extension_once():
     trial.agent.exec_as_agent.assert_awaited_once()
     args, kwargs = trial.agent.exec_as_agent.call_args
     assert args[0] is trial.agent_environment
-    assert f"{PI_CONFIG_DIR}/extensions/flock-hf.js" in args[1]
+    assert f"{PI_CONFIG_DIR}/extensions/legion-hf.js" in args[1]
     assert HF_CHAT_EXTENSION in args[1]
     assert kwargs["timeout_sec"] == 30
 
@@ -62,7 +62,7 @@ def test_other_connections_need_no_extension(overrides):
 def test_terminal_pi_error_ignores_noise_and_recovered_errors(tmp_path, recovered):
     import json
 
-    from flock.harbor.harnesses.pi import terminal_pi_error
+    from legion.harbor.harnesses.pi import terminal_pi_error
 
     path = tmp_path / "pi.txt"
     events = [
@@ -92,7 +92,7 @@ def test_terminal_pi_error_ignores_noise_and_recovered_errors(tmp_path, recovere
 def test_only_expected_turn_budget_abort_is_normal(tmp_path, completed, expected):
     import json
 
-    from flock.harbor.harnesses.pi import terminal_pi_error
+    from legion.harbor.harnesses.pi import terminal_pi_error
 
     path = tmp_path / "pi.txt"
     events = [{"type": "turn_end"}] * completed + [

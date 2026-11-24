@@ -5,9 +5,9 @@ from __future__ import annotations
 
 import pytest
 
-from flock.models import SwarmSpec, TypeSpec
-from flock.worker.agents import AgentRuntime
-from flock.worker.events import Outbox
+from legion.models import SwarmSpec, TypeSpec
+from legion.worker.agents import AgentRuntime
+from legion.worker.events import Outbox
 
 from .conftest import HB
 from .worker_fakes import ScriptedAdapter, until
@@ -15,7 +15,7 @@ from .worker_fakes import ScriptedAdapter, until
 GPU = {"urls": ["http://g1:8000/v1", "http://g2:8000/v1"], "api_key_env": "K"}
 WORKER_ENV = {
     "PATH": "/usr/bin:/bin", "HOME": "/root", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TERM": "xterm",
-    "FLOCK_TOKEN": "flock-secret", "WORKER_INCARNATION": "inc", "HF_TOKEN": "hf-secret",
+    "LEGION_TOKEN": "legion-secret", "WORKER_INCARNATION": "inc", "HF_TOKEN": "hf-secret",
     "VLLM_KEY": "vllm-secret", "MY_ANTHROPIC": "ant-secret", "GITHUB_TOKEN": "gh-secret",
     "MSGBOARD_INVITE_X": "invite",
 }
@@ -54,7 +54,7 @@ async def test_runtime_hands_over_declared_secrets_and_the_inference_key(tmp_pat
     await rt.prompt("hi")
     await until(lambda: adapter.envs)
     await rt.stop()
-    assert "FLOCK_TOKEN" not in adapter.envs[0] and adapter.envs[0]["HF_TOKEN"] == "hf-secret"
+    assert "LEGION_TOKEN" not in adapter.envs[0] and adapter.envs[0]["HF_TOKEN"] == "hf-secret"
     started = next(e for e in rt.outbox._q if e.type == "session_started")
     assert started.data["data"]["provider"] == "inference"
     assert started.data["data"]["model_id"] == "Qwen/Q"
@@ -74,8 +74,8 @@ async def test_runtime_reports_a_missing_key(tmp_path):
 
 
 async def test_zero_usage_turn_is_flagged_and_logged_once(tmp_path, caplog):
-    from flock.models import TokenUsage
-    from flock.worker.adapters.base import AdapterEvent
+    from legion.models import TokenUsage
+    from legion.worker.adapters.base import AdapterEvent
 
     def rt_for(model):
         ts = typespec(w={**HB, "model": model})["w"]

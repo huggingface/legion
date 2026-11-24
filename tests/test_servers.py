@@ -1,4 +1,4 @@
-"""Servers flock starts for `inference.hf_jobs` (controller/servers.py, hf_jobs_servers.py),
+"""Servers legion starts for `inference.hf_jobs` (controller/servers.py, hf_jobs_servers.py),
 through the controller's API, with the Hub's jobs faked (tests/fake_hub_jobs.py) and each job's
 vLLM behind a fake jobs proxy: the launch and its readiness wait, the pinned urls and context
 window, a restarted controller reattaching, cancel, failures; roles with their own model or
@@ -11,12 +11,12 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from flock import ops
-from flock.client import Client
-from flock.controller.api import create_app
-from flock.controller.hf_jobs_servers import HFJobsServers
-from flock.controller.servers import Servers
-from flock.models import DEFAULT_VLLM_IMAGE, SwarmSpec
+from legion import ops
+from legion.client import Client
+from legion.controller.api import create_app
+from legion.controller.hf_jobs_servers import HFJobsServers
+from legion.controller.servers import Servers
+from legion.models import DEFAULT_VLLM_IMAGE, SwarmSpec
 
 from .conftest import HB, TOKEN, wire
 from .fake_hub_jobs import FakeHubJobs
@@ -125,7 +125,7 @@ def test_launch_wait_pin_reattach_and_cancel(controller, hub, proxy, store, cloc
     app.state.servers.tick()
     assert [(s["job_id"], s["state"]) for s in c.get("/swarms/s/servers").json()] == [
         (job, "ready")]
-    c.post("/swarms/s/servers", json=body)  # `flock launch` again: nothing new starts
+    c.post("/swarms/s/servers", json=body)  # `legion launch` again: nothing new starts
     assert len(hub.runs) == 1 and hub.cancelled == []
     assert c.delete("/swarms/s").json()["cancelled"] == [job]  # the run ends: cancelled
     assert hub.jobs[job]["status"]["stage"] == "CANCELED"
@@ -163,7 +163,7 @@ def test_each_model_gets_its_own_servers(controller, hub, proxy, store):
 
 def test_a_changed_block_moves_the_type_to_new_servers(controller, hub, proxy, store, clock,
                                                         monkeypatch):
-    """`flock update` of the hf_jobs block starts new servers and the apply pins them (a block
+    """`legion update` of the hf_jobs block starts new servers and the apply pins them (a block
     change: the type's workers restart on them); the old ones serve the draining workers' turns
     until turn_timeout, then are cancelled."""
     app, c = controller()
@@ -178,7 +178,7 @@ def test_a_changed_block_moves_the_type_to_new_servers(controller, hub, proxy, s
         assert r.status_code == 200, r.text
         return job
 
-    from flock.controller.reconcile import inference_rev
+    from legion.controller.reconcile import inference_rev
 
     old = up(spec())
     rev = inference_rev(store.get_swarm("s")["spec"].types["agent"])
@@ -194,15 +194,15 @@ def test_a_changed_block_moves_the_type_to_new_servers(controller, hub, proxy, s
     assert hub.cancelled == [old]
     assert [(r["job_id"], r["state"]) for r in c.get("/swarms/s/servers").json()] == [
         (new, "ready")]  # a retired group is dropped once cancelled
-    wire(monkeypatch, app)  # `flock update` again: the stopped group is no longer the spec's
+    wire(monkeypatch, app)  # `legion update` again: the stopped group is no longer the spec's
     assert [r["job_id"] for r in ops.start_servers(Client(), SwarmSpec.model_validate(body))] == [
         new]
 
 
 def test_vllm_args_rules(controller, hub):
-    """Keys flock owns are refused; max_num_seqs and tensor_parallel_size are filled in unless
+    """Keys legion owns are refused; max_num_seqs and tensor_parallel_size are filled in unless
     vllm_args sets them; an entry overrides by key, `true`/`false` are flags."""
-    for entry, needle in [("port=9000", "flock sets it"), ("served-model-name=x", "flock sets it"),
+    for entry, needle in [("port=9000", "legion sets it"), ("served-model-name=x", "legion sets it"),
                           ("tool_call_parser=hermes", "set hf_jobs.tool_call_parser"),
                           ("api_key=k", "drops Authorization"), ("enforce_eager", "KEY=VALUE")]:
         with pytest.raises(ValidationError, match=needle):
@@ -289,7 +289,7 @@ def test_a_restart_judges_jobs_by_the_spec_applied_now(controller, hub, proxy, c
     the restart counts), keeps a dropped group for its grace, and never touches worker jobs."""
     app, c = controller()
     [a] = up(app, c, hub, proxy, spec())
-    worker = hub.run_job(image="w", command=["flock-worker"], namespace="me", labels={
+    worker = hub.run_job(image="w", command=["legion-worker"], namespace="me", labels={
         "swarm": "s", "type": "agent", "worker": "s-agent-w0000"}).id
     app, c = controller()
     app.state.servers.tick()
@@ -410,7 +410,7 @@ def test_a_failed_group_s_jobs_are_cancelled_until_they_are_gone(controller, hub
 def test_an_old_failure_leaves_the_status(controller, hub, proxy):
     """A group that failed (an OOM) and that the applied spec no longer uses is dropped: the
     swarm's status shows only its servers."""
-    from flock.status import verdict
+    from legion.status import verdict
 
     app, c = controller()
     [failed] = [r["job_id"] for r in c.post("/swarms/s/servers", json=spec()).json()]
