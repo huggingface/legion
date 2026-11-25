@@ -259,6 +259,50 @@ async def test_while_until_clock_time_stops_regardless_of_start(sim):
     assert fin[A0]["loop"]["why"] == "final: until"
 
 
+async def test_transport_stalls_count_past_the_transient_limit(sim, monkeypatch):
+    monkeypatch.setattr("legion.controller.loop.TRANSIENT_LIMIT", 2)
+    await sim.apply({"prompt": "p", "every": "5s"})
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    for i in range(5):  # 2 free, then each one counts: a model server that stays down
+        await sim.turn(A0, got[A0], status="error", reason="model_transport")
+        sim.tick(5)
+        got = prompts(await sim.commands())
+        assert (A0 in got) == (i < 4)
+    st = (await sim.c.get("/swarms/demo/loop")).json()[0]["per_agent"][A0]
+    assert (st["phase"], st["done_reason"], st["errors"]) == ("done", "errors", 3)
+
+
+async def test_raising_until_reopens_a_loop_that_ended_on_it(sim):
+    loop = {"prompt": "p", "every": "10s", "while": {"until": "60s"}, "final": {"prompt": "fin"}}
+    await sim.apply(loop)
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    for a in (A0, A1):
+        await sim.turn(a, got[a])
+    sim.tick(61)
+    fin = prompts(await sim.commands())
+    for a in (A0, A1):
+        await sim.turn(a, fin[a])
+    await sim.heartbeat()
+    sim.tick()
+    (lp,) = (await sim.c.get("/swarms/demo/loop")).json()
+    assert (lp["state"], lp["reason"]) == ("done", "until")
+    await sim.apply({**loop, "while": {"until": "600s"}})  # `legion update` with a later until
+    sim.tick()
+    got = prompts(await sim.commands())
+    assert {(p["loop"]["kind"], p["loop"]["round"]) for p in got.values()} == {("loop", 2)}
+    (again,) = (await sim.c.get("/swarms/demo/loop")).json()
+    assert (again["state"], again["started_at"]) == ("running", lp["started_at"])
+    r = await sim.c.post("/swarms/demo/loop", json={"type": "researcher", "action": "stop",
+                                                    "final": False})
+    assert r.status_code == 200, r.text
+    sim.tick(10)
+    assert (await sim.c.get("/swarms/demo/loop")).json()[0]["state"] == "done"  # a hand stop stays
+
+
 async def test_agent_usd_takes_an_agent_out(sim):
     # PRICED output: $20 per 1M tokens, so 25,000 tokens = $0.50
     await sim.apply({"prompt": "p", "every": "5s", "while": {"agent_usd": 0.5}})

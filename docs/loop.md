@@ -83,6 +83,8 @@ every turn is admitted under the provider's `max_working` like any other prompt.
   idle and again each time a turn ends `completed` (or at `max_turns`), with no controller round trip (no idle gap
   between turns). It stops at `max_rounds`, at the `until` deadline, on
   a `loop_stop` command, or after 3 failed turns in a row (a failed turn is retried after 2 s).
+  On both sides a turn that failed on the model transport (`timeout`, `model_transport`) is
+  retried with backoff and not counted, up to 20 in a row; each one after that counts.
   A turn that ends at the type's `max_turns` is not a failed turn, on either side. Each one is
   a `loop_max_turns` event.
   Each prompt it sends is a `loop_prompt` event, which is how the controller counts rounds. An
@@ -113,6 +115,9 @@ undelivered loop prompts and sends `loop_stop` to worker-side loops.
 (`until: 2026-10-28T20:00Z`, or with an offset like `+02:00`; no zone means UTC). A clock time
 ends the loop when `now >= until` whatever the start time, so the final round can be scheduled
 for a wall-clock moment. `{wall}` is then the minutes from the loop start to that time.
+A re-apply that moves `until` past now reopens a loop that ended on it (same run: start time
+and rounds kept; a new final round at the new deadline), unless it was stopped by hand, is
+under the budget stop, or no agent can loop again (all at `max_rounds` or out).
 
 **Undelivered prompts.** A worker that takes a loop prompt and then defers it (draining,
 stopping) reports `prompt_deferred` with the prompt's `{kind, round}`: the controller undoes
@@ -186,7 +191,8 @@ While an agent is held (its type or its name is held):
 - a worker-side loop gets `loop_stop {reason: held}` once; after `resume` it gets a
   `loop_start` of the same run, so its round count goes on;
 - `--interrupt` sends `stop` (the hard budget stop's command) to its turns in flight, after a
-  `loop_stop` to an active worker-side loop (else the worker would re-prompt the cut turn). A
+  `loop_stop` to an active worker-side loop (else the worker would re-prompt the cut turn). It
+  cuts only the named types and agents, also when they were already held. A
   hand prompt whose turn `--interrupt` cuts is lost, as with `stop`.
 
 Holds are stored in `swarm_flags` (a controller restart keeps them). Events on the swarm stream:
