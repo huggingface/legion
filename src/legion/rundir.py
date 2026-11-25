@@ -158,12 +158,13 @@ def spec_keys(data: Any, cluster: Mapping[str, str] | None = None) -> dict[str, 
 def token_names(data: Any) -> list[str]:
     """The per-run tokens: LEGION_TOKEN, plus LEGION_WORLD_TOKEN and the spec's world.token_env
     (same value) when the world takes a token, and LEGION_WORLD_ADMIN_TOKEN (its own value) for
-    a `url` world, which legion does not start and so cannot hand a derived admin secret."""
+    a `url` world that the run's jobs start (`command`): the controller cannot derive its admin
+    secret. An external `url` world (a Space) keeps the one set for it."""
     w = data.get("world") or {}
     te = w.get("token_env")
     return ["LEGION_TOKEN", *(["LEGION_WORLD_TOKEN"] if te else []),
             *([te] if te and te not in TOKENS else []),
-            *([ADMIN_TOKEN_ENV] if w.get("url") else [])]
+            *([ADMIN_TOKEN_ENV] if w.get("url") and w.get("command") else [])]
 
 
 # ---------------------------------------------------------------- run.env
@@ -938,8 +939,8 @@ def init(run_dir: str | Path, experiment: str | Path | None = None, *,
         rep.checks += [check_capacity(spec, secret_env), check_mounts(secret_env)]
         if spec.world and spec.world.command and (unset := [n for n in ("WORLD_CPUS", "WORLD_MEM")
                                                             if not values.get(n)]):
-            rep.notes.append(f"{', '.join(unset)} unset: the world job gets world.sbatch's default "
-                             f"(2 CPUs, 3800M), small for a busy world; set them in {CLUSTER_ENV} or {RUN_ENV}")
+            rep.notes.append(f"{', '.join(unset)} unset: the world job gets world.sbatch's small "
+                             f"default; set them in {CLUSTER_ENV} or {RUN_ENV}")
         if (d / CLUSTER_ENV).is_file():
             rep.checks.append(check_cluster_env(d / CLUSTER_ENV))
     return rep

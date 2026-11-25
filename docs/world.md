@@ -331,7 +331,8 @@ by, reason}`):
   its own token and the swarm and starts the world with it in `$LEGION_WORLD_ADMIN_TOKEN`;
 - any other world (`url`; Slurm, a Space): set `LEGION_WORLD_ADMIN_TOKEN` in the world's
   environment and in the controller's secrets (the run's secrets file on Slurm,
-  `legion init --secrets`), and keep it from the workers.
+  `legion init --secrets`), and keep it from the workers. For a `url` world with a `command`
+  (the run's Slurm world job), `legion init` generates it in `run.env`.
 
 ```bash
 python -m legion.world knobs <swarm>                                   # values, defaults, ranges, paused lanes

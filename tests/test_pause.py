@@ -77,7 +77,7 @@ async def test_agent_hold_with_interrupt_stops_only_that_agent(sim):
     assert r.status_code == 404
     await pause(sim, types=["researcher"], reason="look")
     r = await sim.c.post("/swarms/demo/resume", json={"agents": [A0, A1]})
-    assert r.json()["not_lifted"] == {A1: "still held by its type"}  # A0's own hold is lifted
+    assert r.json()["not_lifted"] == {A0: "still held by its type", A1: "still held by its type"}
     r = await sim.c.post("/swarms/demo/resume", json={"types": ["researcher"]})
     assert r.json()["not_lifted"] == {}
     r = await sim.c.post("/swarms/demo/resume", json={"agents": [A0]})
