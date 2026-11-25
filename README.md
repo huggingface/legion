@@ -11,6 +11,12 @@ Run from a laptop, on Hugging Face Jobs, or through Slurm. Use Hugging Face
 Inference Providers or your own OpenAI-compatible model endpoint, and add tools
 as Python functions. Pi is currently the supported agent harness.
 
+> [!WARNING]
+> Legion is at an early stage and changes quickly, so expect sharp edges. The
+> CLI, the spec format and the APIs can change in breaking ways without a
+> deprecation period. If you need stability, pin a commit, and please
+> [open an issue](https://github.com/huggingface/legion/issues) when something breaks.
+
 ![Legion coordinates Harbor agent trials, task environments, inference, and shared resources; the controller tracks state and health.](docs/architecture.svg)
 
 [Explore the architecture and API](docs/design.md).
