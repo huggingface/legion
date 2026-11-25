@@ -284,7 +284,9 @@ The cluster's watcher sends SIGUSR1 to every process of a reclaimed job and canc
 
 The controller ends the slot on that heartbeat (it cancels the job if it is still listed) and
 relaunches it in the same pass: a planned restart (no backoff, crash streak 0, never
-crashlooping). The new job registers with a fresh incarnation (the old process gets 409 and
+crashlooping). Any other planned end (drain, timeout) within 60 s of the job's start backs off
+like a crash (`crash_backoff`, doubling) without counting toward crashlooping, so a worker that
+ends at once does not relaunch in a tight loop. The new job registers with a fresh incarnation (the old process gets 409 and
 exits without syncing), restores every agent from the bucket, and the interrupted agents get
 the type's `resume_prompt`. Without the flag (a hard kill), the unrequested `CANCELLED` (or
 `PREEMPTED`, `NODE_FAIL`, exit 75) gives the same planned restart once the job is checked

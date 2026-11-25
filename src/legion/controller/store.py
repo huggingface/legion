@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS workers (
   draining INTEGER NOT NULL DEFAULT 0,
   crashes INTEGER NOT NULL DEFAULT 0,
   consecutive_crashes INTEGER NOT NULL DEFAULT 0,
+  fast_ends INTEGER NOT NULL DEFAULT 0,  -- planned ends in a row soon after start (reconcile.FAST_END)
   next_launch_at REAL,
   retire_at REAL,
   created_at REAL NOT NULL,
@@ -341,7 +342,8 @@ class Store:
                     [spec.swarm, type_name],
                 )
             # Re-applying the spec clears crashlooping, launch_refused and their streaks.
-            self._x("UPDATE workers SET consecutive_crashes = 0 WHERE swarm = ?", [spec.swarm])
+            self._x("UPDATE workers SET consecutive_crashes = 0, fast_ends = 0 WHERE swarm = ?",
+                    [spec.swarm])
         self._liveness[spec.swarm] = spec.compute.liveness()
         self.listener("reconcile", "")
 
