@@ -948,8 +948,8 @@ def record_heartbeat(store: Store, worker_id: str, hb: WorkerHeartbeat, now: dat
         a = store.get_agent(name)
         if a is not None and a["worker"] == worker_id:
             store.update_agent(name, resume_pending=1)
-    if (w["consecutive_crashes"] or w["fast_ends"]) and t - (w["launched_at"] or t) >= STABLE_AFTER:
-        fields["consecutive_crashes"] = fields["fast_ends"] = 0
+    if w["consecutive_crashes"] and t - (w["launched_at"] or t) >= STABLE_AFTER:
+        fields["consecutive_crashes"] = 0
     store.update_worker(worker_id, **fields)
     queued = {c["body"] for c in store.commands_for(worker_id)}
     sw = store.get_swarm(w["swarm"])

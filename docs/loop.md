@@ -83,8 +83,8 @@ every turn is admitted under the provider's `max_working` like any other prompt.
   idle and again each time a turn ends `completed` (or at `max_turns`), with no controller round trip (no idle gap
   between turns). It stops at `max_rounds`, at the `until` deadline, on
   a `loop_stop` command, or after 3 failed turns in a row (a failed turn is retried after 2 s).
-  On both sides a turn that failed on the model transport (`timeout`, `model_transport`) is
-  retried with backoff and not counted, up to 20 in a row; each one after that counts.
+  A turn that failed on the model transport (`timeout`, `model_transport`) is retried with
+  backoff and not counted, up to 20 in a row; each one after that counts.
   A turn that ends at the type's `max_turns` is not a failed turn, on either side. Each one is
   a `loop_max_turns` event.
   Each prompt it sends is a `loop_prompt` event, which is how the controller counts rounds. An
@@ -95,7 +95,8 @@ every turn is admitted under the provider's `max_working` like any other prompt.
   this matters: a worker-side loop would keep its slot from turn to turn and starve the agents
   queued behind it, while controller-sent rounds queue FIFO with everybody else's. A `turn_end`
   round whose prompt never started a turn (deferred by a draining worker, or lost) is sent again
-  after 30 s.
+  after 30 s. Turns that failed on the model transport do not count toward the 3 failed turns
+  for 30 min after the first of them in a row; after that each one counts.
 
 **Rounds.** A round is one loop prompt to one agent. The counter is per agent; `max_rounds`
 counts loop prompts (not the final prompt, and wake prompts only with

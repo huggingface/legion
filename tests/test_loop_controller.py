@@ -259,17 +259,17 @@ async def test_while_until_clock_time_stops_regardless_of_start(sim):
     assert fin[A0]["loop"]["why"] == "final: until"
 
 
-async def test_transport_stalls_count_past_the_transient_limit(sim, monkeypatch):
-    monkeypatch.setattr("legion.controller.loop.TRANSIENT_LIMIT", 2)
+async def test_transport_stalls_count_after_the_transient_window(sim, monkeypatch):
+    monkeypatch.setattr("legion.controller.loop.TRANSIENT_FOR", 10.0)
     await sim.apply({"prompt": "p", "every": "5s"})
     await sim.heartbeat()
     sim.tick()
     got = prompts(await sim.commands())
-    for i in range(5):  # 2 free, then each one counts: a model server that stays down
+    for i in range(6):  # free for 10 s, then each one counts: a model server that stays down
         await sim.turn(A0, got[A0], status="error", reason="model_transport")
         sim.tick(5)
         got = prompts(await sim.commands())
-        assert (A0 in got) == (i < 4)
+        assert (A0 in got) == (i < 5)
     st = (await sim.c.get("/swarms/demo/loop")).json()[0]["per_agent"][A0]
     assert (st["phase"], st["done_reason"], st["errors"]) == ("done", "errors", 3)
 

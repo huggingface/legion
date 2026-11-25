@@ -239,6 +239,8 @@ class Store:
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.executescript(SCHEMA)
+        if "fast_ends" not in {r["name"] for r in self._q("PRAGMA table_info(workers)")}:
+            self._x("ALTER TABLE workers ADD COLUMN fast_ends INTEGER NOT NULL DEFAULT 0")
         # Called with ("commands", worker_id) / ("events", agent) / ("reconcile", "") after
         # writes; the API turns these into wake-ups for long-polls. Must be thread-safe.
         self.listener: Callable[[str, str], None] = lambda kind, key: None

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import sqlite3
 from datetime import datetime, timedelta
 
 from pydantic import TypeAdapter
@@ -17,7 +18,7 @@ from legion.controller.reconcile import (
     reconcile,
     record_heartbeat,
 )
-from legion.controller.store import Store
+from legion.controller.store import DB_NAME, Store
 from legion.models import (
     CRASHLOOP_THRESHOLD,
     AgentHeartbeat,
@@ -212,6 +213,16 @@ def test_drained_completed_is_planned_restart(store, jobs, clock, tick):
     actions = tick()  # draining workers are inspected even with a fresh heartbeat
     assert kinds(actions)[:2] == ["planned_restart", "launch"]
     assert store.get_worker(W0)["fast_ends"] == 0
+
+
+def test_a_state_db_from_before_fast_ends_gets_the_column(tmp_path):
+    Store(tmp_path).close()
+    with sqlite3.connect(tmp_path / DB_NAME) as db:
+        db.execute("ALTER TABLE workers DROP COLUMN fast_ends")
+    store = Store(tmp_path)
+    store.insert_worker(W0, "demo", "researcher", 0, 0.0)
+    store.update_worker(W0, fast_ends=2)
+    assert store.get_worker(W0)["fast_ends"] == 2
 
 
 def test_drained_completed_in_a_released_swarm_ends(store, jobs, clock, tick):
