@@ -1748,5 +1748,14 @@ def add_pause_routes(api: APIRouter, loops: LoopEngine) -> None:
 
     @api.post("/swarms/{swarm}/resume")
     def resume(swarm: str, req: HoldRequest) -> dict:
-        return call(loops.resume, swarm, types=req.types, agents=req.agents, by=req.by,
-                    release=req.release)
+        before = loops.store.swarm_flags(swarm).get("holds") or {}
+        out = call(loops.resume, swarm, types=req.types, agents=req.agents, by=req.by,
+                   release=req.release)
+        # the named holds this call could not lift, and why
+        out["not_lifted"] = {t: "not held" for t in req.types or [] if t not in before.get("types", {})}
+        for n in req.agents or []:
+            if n not in before.get("agents", {}):
+                a = loops.store.get_agent(n)
+                out["not_lifted"][n] = ("still held by its type" if a and a["type"] in out["held"]["types"]
+                                        else "not held")
+        return out

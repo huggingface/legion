@@ -75,7 +75,13 @@ async def test_agent_hold_with_interrupt_stops_only_that_agent(sim):
     assert [(c["kind"], c["agent"]) for c in cmds] == [("stop", A0)]
     r = await sim.c.post("/swarms/demo/pause", json={"agents": ["nobody"], "reason": "x"})
     assert r.status_code == 404
-    await resume(sim, agents=[A0])
+    await pause(sim, types=["researcher"], reason="look")
+    r = await sim.c.post("/swarms/demo/resume", json={"agents": [A0, A1]})
+    assert r.json()["not_lifted"] == {A1: "still held by its type"}  # A0's own hold is lifted
+    r = await sim.c.post("/swarms/demo/resume", json={"types": ["researcher"]})
+    assert r.json()["not_lifted"] == {}
+    r = await sim.c.post("/swarms/demo/resume", json={"agents": [A0]})
+    assert r.json()["not_lifted"] == {A0: "not held"}
 
 
 async def test_interrupt_ends_a_worker_side_loop_before_the_stop(sim):
