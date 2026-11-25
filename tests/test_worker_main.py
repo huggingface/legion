@@ -12,6 +12,7 @@ from legion.models import (
     AssignCommand,
     CommandBatch,
     DrainCommand,
+    Event,
     EventBatch,
     PromptCommand,
     StopCommand,
@@ -218,6 +219,34 @@ async def test_drain_sequence_at_deadline(tmp_path):
     assert ctrl.heartbeats[-1].draining is True
     assert [hb.drained for hb in ctrl.heartbeats].count(True) == 1 and ctrl.heartbeats[-1].drained
     assert adapters["researcher-0001"].stops == 1
+
+
+async def test_events_in_flight_when_the_worker_drains_arrive_exactly_once(tmp_path):
+    ctrl = FakeController()
+    in_flight, release = asyncio.Event(), asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/events") and not release.is_set():
+            in_flight.set()
+            await release.wait()
+        return ctrl.handler(request)
+
+    worker, _ = make_worker(tmp_path, ctrl)
+    worker.client = ControllerClient("http://controller", "tok", transport=httpx.MockTransport(handler))
+
+    def note(n: int) -> Event:
+        return Event(type="note", ts=utcnow(), agent="researcher-0001", data={"n": n})
+
+    for n in range(3):
+        worker.outbox.add(note(n))
+    run = asyncio.create_task(worker.run())
+    await asyncio.wait_for(in_flight.wait(), 5)  # the flush loop is sending events 0-2
+    worker.outbox.add(note(3))
+    await worker.drain("test")
+    await asyncio.sleep(0.2)  # run() is shutting down while that send is still open
+    release.set()
+    assert await asyncio.wait_for(run, 5) == 0
+    assert [e.data["n"] for e in ctrl.events] == [0, 1, 2, 3]
 
 
 async def test_assign_restore_goes_through_sync(tmp_path):
