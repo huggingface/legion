@@ -73,6 +73,8 @@ def test_init_creates_everything_then_changes_nothing(tmp_path):
     values = read_env_file(env_file)
     assert len(values["LEGION_TOKEN"]) > 30 and values["LEGION_WORLD_TOKEN"] != values["LEGION_TOKEN"]
     assert values["PYBOT_WORLD_TOKEN"] == values["LEGION_WORLD_TOKEN"]  # world.token_env
+    admin = values["LEGION_WORLD_ADMIN_TOKEN"]  # a `url` world: legion cannot derive it
+    assert len(admin) > 30 and admin not in (values["LEGION_TOKEN"], values["LEGION_WORLD_TOKEN"])
     text = env_file.read_text()
     assert "# swarm (default: demo)\n#SWARM=demo\n" in text  # a default stays the spec's
     assert "#ANTHROPIC_API_KEY=" in text and "#HF_TOKEN=" in text  # secrets named, unset
@@ -167,6 +169,10 @@ def test_tokens_must_match(tmp_path):
     assert rundir.check_tokens(data, ok).ok
     assert not rundir.check_tokens(data, {**ok, "PYBOT_WORLD_TOKEN": "x"}).ok
     assert "LEGION_TOKEN" in rundir.check_tokens(data, {**ok, "LEGION_TOKEN": ""}).detail
+    url = {"world": {**data["world"], "url": "http://w:7860"}}
+    assert "LEGION_WORLD_ADMIN_TOKEN" in rundir.check_tokens(url, ok).detail  # unset
+    assert rundir.check_tokens(url, {**ok, "LEGION_WORLD_ADMIN_TOKEN": "adm"}).ok
+    assert not rundir.check_tokens(url, {**ok, "LEGION_WORLD_ADMIN_TOKEN": "w"}).ok
 
 
 class FakeBucket:
