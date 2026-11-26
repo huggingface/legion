@@ -1,17 +1,18 @@
 """Harness `harbor`: each agent is one long-lived Harbor Trial on the upstream Harbor task path
-(legion.harbor), in which LegionPi (legion.harbor.agent) runs one `pi` turn per prompt.
+(legion.harbor), in which legion's turn server (legion.harbor.agent: Pi, Codex or Claude Code, the type's
+`harness`) runs one harness call per prompt.
 
 The Trial is built as the upstream launcher builds it (build_trial_config, the resource bind,
-Trial.create, attach_pi_setup, attach_tool_setup) with LegionPi as the agent, and `trial.run()` runs in the
+Trial.create, attach_pi_setup, attach_tool_setup) with the turn server as the agent, and `trial.run()` runs in the
 background for as long as the agent lives here:
 - `start` reuses the Trial when it is up; otherwise it starts one, putting back the saved
   sessions when there are any (none for a session to resume: ResumeError), and waits until
-  Pi is installed.
+  the harness is installed.
 - `send` queues the prompt for the next turn (prompts sent during a turn join the next one);
   a Trial that ended on its own (limits.trial_hours) is replaced by a new one for it.
 - `stop` kills a turn in flight and ends the burst's event stream; the Trial stays up. When
   /logs/agent is not mounted (hf-sandbox), it also downloads the sessions for the next push.
-- `close` ends the Trial: LegionPi returns, Harbor runs the verifier and stops the environment;
+- `close` ends the Trial: the turn server returns, Harbor runs the verifier and stops the environment;
   `close(0)` cancels it unverified, and a Trial still starting is cancelled.
 On docker and podman each Trial gets its own network, as the upstream launch gives each
 participant one (TrialNetworks), removed when the next Trial starts or at `close`.
@@ -20,7 +21,7 @@ and `exited`, after a failed turn for any prompt queued for it; the next prompt 
 one. When its first turn on restored sessions failed, the next `start` of that session raises
 ResumeError (the runtime then starts a fresh session).
 
-The session files live in `home/sessions` (LegionPi copies them there after each turn and the
+The session files live in `home/sessions` (the turn server copies them there after each turn and the
 adapter again when a Trial ends), where BucketSync pushes and restores them. Files in the
 container do not survive a new Trial.
 """
@@ -85,9 +86,9 @@ class HarborAdapter:
         self._network_id = uuid.uuid4().hex[:8]  # names and labels this adapter's networks
 
     def session_files(self, session_id: str | None) -> list[Path]:
-        """Every Pi session file of the agent: one Pi session dir per agent, and `--continue`
-        takes up the newest."""
-        return sorted((self.home / "sessions").glob("*.jsonl"))
+        """Every session file of the agent, at its path under the harness's session dir: one
+        session dir per agent, and the harness's resume takes up the newest."""
+        return sorted((self.home / "sessions").rglob("*.jsonl"))
 
     def artifact_files(self) -> list[Path]:
         return [p for p in (self.home / "results").rglob("*") if p.is_file() and not p.is_symlink()]
@@ -135,7 +136,7 @@ class HarborAdapter:
         files = self.session_files(session_id)
         try:
             if session_id and not files:
-                raise ResumeError(f"no Pi session files under {self.home / 'sessions'}")
+                raise ResumeError(f"no session files under {self.home / 'sessions'}")
             if session_id and self._resume_failed:
                 why, self._resume_failed = self._resume_failed, None
                 raise ResumeError(why)
@@ -175,7 +176,7 @@ class HarborAdapter:
         self._exit()
 
     async def close(self, timeout: float | None = None) -> Any:
-        """End the Trial: LegionPi returns, Harbor runs the verifier and stops the environment;
+        """End the Trial: the turn server returns, Harbor runs the verifier and stops the environment;
         returns its TrialResult (None if none). After `timeout` s (0: at once; None: no limit),
         or when this call is cancelled, the Trial is cancelled instead: Harbor stops the
         environment unverified, waited for up to CANCEL_WAIT s (a further cancel stops the
@@ -283,13 +284,13 @@ class HarborAdapter:
         channel.headers = r.headers
 
     async def _new_trial(self, restore: bool) -> None:
-        """Create the agent's next Trial, run it in the background and wait until LegionPi
+        """Create the agent's next Trial, run it in the background and wait until its turn server
         is ready. ResumeError: the sessions could not be put back."""
         from harbor.models.task.id import GitTaskId
 
         from legion.harbor import launch
         from legion.harbor.agent import Channel
-        from legion.harbor.config import E2B_SETUP_S, SANDBOXES, inference_key
+        from legion.harbor.config import E2B_SETUP_S, HARNESSES, SANDBOXES, inference_key
         from legion.harbor.envs import ENVIRONMENTS
         from legion.harbor.sources import ResolvedTask
         from legion.harbor.spec import Spec
@@ -332,14 +333,14 @@ class HarborAdapter:
         # alive; a worker relaunched in this run reuses, and so cleans up, its own names.
         # shortcut: two runs of one swarm name on one host still share names; add a run id then
         tc.trial_name = f"{swarm + '-' if swarm else ''}{self.agent}-t{self.attempt}"
-        tc.agent.name, tc.agent.import_path = None, "legion.harbor.agent:LegionPi"
-        # LegionPi serves turns for trial_hours; its last turn may take a turn_timeout more
+        tc.agent.name, tc.agent.import_path = None, HARNESSES[config.harness].agent
+        # the turn server serves turns for trial_hours; its last turn may take a turn_timeout more
         tc.agent.override_timeout_sec = (
             trial_seconds + parse_duration(self.spec.turn_timeout).total_seconds())
         if config.environment.backend == "hf-sandbox":
             # job_timeout is the sandbox's idle timeout, and a running command is no activity:
             # the upstream launcher's outlasts its one Pi command (the run) by 60 s, legion's one
-            # turn (LegionPi probes between turns). Billed to the spec's namespace (unset: the token's owner).
+            # turn (the turn server probes between turns). Billed to the spec's namespace (unset: the token's owner).
             tc.environment.kwargs.update(
                 job_timeout=math.ceil(parse_duration(self.spec.turn_timeout).total_seconds()) + 60,
                 namespace=config.namespace or None)
@@ -380,7 +381,8 @@ class HarborAdapter:
             if self._closes:  # closed while this Trial was being created
                 await self._drop_network(networks)  # a close may have taken self._network
                 raise RuntimeError("agent closed")
-            launch.attach_pi_setup(trial, inference)
+            if config.harness == "pi":
+                launch.attach_pi_setup(trial, inference)
             if self.bundle is not None:
                 launch.attach_tool_setup(trial, self.bundle)
             channel = Channel(emit=self._emit, prompts=self._prompts, home=self.home,
@@ -484,7 +486,7 @@ class HarborAdapter:
             self._verify_success(self.result)
         if trial is not self.trial or not trial.agent.channel.ready.is_set():
             return  # superseded, or never ready: whoever started it reports that
-        try:  # unmounted (hf-sandbox): Harbor's download at the end beats LegionPi's last one
+        try:  # unmounted (hf-sandbox): Harbor's download at the end beats the turn server's last one
             trial.agent.keep_sessions()
         except OSError as e:
             log.warning("%s: sessions of Trial %s not kept: %s", self.agent,
@@ -505,7 +507,7 @@ def _result(task: asyncio.Task) -> Any:
 
 
 def _why(trial: Any, task: asyncio.Task) -> str:
-    """Why a Trial's run() ended: LegionPi's reason, else Harbor's error."""
+    """Why a Trial's run() ended: the turn server's reason, else Harbor's error."""
     if task.cancelled():
         return "cancelled"
     if task.exception() is not None:

@@ -2,6 +2,7 @@
 
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
@@ -13,6 +14,28 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from legion.models import NO_KEY, Inference
 
 PI_VERSION = "1.5.0"
+
+
+@dataclass(frozen=True)
+class Harness:
+    """A harness legion serves turns with: its turn server (legion.harbor.agent), the wire API
+    Harbor configures and preflight probes, the env name its model key takes in the agent
+    (None: the role's own `api_key_env`), and the one provider host it may call (None: any)."""
+
+    agent: str
+    api: str  # Harbor's ModelApiFormat
+    key: str | None = None
+    host: str | None = None
+
+
+HARNESSES = {
+    "pi": Harness("legion.harbor.agent:LegionPi", "openai_chat_completions"),
+    "codex": Harness("legion.harbor.agent:LegionCodex", "openai_responses", "OPENAI_API_KEY",
+                     "api.openai.com"),
+    "claude-code": Harness("legion.harbor.agent:LegionClaudeCode", "anthropic_messages",
+                           "ANTHROPIC_API_KEY", "api.anthropic.com"),
+}
+HarnessName = Literal["pi", "codex", "claude-code"]
 # Legion's own resource providers and tools, shipped inside the package.
 BUILTIN = Path(__file__).resolve().parent / "builtin"
 
@@ -145,7 +168,7 @@ class SuccessCheck(Settings):
 
 class Config(Settings):
     name: str = Field(default="pi-team", pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
-    harness: Literal["pi"] = "pi"
+    harness: HarnessName = "pi"
     success_check: SuccessCheck | None = None
     model: str = Field(min_length=1)
     inference: Inference = Field(default_factory=Inference)

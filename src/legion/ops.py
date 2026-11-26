@@ -226,6 +226,13 @@ def check_spec(spec: SwarmSpec, spec_file: str):
         raise SpecError([f"{spec_file}: tools: {e}"], {"warnings": warnings}) from None
 
 
+def role_lines(spec: SwarmSpec) -> list[str]:
+    """Each Harbor role's resolved harness, model and backend, as `launch` and `init` print them."""
+    return [f"role {name}: harness {ts.harbor.config.get('harness', 'pi')}, model {ts.model}, "
+            f"backend {(ts.harbor.config.get('environment') or {}).get('backend', 'docker')}"
+            for name, ts in spec.types.items() if ts.harbor]
+
+
 def provider_backed(spec: SwarmSpec) -> bool:
     return any(ts.resolved_model is not None for ts in spec.types.values())
 

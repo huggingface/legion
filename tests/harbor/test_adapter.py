@@ -468,7 +468,7 @@ async def test_a_new_trial_gets_the_saved_sessions(fakes, tmp_path):
 
 async def test_resume_errors(fakes, tmp_path):
     a = adapter(tmp_path)
-    with pytest.raises(ResumeError, match="no Pi session files"):
+    with pytest.raises(ResumeError, match="no session files"):
         await a.start(a.workdir, "gone", a.spec)
     assert fakes.trials == []
     (a.home / "sessions").mkdir(parents=True)

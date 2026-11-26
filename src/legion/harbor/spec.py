@@ -17,6 +17,7 @@ import shutil
 import tempfile
 from pathlib import Path
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
 from harbor.utils.env import is_sensitive_env_key
 from pydantic import AfterValidator, BeforeValidator, Field, field_validator, model_validator
@@ -40,10 +41,12 @@ from legion.world.protocol import ADMIN_TOKEN_ENV
 
 from .config import (
     E2B_SETUP_S,
+    HARNESSES,
     SANDBOXES,
     AgentSettings,
     Config,
     EnvironmentSettings,
+    HarnessName,
     Limits,
     RoleName,
     RoleSettings,
@@ -127,6 +130,7 @@ class Workers(Settings):
 
 class Role(RoleSettings):
     count: int = Field(default=1, ge=0, strict=True)  # 0: spawned agents only (`spawn:`)
+    harness: HarnessName | None = None  # in every role or none (the run's then)
     model: str | None = Field(default=None, min_length=1)  # the run's model otherwise
     inference: Inference | None = None  # its own endpoints (a whole block); the run's otherwise
     ramp: Ramp | None = None
@@ -181,6 +185,18 @@ class Spec(Config):
         """Role name -> Role; `agents.count` is one role, `agent`, whose agents have no role."""
         return self.agents.roles or {"agent": Role(count=self.agents.count)}
 
+    def harness_of(self, role: Role) -> str:
+        return role.harness or self.harness
+
+    def _top_or_every_role(self, field):
+        """`field` is the run's (no role sets it) or every role's, never both: as agents.count
+        and agents.roles."""
+        own = [getattr(r, field) is not None for r in (self.agents.roles or {}).values()]
+        if any(own) and not all(own):
+            raise ValueError(f"set {field} in every role of agents.roles, or only at the top level")
+        if any(own) and field in self.model_fields_set:
+            raise ValueError(f"set {field} at the top level or in every role, not both")
+
     def type_loops(self):
         """Each role's loop: its own, else the run's. Roles sharing the run's loop split its
         `final.reserve_usd`, which is held back once (legion sums its types' reserves)."""
@@ -201,6 +217,19 @@ class Spec(Config):
     @model_validator(mode="after")
     def checks(self):
         limits, backend = self.limits, self.environment.backend
+        self._top_or_every_role("harness")
+        for name, role in self.roles().items():
+            harness = HARNESSES[self.harness_of(role)]
+            inference = role.inference or self.inference
+            if harness.host and not (inference.urls and all(
+                    urlsplit(u).hostname == harness.host for u in inference.urls)):
+                raise ValueError(f"agents.roles.{name}: harness {self.harness_of(role)} runs only "
+                                 f"models at https://{harness.host}: set the role's inference.urls "
+                                 f"to [https://{harness.host}/v1] and its api_key_env")
+            if harness.host and not inference.api_key_env:
+                raise ValueError(f"agents.roles.{name}.inference.api_key_env: name the secret "
+                                 f"holding the role's {harness.key} (its agents get it under "
+                                 "that name)")
         if self.stop_on_success and self.success_check is None:
             raise ValueError("stop_on_success requires success_check")
         if self.success_check and backend not in ("docker", "podman"):
@@ -376,7 +405,7 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
         role.model: role.pricing for role in roles.values() if role.model and role.pricing}
     types = {}
     for name, role in roles.items():
-        model = role.model or spec.model
+        model, harness = role.model or spec.model, spec.harness_of(role)
         packing = spec.workers.model_dump(exclude_none=True)
         packing |= role.workers.model_dump(exclude_none=True) if role.workers else {}
         slots = {k: packing.pop(k) for k in ("initial", "max_extra") if k in packing}
@@ -408,7 +437,9 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
             "resume_prompt": loop and loop.resume_prompt,
             "harbor": {
                 "task": task,
-                "config": {**config, "model": model},
+                # Pi's is the default: a Pi run compiles as before (a stored spec still matches)
+                "config": {**config, "model": model} | (
+                    {"harness": harness} if harness != "pi" else {}),
                 "team": team,
                 "role": label[name],
                 "role_text": role.role_file.read_text(encoding="utf-8") if role.role_file else "",

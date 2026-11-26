@@ -176,6 +176,8 @@ def _checked(spec: SwarmSpec, spec_file: str):
         _fail([*e.done.get("warnings", []), *e.lines])
     for line in checked[1]:
         typer.echo(line, err=True)
+    for line in ops.role_lines(spec):
+        typer.echo(line)
     return checked
 
 

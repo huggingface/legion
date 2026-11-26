@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -29,8 +30,20 @@ TIMEOUT_S = 15.0
 TRANSPORT: httpx.BaseTransport | None = None
 
 
+ANTHROPIC_VERSION = "2023-06-01"
+
+
 class InferenceError(Exception):
     pass
+
+
+def auth_headers(url: str, key: str | None) -> dict[str, str]:
+    """How `url`'s API takes a key: Anthropic's own header (and API version), else a bearer."""
+    if not key:
+        return {}
+    if urlsplit(url).hostname == "api.anthropic.com":
+        return {"x-api-key": key, "anthropic-version": ANTHROPIC_VERSION}
+    return {"Authorization": f"Bearer {key}"}
 
 
 def _entries(listing: Any) -> list[dict]:
@@ -101,9 +114,8 @@ def _router_windows(router: HFRouter, model: str, listing: Any) -> list[tuple[st
 
 
 def _get(client: httpx.Client, url: str, key: str | None) -> Any:
-    headers = {"Authorization": f"Bearer {key}"} if key else {}
     try:
-        r = client.get(f"{url}/models", headers=headers, timeout=TIMEOUT_S)
+        r = client.get(f"{url}/models", headers=auth_headers(url, key), timeout=TIMEOUT_S)
     except httpx.HTTPError as e:
         raise InferenceError(f"GET {url}/models: {type(e).__name__}: {e}") from None
     return _reply(url, r)
@@ -111,9 +123,8 @@ def _get(client: httpx.Client, url: str, key: str | None) -> Any:
 
 async def aget(client: httpx.AsyncClient, url: str, key: str | None) -> Any:
     """`GET <url>/models` (preflight's)."""
-    headers = {"Authorization": f"Bearer {key}"} if key else {}
     try:
-        r = await client.get(f"{url}/models", headers=headers, timeout=TIMEOUT_S)
+        r = await client.get(f"{url}/models", headers=auth_headers(url, key), timeout=TIMEOUT_S)
     except httpx.HTTPError as e:
         raise InferenceError(f"GET {url}/models: {type(e).__name__}: {e}") from None
     return _reply(url, r)
@@ -146,6 +157,10 @@ def check(spec: SwarmSpec, secrets: Mapping[str, str],
                 continue
             where = f"types.{name}.model {r.model_id!r} on {r.provider_name}"
             key = secrets.get(r.inference.key_env) if r.inference.key_env else None
+            if key is None and ts.harbor and ts.harbor.config.get("harness"):
+                # Codex and Claude Code call their provider's API: no keyless or logged-in default
+                raise InferenceError(f"{where}: {ts.harbor.config['harness']} needs the secret "
+                                     f"{r.inference.key_env}, which is not set on the controller")
             try:
                 got = {}
                 for url in r.inference.endpoints:
