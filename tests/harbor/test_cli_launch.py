@@ -144,10 +144,11 @@ def test_a_slurm_podman_spec_with_board_rules_compiles(monkeypatch, pins):
 
 
 def test_the_pybot_spec_compiles(monkeypatch, pins):
-    env = {"PYBOT_TASK_REVISION": "c" * 40, "BUCKET_ID": "ns/runs",
-           "BOARD_URL": "https://board.example", "WORLD_URL": "https://world.example",
-           "PYBOT_REPO": "ns/bot"}
-    swarm = experiment_spec(monkeypatch, pins, "pybot", "c" * 40, env)
+    monkeypatch.delenv("PYBOT_TASK_REVISION", raising=False)  # the spec's default: the pinned commit
+    env = {"BUCKET_ID": "ns/runs", "BOARD_URL": "https://board.example",
+           "WORLD_URL": "https://world.example", "PYBOT_REPO": "ns/bot"}
+    swarm = experiment_spec(monkeypatch, pins, "pybot",
+                            "8b9329d60446fc9212ba32b24ee80353474ef1f9", env)
     assert (swarm.types["steward"].name_prefix, swarm.types["answers"].name_prefix) == (
         "steward-", None)
 
