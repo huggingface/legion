@@ -94,12 +94,12 @@ def spec_for(row, attempt):
     s = json.loads((ROOT / "spec-template.json").read_text())
     s.update(
         name=r.name,
-        bucket=STUDY["bucket"],
+        bucket_id=STUDY["bucket"],
         namespace=STUDY["bucket"].split("/")[0],
-        model="openai/" + STUDY["model"],
+        model=STUDY["model"],
     )
     s["inference"] = {
-        "base_url": STUDY["router_url"],
+        "urls": [STUDY["router_url"]],
         "api_key_env": "ROUTER_API_KEY",
         "max_working": n,
         "reasoning_effort": "off",
