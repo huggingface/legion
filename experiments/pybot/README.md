@@ -33,8 +33,9 @@ account without an org bill-to header. See [billing and storage](../../docs/bill
   access to the job's namespace for the jobs proxy.
 - `PYBOT_REPO`: the code dataset (`<your-username>/<name>`), seeded before the world starts. It must be
   public: agents clone it without a token.
-- `PYBOT_TASK_REVISION`: set to `c786daea789893f127b18a56c38195ac98c08db1`, the legion-compatible
-  commit of `HuggingFaceSwarms/pybot`. The task dataset is private: `HF_TOKEN` needs read access to it.
+- `PYBOT_TASK_REVISION` (optional): the commit of `HuggingFaceSwarms/pybot` to run. The spec defaults
+  to `8b9329d60446fc9212ba32b24ee80353474ef1f9`, the legion-compatible one. The task dataset is
+  private: `HF_TOKEN` needs read access to it.
 - `WORLD_URL` and `PYBOT_WORLD_TOKEN`: the running world's URL and its `LEGION_WORLD_TOKEN`
   (a new one per run).
 - `BOARD_URL` and `MSGBOARD_OPERATOR_TOKEN`: a dedicated public msgboard Space in your personal account and its operator token;

@@ -21,7 +21,8 @@ inference:
 task:
   repo: https://huggingface.co/datasets/HuggingFaceSwarms/pybot   # tasks/pybot-agent
   selector: pybot-agent
-  revision: '${PYBOT_TASK_REVISION}'          # the task dataset's commit SHA
+  # the task dataset's commit SHA; the default is the legion-compatible one (README.md)
+  revision: '${PYBOT_TASK_REVISION:-8b9329d60446fc9212ba32b24ee80353474ef1f9}'
 team_file: prompts/system.md
 resources:
   message_board:
