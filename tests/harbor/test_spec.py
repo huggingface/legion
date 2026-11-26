@@ -163,15 +163,18 @@ def on(d, answers, safety):
         (lambda d: on(d, "podman", "hf-sandbox")["resources"].update(spawn={}),
          r"resources.spawn needs a mount: use backend docker or podman \(role safety"),
         (lambda d: on(d, "docker", "hf-sandbox")["resources"]["message_board"].pop("url"),
-         "role safety runs on a sandbox, which can't reach a local board"),
+         "role safety runs on a sandbox: agents reach the board over the network, so it can't "
+         "be a local board: set message_board.url or space_id"),
         # mixed backends: every role reaches the board and the world over the network
         (lambda d: on(d, "docker", "podman")["resources"]["message_board"].pop("url"),
-         "roles on different backends share one board that is up: set message_board.url"),
+         "the roles use different backends: agents reach the board over the network"),
         (lambda d: on(d, "docker", "hf-sandbox")["resources"]["message_board"].update(
             transport="unix"), "resources.message_board.transport: roles on different backends"),
         (lambda d: on(d, "docker", "hf-sandbox")["resources"].update(
             world={"url": "http://world.example", "transport": "unix"}),
          "resources.world.transport: roles on different backends"),
+        (lambda d: on(d, "docker", "podman")["resources"].update(
+            world={"url": "http://127.0.0.1:8770"}), "resources.world.url: roles on different"),
     ],
 )
 def test_spec_checks(tmp_path, edit, error):

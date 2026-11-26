@@ -34,6 +34,7 @@ from legion.models import (
     TypeSpec,
     WorkerKnobs,
     load_spec_yaml,
+    loopback_url,
     max_workers,
     parse_duration,
 )
@@ -274,24 +275,29 @@ class Spec(Config):
         if sandboxed and "spawn" in self.resources:
             raise ValueError("resources.spawn needs a mount: use backend docker or podman "
                              f"(role {next(iter(sandboxed))} runs on a sandbox)")
+        kinds = set(backends.values())
+        mixed = len(kinds) > 1  # every role reaches the board and the world over the network
         board = self.resources.get("message_board")
-        if sandboxed and board is not None and not board.get("space_id") and not board.get("url"):
-            raise ValueError(f"role {next(iter(sandboxed))} runs on a sandbox, which can't reach a "
-                             "local board: set message_board.space_id or message_board.url")
-        if sandboxed and (self.resources.get("message_board") or {}).get("rules"):
+        if (sandboxed or mixed) and board is not None and not board.get("space_id") and not \
+                board.get("url"):
+            why = (f"role {next(iter(sandboxed))} runs on a sandbox" if sandboxed
+                   else "the roles use different backends")
+            raise ValueError(f"{why}: agents reach the board over the network, so it can't be a "
+                             "local board: set message_board.url or space_id")
+        if sandboxed and (board or {}).get("rules"):
             # no mounts, no rule proxy: the board runs its rules unenforced and warns
-            self.resources["message_board"].setdefault("transport", "http")
-        if len(set(backends.values())) > 1:  # mixed backends: every role on the network
-            for name in ("message_board", "world"):
-                options = self.resources.get(name)
-                if options is not None and options.get("transport") == "unix":
-                    raise ValueError(f"resources.{name}.transport: roles on different backends "
-                                     "all reach it over the network: remove transport: unix")
-                if options is not None:
-                    options["transport"] = "http"
-            if board is not None and not board.get("url") and not board.get("space_id"):
-                raise ValueError("roles on different backends share one board that is up: set "
-                                 "message_board.url")
+            board.setdefault("transport", "http")
+        for name in ("message_board", "world") if mixed else ():
+            options = self.resources.get(name)
+            if options is not None and options.get("transport") == "unix":
+                raise ValueError(f"resources.{name}.transport: roles on different backends "
+                                 "all reach it over the network: remove transport: unix")
+            if options is not None:
+                options["transport"] = "http"
+        if mixed and loopback_url((self.resources.get("world") or {}).get("url") or ""):
+            raise ValueError("resources.world.url: roles on different backends reach the world "
+                             "over the network, so not on localhost: use an address their "
+                             "containers and sandboxes reach")
         budgets = limits.budget_usd is not None or any(
             loop.while_.agent_usd is not None or loop.while_.budget_usd is not None
             for loop in loops
@@ -301,7 +307,6 @@ class Spec(Config):
         for name, role in self.roles().items():
             if budgets and role.model not in (None, self.model) and role.pricing is None:
                 raise ValueError(f"agents.roles.{name} has its own model: budgets need its pricing")
-        kinds = set(backends.values())
         if self.compute.kind == "hf-jobs" and kinds - set(SANDBOXES):
             raise ValueError("compute hf-jobs cannot run containers: use backend hf-sandbox or e2b")
         if self.compute.kind == "slurm" and "docker" in kinds:

@@ -85,6 +85,7 @@ def build_trial_config(
     # the agent gets only its role's key, under its harness's own name (Pi: the configured one)
     key_name = harness.key or inference.key_env or NO_KEY_ENV
     pi = config.harness == "pi"
+    url = agent_url(inference.endpoint_for(run, name), backend)
     agent_kwargs = {"version": PI_VERSION} if pi else {}
     if config.harness != "codex":  # Codex has no turn limit
         agent_kwargs["max_turns"] = config.limits.agent_max_turns
@@ -107,11 +108,13 @@ def build_trial_config(
             # the id as the servers take it (`<model>:<provider>` on the router), unparsed
             model_name=inference.request_model(config.model),
             skip_model_parsing=True,
-            # Codex and Claude Code call their provider's API at the harness's own default URL
-            base_url=agent_url(inference.endpoint_for(run, name), backend) if pi else None,
+            # always explicit, so no *_BASE_URL in the worker's env moves it; Claude Code adds
+            # /v1/messages itself
+            base_url=url.removesuffix("/v1") if config.harness == "claude-code" else url,
             model_api_key_name=key_name,
             model_api_format=harness.api,
             env={
+                **harness.mask,
                 key_name: api_key,
                 "LEGION_TOOLS_MANIFEST": TOOLS_MANIFEST,
             },

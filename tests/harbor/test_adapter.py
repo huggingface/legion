@@ -25,7 +25,7 @@ from legion.harbor import launch, networking
 from legion.harbor.agent import LegionPi
 from legion.harbor.spec import Spec, compile_spec
 from legion.models import Inference
-from legion.worker.adapters.base import ResumeError
+from legion.worker.adapters.base import ResumeError, transient_error
 from legion.worker.adapters.harbor import HarborAdapter, make_adapter
 
 from .test_envs import compose
@@ -39,6 +39,7 @@ TASK = {
 }
 SESSIONS = "/logs/agent/pi/sessions"
 NATIVE = {"codex": "codex exec ", "claude-code": "claude --verbose"}  # what each call runs
+KILL_PI = legion_agent.kill_command(LegionPi.PROCESS)
 
 
 class Fakes:
@@ -52,6 +53,7 @@ class Fakes:
         self.success_calls = []
         self.pi_env = []  # each `pi --print` exec's env
         self.prompts = []  # each call's prompt
+        self.files = []  # each upload_file's target
         self.probe_ok, self.upload_fails, self.kill_fails = True, False, False
         self.fail = None  # pi call number -> "exit" | "provider"
         self.hold = set()  # pi call numbers that wait for release(n) or a kill
@@ -93,7 +95,7 @@ class FakeEnv:
                           + (self.fakes.success_response or original) + CHECK_END)
 
     async def upload_file(self, source, target):
-        pass
+        self.fakes.files.append(str(target))
 
     async def upload_dir(self, source, target):
         if self.fakes.upload_fails:
@@ -119,7 +121,7 @@ class FakeEnv:
             return ExecResult(return_code=0 if f.probe_ok else 1)
         if user == "root":
             f.root.append(command)
-        if command.endswith(legion_agent.KILL_PI):
+        if command.endswith(KILL_PI):
             if f.kill_fails:
                 return ExecResult(return_code=1)
             self.killed = True
@@ -384,6 +386,17 @@ async def test_codex_and_claude_code_turns_resume_their_sessions(
     secrets = {"OPENAI_ROLE_KEY": "openai-secret", "ANTHROPIC_ROLE_KEY": "anthropic-secret"}
     for name, value in secrets.items():  # a worker holding both (each type's has only its own)
         monkeypatch.setenv(name, value)
+    login = tmp_path / "auth.json"
+    login.write_text("{}")
+    # a local worker has the operator's shell: logins, other keys and endpoints Harbor reads
+    operator = {"CLAUDE_CODE_OAUTH_TOKEN": "oauth-secret", "ANTHROPIC_AUTH_TOKEN": "auth-secret",
+                "CODEX_API_KEY": "codex-secret", "AWS_BEARER_TOKEN_BEDROCK": "aws-secret",
+                "ANTHROPIC_BASE_URL": "https://elsewhere.example",
+                "OPENAI_BASE_URL": "https://elsewhere.example/v1",
+                "CODEX_AUTH_JSON_PATH": str(login), "CODEX_FORCE_AUTH_JSON": "1",
+                "CLAUDE_FORCE_OAUTH": "1", "CLAUDE_CODE_USE_BEDROCK": "1"}
+    for name, value in operator.items():
+        monkeypatch.setenv(name, value)
     spec = native_spec(harness)
     own = secrets[spec.resolved_model.inference.key_env]
     a = make_adapter(tmp_path / "work" / "agent-0000", "agent-0000", spec)
@@ -400,10 +413,15 @@ async def test_codex_and_claude_code_turns_resume_their_sessions(
     await read(events, "turn_ended")
     assert resume not in fakes.pi[0] and "TASK" in fakes.prompts[0]
     assert resume in fakes.pi[1] and "TASK" not in fakes.prompts[1]
+    url = {"codex": ("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+           "claude-code": ("ANTHROPIC_BASE_URL", "https://api.anthropic.com")}[harness]
     for env in fakes.pi_env:
-        assert env[key] == own
-        others = {*secrets.values(), "test-inference-secret"} - {own}
+        assert env[key] == own and env[url[0]] == url[1]  # the role's key, at the role's URL
+        others = {*secrets.values(), "test-inference-secret", "oauth-secret", "auth-secret",
+                  "codex-secret", "aws-secret"} - {own}
         assert not others & set(env.values()), sorted(env)
+        assert not [v for v in env.values() if "elsewhere" in v or str(login) in v]
+    assert not [f for f in fakes.files if f.endswith("auth.json")]  # no login uploaded
     (path,) = a.session_files(sid)
     assert path == a.home / "sessions" / session and len(path.read_text().splitlines()) == 2
     await a.close()
@@ -542,7 +560,7 @@ async def test_stop_kills_a_turn_in_flight(fakes, tmp_path):
     await a.stop()
     evs = await read(events, "exited")
     assert [(e.kind, e.status) for e in evs] == [("turn_ended", "interrupted"), ("exited", None)]
-    assert any(c.endswith(legion_agent.KILL_PI) for c in fakes.root)
+    assert any(c.endswith(KILL_PI) for c in fakes.root)
     assert a.alive()
     _, events = await start(a)  # same Trial; the queued prompt was dropped
     await a.send("b")
@@ -920,7 +938,7 @@ async def test_a_failed_kill_is_reported(fakes, tmp_path, monkeypatch):
     await a.stop()
     evs = await read(events, "exited")
     assert [e.kind for e in evs] == ["error", "exited"] and "kill pi" in evs[0].error
-    assert "pkill" not in legion_agent.KILL_PI
+    assert "pkill" not in KILL_PI
     fakes.release(1)
 
 
@@ -933,6 +951,36 @@ def test_read_turn_counts_compaction(tmp_path):
     ]))
     messages, usage = legion_agent.read_turn(path)
     assert len(messages) == 1 and (usage.input, usage.output) == (110, 21)
+
+
+DONE = {"type": "turn.completed", "usage": {"input_tokens": 5, "output_tokens": 1}}
+
+
+@pytest.mark.parametrize("parse, events, error, ended, transient", [
+    # Codex: a failed turn (rate-limited: the loop backs off), a recovered reconnect, a refusal
+    ("codex_turn", [{"type": "turn.failed", "error": {"message": "429 Too Many Requests"}}],
+     "429 Too Many Requests", False, True),
+    ("codex_turn", [{"type": "error", "message": "Reconnecting... 1/5"}, DONE], None, True, None),
+    ("codex_turn", [{"type": "error", "message": "401 Unauthorized"}], "401 Unauthorized", False,
+     False),
+    # Claude Code: an API error, the turn limit (a normal end), a call cut before its result
+    ("claude_turn", [{"type": "result", "is_error": True, "subtype": "success",
+                      "result": "API Error: 429 rate_limit_error"}],
+     "API Error: 429 rate_limit_error", False, True),
+    ("claude_turn", [{"type": "result", "is_error": True, "subtype": "error_max_turns"}], None,
+     True, None),
+    ("claude_turn", [{"type": "result", "is_error": True, "subtype": "success",
+                      "result": "Invalid API key"}], "Invalid API key", False, False),
+    ("claude_turn", [], None, False, None),
+])
+def test_native_turn_outputs(tmp_path, parse, events, error, ended, transient):
+    """(error, ended) as the turn server takes them: an error fails the turn (a transient one is
+    retried with backoff); `ended` makes a non-zero exit no error."""
+    path = tmp_path / "out.txt"
+    path.write_text("".join(json.dumps(e) + "\n" for e in events))
+    _, _, got, done = getattr(legion_agent, parse)(path)
+    assert (got, done) == (error, ended)
+    assert transient is None or transient_error(got) is transient
 
 
 @pytest.mark.parametrize("server, cli", [

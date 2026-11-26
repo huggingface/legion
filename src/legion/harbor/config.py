@@ -1,5 +1,6 @@
 """The small, deliberately strict experiment interface."""
 
+import dataclasses
 import os
 import re
 from dataclasses import dataclass
@@ -20,20 +21,27 @@ PI_VERSION = "1.5.0"
 class Harness:
     """A harness legion serves turns with: its turn server (legion.harbor.agent), the wire API
     Harbor configures and preflight probes, the env name its model key takes in the agent
-    (None: the role's own `api_key_env`), and the one provider host it may call (None: any)."""
+    (None: the role's own `api_key_env`), the one provider host it may call (None: any), and
+    the agent env that masks what Harbor would otherwise read from the worker's own env (a
+    local worker has the operator's shell): another login, key or auth mode."""
 
     agent: str
     api: str  # Harbor's ModelApiFormat
     key: str | None = None
     host: str | None = None
+    mask: dict[str, str] = dataclasses.field(default_factory=dict)  # Harbor's bools take "0", not ""
 
 
 HARNESSES = {
     "pi": Harness("legion.harbor.agent:LegionPi", "openai_chat_completions"),
     "codex": Harness("legion.harbor.agent:LegionCodex", "openai_responses", "OPENAI_API_KEY",
-                     "api.openai.com"),
+                     "api.openai.com", {"CODEX_API_KEY": "", "CODEX_AUTH_JSON_PATH": "",
+                                        "CODEX_FORCE_AUTH_JSON": "0"}),
     "claude-code": Harness("legion.harbor.agent:LegionClaudeCode", "anthropic_messages",
-                           "ANTHROPIC_API_KEY", "api.anthropic.com"),
+                           "ANTHROPIC_API_KEY", "api.anthropic.com", {
+                               "ANTHROPIC_AUTH_TOKEN": "", "CLAUDE_CODE_OAUTH_TOKEN": "",
+                               "CLAUDE_FORCE_OAUTH": "0", "CLAUDE_CODE_USE_BEDROCK": "0",
+                               "AWS_BEARER_TOKEN_BEDROCK": ""}),
 }
 HarnessName = Literal["pi", "codex", "claude-code"]
 # Legion's own resource providers and tools, shipped inside the package.

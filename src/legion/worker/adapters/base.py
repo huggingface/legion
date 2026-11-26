@@ -41,7 +41,9 @@ class AdapterEvent:
     raw: Any = None
 
 
-HTTP_TRANSIENT = re.compile(r"(?:^\s*|\bhttp\s+|\bstatus(?: code)?\s*[:=]?\s*)(?:429|502|503)\b",
+# `API Error: 429 ...`: Claude Code's words
+HTTP_TRANSIENT = re.compile(r"(?:^\s*|\bhttp\s+|\bapi error:\s*|\bstatus(?: code)?\s*[:=]?\s*)"
+                            r"(?:429|502|503)\b",
                             re.IGNORECASE)
 
 

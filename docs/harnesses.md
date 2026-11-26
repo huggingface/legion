@@ -18,9 +18,11 @@ Set `harness` at the top level for every role, or in every role of `agents.roles
 Other combinations are refused at launch. A Codex or Claude Code role needs its own
 `inference` block with that URL and an `api_key_env`: the secret's name on your machine (and
 the controller's). Its agents get the value under the harness's own name, and only that key:
-no other role's key and no Hub token. Neither provider's model list gives the context window
-legion reads, so set `context_window`. The model must be listed by the provider's
-`GET /v1/models` under that id.
+no other role's key and no Hub token. Settings in the worker's own environment (a local worker
+has your shell's) never change that: a Claude or Codex login, `CODEX_API_KEY`, Bedrock mode or
+a `*_BASE_URL` are masked, and the URL is always the role's. Neither provider's model list
+gives the context window legion reads, so set `context_window`. The model must be listed by
+the provider's `GET /v1/models` under that id.
 
 ```yaml
 model: moonshotai/Kimi-K2.5
@@ -72,6 +74,10 @@ Token usage comes from each call's own output: Pi's events, Codex's `turn.comple
 Claude Code's `result`. A turn without usage is reported with `usage_missing`, so its cost is
 unknown. Budgets price tokens with the role's `pricing`.
 
+`limits.agent_max_turns` caps the model calls of a Pi or Claude Code turn; reaching it ends the
+turn normally. Codex has no such limit, so a Codex turn runs until it ends or hits the role's
+`turn_timeout`.
+
 Legion tools stay shell commands, so every harness calls them the same way.
 
 ## Backends per role
@@ -112,7 +118,8 @@ Each role's workers get only their own backend's secrets: `HF_TOKEN` for hf-sand
 the world over the network (`transport: http`), and `transport: unix` is refused:
 - the board must be one that is already up, at `message_board.url` with its `token_env` (deploy
   a Space board once and point every role at its URL);
-- the world must be a legion world server, which checks each agent's own token.
+- the world must be a legion world server, which checks each agent's own token, at an
+  address the agents reach (not `localhost`).
 A run whose roles all use one backend behaves as before: docker and podman agents keep their
 mounted sockets, and sandbox agents use HTTP.
 

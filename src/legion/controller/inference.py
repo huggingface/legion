@@ -37,13 +37,22 @@ class InferenceError(Exception):
     pass
 
 
+def _anthropic(url: str) -> bool:
+    return urlsplit(url).hostname == "api.anthropic.com"
+
+
 def auth_headers(url: str, key: str | None) -> dict[str, str]:
     """How `url`'s API takes a key: Anthropic's own header (and API version), else a bearer."""
     if not key:
         return {}
-    if urlsplit(url).hostname == "api.anthropic.com":
+    if _anthropic(url):
         return {"x-api-key": key, "anthropic-version": ANTHROPIC_VERSION}
     return {"Authorization": f"Bearer {key}"}
+
+
+def _listing(url: str) -> dict[str, int]:
+    """`GET /models` query: Anthropic's pages 20 models by default, so ask for its maximum."""
+    return {"limit": 1000} if _anthropic(url) else {}
 
 
 def _entries(listing: Any) -> list[dict]:
@@ -115,7 +124,8 @@ def _router_windows(router: HFRouter, model: str, listing: Any) -> list[tuple[st
 
 def _get(client: httpx.Client, url: str, key: str | None) -> Any:
     try:
-        r = client.get(f"{url}/models", headers=auth_headers(url, key), timeout=TIMEOUT_S)
+        r = client.get(f"{url}/models", headers=auth_headers(url, key), params=_listing(url),
+                       timeout=TIMEOUT_S)
     except httpx.HTTPError as e:
         raise InferenceError(f"GET {url}/models: {type(e).__name__}: {e}") from None
     return _reply(url, r)
@@ -124,7 +134,8 @@ def _get(client: httpx.Client, url: str, key: str | None) -> Any:
 async def aget(client: httpx.AsyncClient, url: str, key: str | None) -> Any:
     """`GET <url>/models` (preflight's)."""
     try:
-        r = await client.get(f"{url}/models", headers=auth_headers(url, key), timeout=TIMEOUT_S)
+        r = await client.get(f"{url}/models", headers=auth_headers(url, key),
+                             params=_listing(url), timeout=TIMEOUT_S)
     except httpx.HTTPError as e:
         raise InferenceError(f"GET {url}/models: {type(e).__name__}: {e}") from None
     return _reply(url, r)

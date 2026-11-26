@@ -69,8 +69,6 @@ def kill_command(process: str) -> str:
     )
 
 
-KILL_PI = kill_command("pi --print")
-
 
 @dataclass
 class Channel:
@@ -126,9 +124,10 @@ def read_turn(path):
 
 
 def codex_turn(path):
-    """(messages, usage, error) of one `codex exec --json` call: its agent messages and tool
-    items as legion's messages, `turn.completed` usage, and a failure it did not recover from."""
-    messages, usage, error = [], TokenUsage(), None
+    """(messages, usage, error, ended) of one `codex exec --json` call: its agent messages and
+    tool items as legion's messages, `turn.completed` usage, a failure it did not recover from,
+    and whether its turn completed."""
+    messages, usage, error, ended = [], TokenUsage(), None, False
     for event in _events(path):
         kind, item = event.get("type"), event.get("item")
         if kind == "item.completed" and isinstance(item, dict):
@@ -143,18 +142,21 @@ def codex_turn(path):
             cached = int(u.get("cached_input_tokens") or 0)  # inside input_tokens
             usage += TokenUsage(input=int(u.get("input_tokens") or 0) - cached, cache_read=cached,
                                 output=int(u.get("output_tokens") or 0))
-            error = None  # reconnect notices before it were recovered
+            error, ended = None, True  # reconnect notices before it were recovered
         elif kind == "turn.failed":
             error = str((event.get("error") or {}).get("message") or "Codex turn failed")
+            ended = False
         elif kind == "error":
             error = str(event.get("message") or "Codex error")
-    return messages, usage, error
+            ended = False
+    return messages, usage, error, ended
 
 
 def claude_turn(path):
-    """(messages, usage, error) of one `claude --output-format=stream-json` call: its assistant
-    messages (tool_use blocks as legion's toolCall), the `result` usage, and its error."""
-    messages, usage, error = [], TokenUsage(), None
+    """(messages, usage, error, ended) of one `claude --output-format=stream-json` call: its
+    assistant messages (tool_use blocks as legion's toolCall), the `result` usage, its error,
+    and whether it ended on its own (a turn limit too)."""
+    messages, usage, error, ended = [], TokenUsage(), None, False
     for event in _events(path):
         message = event.get("message")
         if event.get("type") == "assistant" and isinstance(message, dict):
@@ -168,9 +170,10 @@ def claude_turn(path):
                                 cache_read=int(u.get("cache_read_input_tokens") or 0),
                                 cache_write=int(u.get("cache_creation_input_tokens") or 0))
             # the turn limit (limits.agent_max_turns) ends a turn, as Pi's does, without error
-            if event.get("is_error") and event.get("subtype") != "error_max_turns":
+            ended = not event.get("is_error") or event.get("subtype") == "error_max_turns"
+            if not ended:
                 error = str(event.get("result") or event.get("subtype") or "Claude Code failed")
-    return messages, usage, error
+    return messages, usage, error, ended
 
 
 class TurnServer:
@@ -188,7 +191,8 @@ class TurnServer:
     _env = None
 
     def read_turn(self, path):
-        """(messages, TokenUsage, the harness's own error or None) of one call's output."""
+        """(messages, TokenUsage, the harness's own error or None, whether the call ended
+        normally by its own account: then a non-zero exit is no error) of one call's output."""
         raise NotImplementedError
 
     async def run(self, instruction, environment, context):
@@ -295,8 +299,8 @@ class TurnServer:
                 await self._pull(environment, output)
             except Exception as exc:
                 ch.emit(AdapterEvent("error", error=f"session sync: {safe_error(exc)[:300]}"))
-            messages, usage, own_error = self.read_turn(output)
-            error = own_error or error  # the harness's own words first
+            messages, usage, own_error, ended_well = self.read_turn(output)
+            error = own_error or (None if ended_well else error)  # the harness's own words first
             for message in messages:
                 ch.emit(AdapterEvent("message", message=message))
             if usage != TokenUsage():
@@ -398,7 +402,7 @@ class LegionPi(TurnServer, Pi):
     PROCESS = "pi --print"
 
     def read_turn(self, path):
-        return *read_turn(path), terminal_pi_error(path, self.channel.max_turns)
+        return *read_turn(path), terminal_pi_error(path, self.channel.max_turns), False
 
     def _build_custom_models_json(self, access, model_id):
         """Harbor's models.json with the channel's endpoint: its base URL, the model's

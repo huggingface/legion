@@ -436,7 +436,9 @@ def fake_provider(tool_call: bool = True, status: int = 200, follow_up_fails: bo
     usage = {"input_tokens": 0 if zero_usage else 12, "output_tokens": 0 if zero_usage else 5}
 
     @fake.get("/v1/models")
-    async def models():
+    async def models(request: Request):
+        if request.url.hostname == "api.anthropic.com":  # pages 20 models unless asked for more
+            seen.append({"path": "models", "limit": request.query_params.get("limit")})
         return fake_models.listing()
 
     @fake.post("/v1/chat/completions")
@@ -624,6 +626,7 @@ async def test_preflight_probes_each_harness_in_its_api(preflight_client):
     assert [x["auth"] for x in by["responses"]] == ["Bearer ok"] * 2
     assert by["responses"][1]["input"][-1] == {"type": "function_call_output", "call_id": "fc_1",
                                                "output": "2026-01-01T12:00:00Z"}
+    assert [x["limit"] for x in seen if x["path"] == "models"] == ["1000"]  # one page: all of them
     # Anthropic's own key header, never a bearer
     assert [(x["auth"], x["bearer"]) for x in by["messages"]] == [("ak", None)] * 2
     assert by["messages"][1]["messages"][-1]["content"][0]["tool_use_id"] == "tu_1"
