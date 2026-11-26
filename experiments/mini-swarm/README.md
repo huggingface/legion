@@ -73,6 +73,37 @@ Its model endpoint's billing is independent of the HF namespace.
 
 Other places the agents can run (Docker, Podman, E2B): [../README.md](../README.md#where-agents-run).
 
+## Mixed harnesses: `mixed.yaml`
+
+The same task with one agent per harness: Pi on the HF router (`agent-001`), Codex on an
+OpenAI model (`agent-002`) and Claude Code on an Anthropic model (`agent-003`), all on one
+board ([harnesses](../../docs/harnesses.md)). Each role runs on its own worker, so the board is
+deployed once and every worker joins it by URL.
+
+**Needs**, besides `spec.yaml`'s tokens: `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`, each given
+only to its own role's agents. Set `CODEX_BACKEND=e2b` (with `E2B_API_KEY`) to put the Codex
+agent in an E2B sandbox and the others in HF Sandboxes. `OPENAI_MODEL` and `ANTHROPIC_MODEL`
+default to `gpt-5-mini` and `claude-haiku-5-5`.
+
+```sh
+export RUN_NAME="mini-swarm-mixed-$(uv run python -c 'import uuid; print(uuid.uuid4().hex[:12])')"
+# deploy the board once: its URL and a new operator token, in this shell only
+eval "$(uv run python -c "
+import os, shlex
+from msgboard import auth
+from msgboard.space import deploy
+_, token, _ = auth.new_token()
+d = deploy(os.environ['RUN_NAME'], operator_token=token, private=False)
+print(f'export BOARD_URL={shlex.quote(d.url)} MSGBOARD_OPERATOR_TOKEN={shlex.quote(token)}')
+")"
+curl -s "$BOARD_URL/v1/health"   # repeat until it says "ok" (the Space builds for a few minutes)
+uv run legion launch experiments/mini-swarm/mixed.yaml
+uv run legion status "$RUN_NAME"
+```
+
+**Cost**: as `spec.yaml` for the Pi agent and the sandboxes, plus a few hundred thousand tokens
+each on the OpenAI and Anthropic models: well under a dollar with the default models.
+
 ## On a vLLM server legion starts: `hf-jobs.yaml`
 
 The same swarm with the same model, served by vLLM on one HF Jobs `h200` instead of the HF

@@ -18,9 +18,9 @@ Set `harness` at the top level for every role, or in every role of `agents.roles
 Other combinations are refused at launch. A Codex or Claude Code role needs its own
 `inference` block with that URL and an `api_key_env`: the secret's name on your machine (and
 the controller's). Its agents get the value under the harness's own name, and only that key:
-no other role's key and no Hub token. Neither provider reports a context window, so set
-`context_window`. Use the provider's full model id (Anthropic lists `claude-...-<date>`, not
-the alias).
+no other role's key and no Hub token. Neither provider's model list gives the context window
+legion reads, so set `context_window`. The model must be listed by the provider's
+`GET /v1/models` under that id.
 
 ```yaml
 model: moonshotai/Kimi-K2.5
@@ -30,12 +30,12 @@ agents:
   roles:
     planner:
       harness: claude-code
-      model: claude-sonnet-4-5-20250929
-      pricing: [3, 15, 0.3]
+      model: claude-sonnet-5-5
+      pricing: [2, 10, 0.1]
       inference:
         urls: [https://api.anthropic.com/v1]
         api_key_env: ANTHROPIC_API_KEY
-        context_window: 200000
+        context_window: 1000000
     implementer:
       harness: pi
       count: 2

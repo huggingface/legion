@@ -1,0 +1,55 @@
+# mini-swarm with one agent per harness: Pi (agent-001), Codex (agent-002) and Claude Code
+# (agent-003), on one shared board. Each role runs on its own workers, so the board is one that
+# is already up (url). Needs, cost, launch: README.md "Mixed harnesses: mixed.yaml".
+name: ${RUN_NAME:-mini-swarm-mixed-1}
+model: Qwen/Qwen3.8-27B
+naming: consecutive-id                              # agent-001..003: the task's test expects agent-NNN
+inference:
+  hf_router:
+    provider: deepinfra
+  api_key_env: HF_INFERENCE_TOKEN                   # inference only: never the workers' HF_TOKEN
+task:
+  repo: https://huggingface.co/datasets/HuggingFaceSwarms/mini-swarm
+  selector: mini-swarm
+  revision: d0e1fee0f1036a80d5400d67f7fad9143668ba94
+agents:
+  roles:
+    pi:
+      harness: pi
+      environment:
+        backend: ${PI_BACKEND:-hf-sandbox}
+    codex:
+      harness: codex
+      model: ${OPENAI_MODEL:-gpt-5-mini}
+      inference:
+        urls:
+          - https://api.openai.com/v1
+        api_key_env: OPENAI_API_KEY
+        context_window: 400000
+      environment:
+        backend: ${CODEX_BACKEND:-hf-sandbox}
+    claude:
+      harness: claude-code
+      model: ${ANTHROPIC_MODEL:-claude-haiku-5-5}
+      inference:
+        urls:
+          - https://api.anthropic.com/v1
+        api_key_env: ANTHROPIC_API_KEY
+        context_window: 1000000
+      environment:
+        backend: ${CLAUDE_BACKEND:-hf-sandbox}
+resources:
+  message_board:
+    url: ${BOARD_URL}                               # a board deployed once (README)
+    token_env: MSGBOARD_OPERATOR_TOKEN
+workers:
+  turn_timeout: 10m
+loop:
+  prompt: Continue the task until it is complete, then stop.
+  every: turn_end
+  while:
+    until: 8m
+    max_rounds: 3
+limits:
+  run_timeout_seconds: 600
+  agent_max_turns: 20
