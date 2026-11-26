@@ -105,6 +105,14 @@ def test_six_lane_spec_loads(tmp_path):
     assert Spec.model_validate(dumped) == spec
 
 
+def on(d, answers, safety):
+    """LANES with each role on its own backend."""
+    d.pop("environment")
+    for role, backend in (("answers", answers), ("safety", safety)):
+        d["agents"]["roles"][role]["environment"] = {"backend": backend}
+    return d
+
+
 @pytest.mark.parametrize(
     "edit, error",
     [
@@ -140,6 +148,22 @@ def test_six_lane_spec_loads(tmp_path):
          "set harness in every role of agents.roles, or only at the top level"),
         (lambda d: [r.update(harness="pi") for r in d["agents"]["roles"].values()]
          and d.update(harness="pi"), "set harness at the top level or in every role, not both"),
+        # environment: the same rule, and each backend check per role
+        (lambda d: d["agents"]["roles"]["safety"].update(environment={"backend": "docker"}),
+         "set environment in every role of agents.roles, or only at the top level"),
+        (lambda d: on(d, "docker", "docker").update(environment={"backend": "docker"}),
+         "set environment at the top level or in every role, not both"),
+        (lambda d: on(d, "docker", "hf-sandbox").update(
+            success_check={"service": "puzzle", "command": "check"}),
+         "success_check requires a docker or podman sidecar: role safety runs on hf-sandbox"),
+        (lambda d: on(d, "docker", "e2b")["limits"].update(trial_hours=23.5),
+         "e2b caps a sandbox at 24 h: limits.trial_hours plus safety's turn_timeout"),
+        (lambda d: on(d, "hf-sandbox", "docker").update(compute="hf-jobs"),
+         "compute hf-jobs cannot run containers"),
+        (lambda d: on(d, "podman", "hf-sandbox")["resources"].update(spawn={}),
+         r"resources.spawn needs a mount: use backend docker or podman \(role safety"),
+        (lambda d: on(d, "docker", "hf-sandbox")["resources"]["message_board"].pop("url"),
+         "role safety runs on a sandbox, which can't reach a local board"),
     ],
 )
 def test_spec_checks(tmp_path, edit, error):
@@ -654,6 +678,43 @@ def test_each_role_runs_its_own_harness(tmp_path, capsys):
         "role answers: harness pi, model Qwen/Qwen3.8-27B, backend hf-sandbox",
         "role review: harness claude-code, model claude-x, backend hf-sandbox",
         "role safety: harness codex, model gpt-x, backend hf-sandbox"]
+
+
+def test_each_role_runs_on_its_own_backend(tmp_path):
+    """A role's type gets its environment and only its backend's worker secrets."""
+    data = load_spec_yaml(COMPILE)
+    data.pop("environment")
+    roles = data["agents"]["roles"]
+    roles["answers"]["environment"] = {"backend": "podman"}
+    roles["safety"]["environment"] = {"backend": "e2b"}
+    roles["review"] = {"environment": {"backend": "hf-sandbox", "flavor": "cpu-upgrade"}}
+    for name in ("team.md", "answers.md", "round.md"):
+        (tmp_path / name).write_text("x")
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    swarm = compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
+    types = swarm.types
+    assert {n: ts.harbor.config["environment"] for n, ts in types.items()} == {
+        "answers": {"backend": "podman", "flavor": None},
+        "review": {"backend": "hf-sandbox", "flavor": "cpu-upgrade"},
+        "safety": {"backend": "e2b", "flavor": None}}
+    assert {n: ts.secrets for n, ts in types.items()} == {
+        "answers": ["MSGBOARD_OPERATOR_TOKEN"],
+        "review": ["MSGBOARD_OPERATOR_TOKEN", "HF_TOKEN"],
+        "safety": ["MSGBOARD_OPERATOR_TOKEN", "E2B_API_KEY"]}
+    worker = Spec.model_validate(types["safety"].harbor.config)  # as the worker rebuilds it
+    assert worker.environment.backend == "e2b"
+
+
+def test_launch_warns_that_board_rules_over_http_are_not_enforced(tmp_path):
+    from legion.ops import UNENFORCED, check_spec
+
+    data = load_spec_yaml(COMPILE)
+    data["resources"]["message_board"]["rules"] = {"max_len": 1000}
+    for name in ("team.md", "answers.md", "round.md"):
+        (tmp_path / name).write_text("x")
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    swarm = compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)  # hf-sandbox: http
+    assert check_spec(swarm, str(tmp_path / "spec.yaml"))[1] == [UNENFORCED]
 
 
 def test_e2b_workers_get_the_e2b_key_not_the_hub_token(tmp_path):

@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 from harbor.agents.factory import AgentFactory
 from harbor.environments.base import ExecResult
+from harbor.environments.capabilities import EnvironmentCapabilities
 from harbor.models.agent.context import AgentContext
 from harbor.models.trial.result import ExceptionInfo
 from harbor.models.verifier.result import VerifierResult
@@ -59,6 +60,7 @@ class Fakes:
         self.start_gate = self.verify_gate = None  # set: Trial.run waits for them
         self.route_gate = None  # set: `ip route` (a Trial network's first command) waits for it
         self.steps = False  # True: the verifier's files land as a multi-step Trial's
+        self.compose = True  # the environment's Harbor docker_compose capability (sidecars)
 
     def gate(self, n):
         return self.gates.setdefault(n, asyncio.Event())
@@ -71,6 +73,7 @@ class FakeEnv:
     def __init__(self, logs_dir, fakes):
         self.logs_dir, self.fakes, self.default_user = logs_dir, fakes, None
         self.killed = False
+        self.capabilities = EnvironmentCapabilities(docker_compose=fakes.compose)
 
     async def service_exec(self, command, *, service, timeout_sec):
         # Compose mixes a banner from stderr into stdout; the command frames its JSON body.
@@ -1124,6 +1127,18 @@ async def test_sidecar_success_survives_until_verification(fakes, tmp_path, body
             assert "config" not in json.loads(saved.read_text())
     finally:
         await a.close(0)
+
+
+async def test_success_check_needs_a_backend_that_runs_sidecars(fakes, tmp_path):
+    """Harbor's own docker_compose capability of the Trial's environment, not a backend list."""
+    fakes.compose = False
+    ts = type_spec()
+    ts.harbor.config["success_check"] = {"service": "puzzle", "command": "check"}
+    a = make_adapter(tmp_path / "work" / "agent-0000", "agent-0000", ts)
+    with pytest.raises(RuntimeError, match="backend docker cannot run sidecar services"):
+        await a.start(a.workdir, None, ts)
+    assert not fakes.success_calls
+    await a.close(0)
 
 
 @pytest.mark.parametrize("enabled", [False, True])

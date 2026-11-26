@@ -15,7 +15,7 @@ from typer.testing import CliRunner
 import legion.harbor
 from legion import cli, rundir
 from legion.harbor import sources
-from legion.ops import SpecError, check_spec, read_spec
+from legion.ops import UNENFORCED, SpecError, check_spec, read_spec
 
 EXPERIMENTS = Path(__file__).parents[2] / "experiments"
 FIXTURES = Path(__file__).parents[1] / "fixtures"
@@ -126,7 +126,8 @@ def experiment_spec(monkeypatch, pins, name, rev, env=None):
     path = EXPERIMENTS / name
     path = path / "spec.yaml" if path.is_dir() else path
     swarm = read_spec(str(path))
-    assert check_spec(swarm, str(path))[1] == []  # no refusals, no warnings
+    # no refusals, no warnings but board rules a sandbox run cannot enforce (pybot's)
+    assert set(check_spec(swarm, str(path))[1]) <= {UNENFORCED}
     assert all(ts.harbor.task["task"]["git_commit_id"] == "a" * 40 for ts in swarm.types.values())
     return swarm
 

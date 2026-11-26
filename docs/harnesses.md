@@ -74,8 +74,51 @@ unknown. Budgets price tokens with the role's `pricing`.
 
 Legion tools stay shell commands, so every harness calls them the same way.
 
+## Backends per role
+
+`environment` follows the same rule as `harness`: set it at the top level, or in every role.
+Each role then runs on its own backend, for example a Codex reviewer in an HF Sandbox next to
+Pi implementers on docker.
+
+```yaml
+agents:
+  roles:
+    implementer:
+      environment:
+        backend: docker
+    reviewer:
+      harness: codex
+      environment:
+        backend: hf-sandbox
+        flavor: cpu-basic
+```
+
+The backend checks apply to each role:
+
+- the compute it runs on (HF Jobs workers need hf-sandbox or e2b; Slurm workers need podman
+  or hf-sandbox);
+- the 24 h sandbox cap (`limits.trial_hours` plus the role's `turn_timeout`);
+- `resources.spawn`, which needs a mount, so it is refused when any role is on a sandbox;
+- a local board, which a sandbox role cannot reach: use `message_board.space_id` or `url`.
+
+`success_check` runs in a task sidecar, so it needs every role's backend to run Compose
+services. Launch refuses it when a role is on a sandbox. Each worker then checks Harbor's
+`docker_compose` capability of the Trial's environment before the Trial starts.
+
+Each role's workers get only their own backend's secrets: `HF_TOKEN` for hf-sandbox,
+`E2B_API_KEY` for e2b. A run with roles on different backends runs each role on its own
+workers, so they share a board that is already up: `message_board.url` and `token_env`
+(deploy a Space board once and point every role at its URL).
+
+When board rules apply to agents that reach the board over HTTP, `legion launch` warns that the
+rules are not enforced: only a socket proxy enforces them today.
+
 ## Known gaps
 
 - Harness versions are Harbor's defaults for Codex and Claude Code; only Pi's is pinned.
 - No LiteLLM or OpenRouter connections and no agent gateway yet; Codex and Claude Code call
   their provider directly.
+- Board rules are not enforced for agents on the network (HTTP transport) until the board
+  server enforces them.
+- Sandbox roles cannot spawn agents: that needs the controller reachable from remote
+  sandboxes.

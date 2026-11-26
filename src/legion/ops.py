@@ -211,6 +211,10 @@ def loop_problems(spec: SwarmSpec) -> tuple[list[str], list[str]]:
     return refused, warnings
 
 
+UNENFORCED = ("warning: resources.message_board.rules are not enforced: agents reach the board "
+              "over the network (transport http), which has no rule proxy")
+
+
 def check_spec(spec: SwarmSpec, spec_file: str):
     """(the folder's packed tools bundle or None, warnings), or SpecError with the loop
     settings this version cannot run or a bad tools folder (`done["warnings"]` then)."""
@@ -220,6 +224,10 @@ def check_spec(spec: SwarmSpec, spec_file: str):
     refused, warnings = loop_problems(spec)
     if refused:
         raise SpecError(refused)
+    if any(ts.harbor and (board := ts.harbor.resources.get("message_board") or {})
+           and board.get("rules") and board.get("transport") == "http"
+           for ts in spec.types.values()):
+        warnings.append(UNENFORCED)
     try:
         return prepare(spec, spec_file), warnings
     except ToolsError as e:

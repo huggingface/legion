@@ -381,6 +381,10 @@ class HarborAdapter:
             if self._closes:  # closed while this Trial was being created
                 await self._drop_network(networks)  # a close may have taken self._network
                 raise RuntimeError("agent closed")
+            if config.success_check and not trial.agent_environment.capabilities.docker_compose:
+                await self._drop_network(networks)
+                raise RuntimeError(f"success_check runs in a task sidecar, and backend "
+                                   f"{config.environment.backend} cannot run sidecar services")
             if config.harness == "pi":
                 launch.attach_pi_setup(trial, inference)
             if self.bundle is not None:
