@@ -164,6 +164,14 @@ def on(d, answers, safety):
          r"resources.spawn needs a mount: use backend docker or podman \(role safety"),
         (lambda d: on(d, "docker", "hf-sandbox")["resources"]["message_board"].pop("url"),
          "role safety runs on a sandbox, which can't reach a local board"),
+        # mixed backends: every role reaches the board and the world over the network
+        (lambda d: on(d, "docker", "podman")["resources"]["message_board"].pop("url"),
+         "roles on different backends share one board that is up: set message_board.url"),
+        (lambda d: on(d, "docker", "hf-sandbox")["resources"]["message_board"].update(
+            transport="unix"), "resources.message_board.transport: roles on different backends"),
+        (lambda d: on(d, "docker", "hf-sandbox")["resources"].update(
+            world={"url": "http://world.example", "transport": "unix"}),
+         "resources.world.transport: roles on different backends"),
     ],
 )
 def test_spec_checks(tmp_path, edit, error):
@@ -703,6 +711,10 @@ def test_each_role_runs_on_its_own_backend(tmp_path):
         "safety": ["MSGBOARD_OPERATOR_TOKEN", "E2B_API_KEY"]}
     worker = Spec.model_validate(types["safety"].harbor.config)  # as the worker rebuilds it
     assert worker.environment.backend == "e2b"
+    # every role reaches the board over the network; a single-backend run keeps its transport
+    # (test_compile_gives_one_harbor_type_per_role)
+    assert all(ts.harbor.resources["message_board"]["transport"] == "http"
+               for ts in types.values())
 
 
 def test_launch_warns_that_board_rules_over_http_are_not_enforced(tmp_path):

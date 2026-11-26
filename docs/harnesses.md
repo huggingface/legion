@@ -106,19 +106,25 @@ services. Launch refuses it when a role is on a sandbox. Each worker then checks
 `docker_compose` capability of the Trial's environment before the Trial starts.
 
 Each role's workers get only their own backend's secrets: `HF_TOKEN` for hf-sandbox,
-`E2B_API_KEY` for e2b. A run with roles on different backends runs each role on its own
-workers, so they share a board that is already up: `message_board.url` and `token_env`
-(deploy a Space board once and point every role at its URL).
+`E2B_API_KEY` for e2b.
 
-When board rules apply to agents that reach the board over HTTP, `legion launch` warns that the
-rules are not enforced: only a socket proxy enforces them today.
+**Transport rule.** When the roles use more than one backend, every role reaches the board and
+the world over the network (`transport: http`), and `transport: unix` is refused:
+- the board must be one that is already up, at `message_board.url` with its `token_env` (deploy
+  a Space board once and point every role at its URL);
+- the world must be a legion world server, which checks each agent's own token.
+A run whose roles all use one backend behaves as before: docker and podman agents keep their
+mounted sockets, and sandbox agents use HTTP.
+
+Board rules are enforced only through the socket proxy, so in a mixed run they are not
+enforced (nor, as before, on sandbox backends). `legion launch` warns when that happens.
 
 ## Known gaps
 
 - Harness versions are Harbor's defaults for Codex and Claude Code; only Pi's is pinned.
 - No LiteLLM or OpenRouter connections and no agent gateway yet; Codex and Claude Code call
   their provider directly.
-- Board rules are not enforced for agents on the network (HTTP transport) until the board
-  server enforces them.
+- Board rules are not enforced in mixed-backend runs (HTTP transport) until the board server
+  enforces them.
 - Sandbox roles cannot spawn agents: that needs the controller reachable from remote
   sandboxes.

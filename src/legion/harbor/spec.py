@@ -281,6 +281,17 @@ class Spec(Config):
         if sandboxed and (self.resources.get("message_board") or {}).get("rules"):
             # no mounts, no rule proxy: the board runs its rules unenforced and warns
             self.resources["message_board"].setdefault("transport", "http")
+        if len(set(backends.values())) > 1:  # mixed backends: every role on the network
+            for name in ("message_board", "world"):
+                options = self.resources.get(name)
+                if options is not None and options.get("transport") == "unix":
+                    raise ValueError(f"resources.{name}.transport: roles on different backends "
+                                     "all reach it over the network: remove transport: unix")
+                if options is not None:
+                    options["transport"] = "http"
+            if board is not None and not board.get("url") and not board.get("space_id"):
+                raise ValueError("roles on different backends share one board that is up: set "
+                                 "message_board.url")
         budgets = limits.budget_usd is not None or any(
             loop.while_.agent_usd is not None or loop.while_.budget_usd is not None
             for loop in loops
