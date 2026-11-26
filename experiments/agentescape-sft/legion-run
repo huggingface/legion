@@ -1,0 +1,15 @@
+#!/bin/bash
+set -eu
+umask 077
+RUN_DIR=$(cd "$(dirname "$0")" && pwd)
+set -a
+. "$RUN_DIR/secrets.env"
+set +a
+export HF_XET_CACHE="${TMPDIR:-/tmp}/$USER-agentescape-xet"
+export GIT_TERMINAL_PROMPT=0
+export GIT_CONFIG_COUNT=2
+export GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0=
+export GIT_CONFIG_KEY_1=credential.https://huggingface.co.helper
+export GIT_CONFIG_VALUE_1='!f() { test "$1" = get && printf "username=hf_user\npassword=%s\n" "$HF_TOKEN"; }; f'
+. "$RUN_DIR/cluster.env"
+exec "$VENV/bin/legion" "$@"

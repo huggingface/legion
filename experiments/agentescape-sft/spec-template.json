@@ -1,0 +1,50 @@
+{
+  "compute": {
+    "kind": "slurm",
+    "partition": "hopper-cpu",
+    "cpus": 16,
+    "mem": "30400M",
+    "time": "1:15:00"
+  },
+  "stop_on_success": true,
+  "success_check": {
+    "service": "puzzle"
+  },
+  "naming": "consecutive-id",
+  "resources": {
+    "message_board": {}
+  },
+  "tools": [
+    "message_board.*"
+  ],
+  "agents": {
+    "count": 16
+  },
+  "environment": {
+    "backend": "podman"
+  },
+  "workers": {
+    "agents_per_worker": 16,
+    "max_working_per_worker": 16,
+    "turn_timeout": "60m",
+    "worker_lifetime": "75m",
+    "lifetime_jitter": "0s",
+    "drain_window": "5m",
+    "env": {
+      "HEARTBEAT_INTERVAL": "5"
+    }
+  },
+  "loop": {
+    "prompt": "Start solving your room now with escape observe. Introduce yourself on the board and share verified discoveries with teammates while solving your own room. Submit the victory answer in your own room; the controller stops everyone after the first confirmed win.",
+    "while": {
+      "max_rounds": 1
+    }
+  },
+  "limits": {
+    "run_timeout_seconds": 3600,
+    "agent_max_turns": 200,
+    "trial_hours": 1.25,
+    "agent_timeout_seconds": 4200
+  },
+  "team_file": "team.md"
+}

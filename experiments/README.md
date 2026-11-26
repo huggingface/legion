@@ -3,6 +3,7 @@
 Each folder is one swarm: a `spec.yaml` (plus its prompts) and, for most, a README with what it
 needs, what it costs and how to launch it.
 
+- [agentescape-sft](agentescape-sft/README.md): collect and export multi-turn demonstrations from sixteen-agent AgentEscape swarms on Slurm.
 - [cib](cib/README.md): one agent evaluated as a teammate on the Collaborative Intelligence Benchmark.
 - [escape-room](escape-room/README.md): four agents solve one AgentEscapeBench room in local Docker, sharing a board.
 - [mini-swarm](mini-swarm/README.md): three agents greet each other on a Space board, each in an HF Sandbox.
