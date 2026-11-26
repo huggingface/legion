@@ -1,5 +1,7 @@
 """HarborAdapter + LegionPi on fakes: a FakeTrial (test_launch's) that runs the real LegionPi
-against a FakeEnv (after harbor-core's test_agent.py) whose `pi --print` writes a canned pi.txt.
+against a FakeEnv (after harbor-core's test_agent.py) whose `pi --print` writes a canned pi.txt
+(and `codex exec`, `claude --verbose` their own outputs and session files, for LegionCodex and
+LegionClaudeCode).
 Container networks are faked at their command boundary (legion.harbor.networking.command)."""
 
 import asyncio
@@ -35,6 +37,7 @@ TASK = {
     "task": {"git_url": "https://example.com/tasks.git", "git_commit_id": "c" * 40, "path": "t"},
 }
 SESSIONS = "/logs/agent/pi/sessions"
+NATIVE = {"codex": "codex exec ", "claude-code": "claude --verbose"}  # what each call runs
 
 
 class Fakes:
@@ -47,6 +50,7 @@ class Fakes:
         self.success_gate = None
         self.success_calls = []
         self.pi_env = []  # each `pi --print` exec's env
+        self.prompts = []  # each call's prompt
         self.probe_ok, self.upload_fails, self.kill_fails = True, False, False
         self.fail = None  # pi call number -> "exit" | "provider"
         self.hold = set()  # pi call numbers that wait for release(n) or a kill
@@ -92,10 +96,7 @@ class FakeEnv:
         if self.fakes.upload_fails:
             raise OSError("upload failed")
         self.fakes.uploads.append((Path(source), target))
-        local = self.logs_dir / "pi" / "sessions"  # /logs/agent is mounted at logs_dir
-        local.mkdir(parents=True, exist_ok=True)
-        for path in Path(source).glob("*.jsonl"):
-            (local / path.name).write_text(path.read_text())
+        shutil.copytree(source, self._remote(target), dirs_exist_ok=True)
 
     def is_path_mounted(self, environment_path, host_path):
         return self.fakes.mounted
@@ -122,13 +123,18 @@ class FakeEnv:
             for gate in f.gates.values():
                 gate.set()
             return ExecResult(return_code=0)
-        if " pi --print " not in command:
+        if "CODEX_RUNTIME_ID" in command:  # Codex asks the agent's uid and gid
+            return ExecResult(return_code=0, stdout="CODEX_RUNTIME_ID 0 0\n")
+        harness = next((h for h, call in NATIVE.items() if call in command), None)
+        if " pi --print " not in command and harness is None:
             return ExecResult(return_code=0)
         f.pi.append(command)
         f.pi_env.append(env)
         n = len(f.pi)
         words = shlex.split(command)
-        prompt = words[words.index("2>&1") - 1]
+        prompt = (next(v for k, v in env.items() if k.startswith("CLAUDE_CODE_INSTRUCTION_"))
+                  if harness == "claude-code" else words[words.index("2>&1") - 1])
+        f.prompts.append(prompt)
         if n in f.hold or prompt.endswith("[hold]"):  # [hold]: a tiny run's long turn
             await f.gate(n).wait()
         if self.killed:
@@ -137,6 +143,8 @@ class FakeEnv:
         failure = f.fail and f.fail(n)
         if failure == "exit":
             return ExecResult(return_code=1, stderr="boom")
+        if harness:
+            return self._native(harness, n, prompt)
         message = {
             "role": "assistant",
             "content": [{"type": "text", "text": f"reply-{n}"}],
@@ -156,6 +164,33 @@ class FakeEnv:
         with (sessions / "s.jsonl").open("a") as out:
             # the prompt too: the tiny runs' "what the model was told" (tests/tinyrun.py)
             out.write(json.dumps({"call": n, "prompt": prompt}) + "\n")
+        return ExecResult(return_code=0)
+
+
+    def _native(self, harness, n, prompt):
+        """A Codex or Claude Code call: its JSON-lines output (one reply, its usage) and one
+        line more in its session file, where the real CLI keeps it under /logs/agent."""
+        if harness == "codex":
+            out, session = "codex.txt", "sessions/2026/11/26/rollout-2026-11-26T10-00-00-s.jsonl"
+            events = [{"type": "item.completed",
+                       "item": {"type": "agent_message", "text": f"reply-{n}"}},
+                      {"type": "item.completed",
+                       "item": {"type": "command_execution", "command": "ls"}},
+                      {"type": "turn.completed", "usage": {
+                          "input_tokens": 1500, "cached_input_tokens": 500, "output_tokens": 100}}]
+        else:
+            out, session = "claude-code.txt", "sessions/projects/-app/s.jsonl"
+            events = [{"type": "assistant", "message": {"content": [
+                          {"type": "text", "text": f"reply-{n}"},
+                          {"type": "tool_use", "name": "Bash", "input": {}}]}},
+                      {"type": "result", "is_error": False, "usage": {
+                          "input_tokens": 1000, "cache_read_input_tokens": 500,
+                          "output_tokens": 100}}]
+        (self.logs_dir / out).write_text("".join(json.dumps(e) + "\n" for e in events))
+        path = self.logs_dir / session
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as file:
+            file.write(json.dumps({"call": n, "prompt": prompt}) + "\n")
         return ExecResult(return_code=0)
 
 
@@ -320,6 +355,65 @@ async def test_one_trial_across_bursts(fakes, tmp_path):
     (session,) = a.session_files(sid)
     assert session == a.home / "sessions" / "s.jsonl" and a.session_dir == a.root  # purge()
     assert len(session.read_text().splitlines()) == 2
+
+
+def native_spec(harness):
+    """pi-hf.yaml's agents on Codex or Claude Code, at their provider's API."""
+    spec = Spec.load(EXAMPLES / "pi-hf.yaml", env={})
+    host, key = {"codex": ("api.openai.com", "OPENAI_ROLE_KEY"),
+                 "claude-code": ("api.anthropic.com", "ANTHROPIC_ROLE_KEY")}[harness]
+    spec.harness, spec.model = harness, "native-model"
+    spec.inference = Inference(urls=[f"https://{host}/v1"], api_key_env=key)
+    return compile_spec(spec, TASK).types["agent"]
+
+
+@pytest.mark.parametrize("harness, key, resume, session", [
+    ("codex", "OPENAI_API_KEY", "codex exec resume --last ",
+     "2026/11/26/rollout-2026-11-26T10-00-00-s.jsonl"),
+    ("claude-code", "ANTHROPIC_API_KEY", "--continue ", "projects/-app/s.jsonl"),
+])
+async def test_codex_and_claude_code_turns_resume_their_sessions(
+        fakes, tmp_path, monkeypatch, harness, key, resume, session):
+    """Harbor's own Codex and Claude Code under the turn server: each call gets only the role's
+    key, under the harness's own name (never another role's key or the worker's Hub token),
+    usage comes from the call's output, and the native session files are kept at their paths and
+    put back for a relaunched worker's Trial, whose first turn resumes them."""
+    secrets = {"OPENAI_ROLE_KEY": "openai-secret", "ANTHROPIC_ROLE_KEY": "anthropic-secret"}
+    for name, value in secrets.items():  # a worker holding both (each type's has only its own)
+        monkeypatch.setenv(name, value)
+    spec = native_spec(harness)
+    own = secrets[spec.resolved_model.inference.key_env]
+    a = make_adapter(tmp_path / "work" / "agent-0000", "agent-0000", spec)
+    sid, events = await start(a)
+    await a.send("First.")
+    evs = await read(events, "turn_ended")
+    assert evs[0].kind == "turn_started" and [e.kind for e in evs[-2:]] == ["usage", "turn_ended"]
+    messages = [e.message for e in evs if e.kind == "message"]  # in legion's (Pi's) shape
+    assert messages[0]["content"][0]["text"] == "reply-1" and evs[-1].status == "completed"
+    assert any(b.get("type") == "toolCall" for m in messages for b in m["content"])
+    u = evs[-2].usage
+    assert (evs[-2].model, u.input, u.cache_read, u.output) == ("native-model", 1000, 500, 100)
+    await a.send("Second.")
+    await read(events, "turn_ended")
+    assert resume not in fakes.pi[0] and "TASK" in fakes.prompts[0]
+    assert resume in fakes.pi[1] and "TASK" not in fakes.prompts[1]
+    for env in fakes.pi_env:
+        assert env[key] == own
+        others = {*secrets.values(), "test-inference-secret"} - {own}
+        assert not others & set(env.values()), sorted(env)
+    (path,) = a.session_files(sid)
+    assert path == a.home / "sessions" / session and len(path.read_text().splitlines()) == 2
+    await a.close()
+
+    shutil.rmtree(a.root / "trials")  # a relaunched worker: only the synced home is back
+    b = make_adapter(tmp_path / "work" / "agent-0000", "agent-0000", spec)
+    _, events = await start(b, sid)
+    assert fakes.uploads == [(b.home / "sessions", "/logs/agent/sessions")]
+    await b.send("Third.")
+    assert (await read(events, "turn_ended"))[-1].status == "completed"
+    assert resume in fakes.pi[2] and "TASK" not in fakes.prompts[2] and "Third." in fakes.prompts[2]
+    assert len(path.read_text().splitlines()) == 3
+    await b.close()
 
 
 def pi_models(fakes, n=0):
@@ -838,15 +932,20 @@ def test_read_turn_counts_compaction(tmp_path):
     assert len(messages) == 1 and (usage.input, usage.output) == (110, 21)
 
 
-def test_the_kill_script_needs_no_procps_and_spares_itself(tmp_path):
-    """KILL_PI on a fake /proc, `kill` stubbed: nothing on this machine is signalled. It ends
-    `pi` and its tool processes (12 -> 11 -> 20 -> 21), not the rest."""
+@pytest.mark.parametrize("server, cli", [
+    (LegionPi, ["node", "/usr/bin/pi", "--print", "--mode", "json"]),
+    (legion_agent.LegionCodex, ["node", "/usr/bin/codex", "exec", "--json"]),
+    (legion_agent.LegionClaudeCode, ["claude", "--verbose", "--print"]),
+])
+def test_the_kill_script_needs_no_procps_and_spares_itself(tmp_path, server, cli):
+    """Each harness's kill script on a fake /proc, `kill` stubbed: nothing on this machine is
+    signalled. It ends the call and its tool processes (12 -> 11 -> 20 -> 21), not the rest."""
     import subprocess
 
     proc = tmp_path / "proc"
-    script = legion_agent.KILL_PI.replace("/proc", str(proc))
-    for pid, ppid, argv in [("11", "12", ["node", "/usr/bin/pi", "--print", "--mode", "json"]),
-                            ("12", "1", ["bash", "-c", "set -o pipefail; pi --print 'hi'"]),
+    script = legion_agent.kill_command(server.PROCESS).replace("/proc", str(proc))
+    for pid, ppid, argv in [("11", "12", cli),
+                            ("12", "1", ["bash", "-c", f"set -o pipefail; {' '.join(cli)} 'hi'"]),
                             ("20", "11", ["bash", "-c", "make test"]), ("21", "20", ["make"]),
                             ("13", "1", ["sleep", "100"]), ("14", "1", ["bash", "-c", script])]:
         (proc / pid).mkdir(parents=True)

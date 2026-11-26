@@ -9,7 +9,8 @@ progress and model usage.
 
 Run from a laptop, on Hugging Face Jobs, or through Slurm. Use Hugging Face
 Inference Providers or your own OpenAI-compatible model endpoint, and add tools
-as Python functions. Pi is currently the supported agent harness.
+as Python functions. Each role runs Pi, Codex or Claude Code
+([harnesses](docs/harnesses.md)).
 
 > [!WARNING]
 > Legion is at an early stage and changes quickly, so expect sharp edges. The
@@ -183,6 +184,7 @@ invocation, and shared resources.
 
 ## Further reading
 
+- [Harnesses: Pi, Codex and Claude Code](docs/harnesses.md)
 - [Message boards](docs/comms.md) and [shared worlds](docs/world.md)
 - [Live updates](docs/live.md), [agent spawning](docs/spawn.md), and [health](docs/health.md)
 - [HF repository Git and pull-request tools](docs/hf-repo.md)

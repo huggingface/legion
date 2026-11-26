@@ -135,6 +135,11 @@ def test_six_lane_spec_loads(tmp_path):
         (lambda d: d.update(environment={"backend": "docker"}) or d.update(compute="slurm"),
          "compute slurm runs rootless"),
         (lambda d: d["loop"].update(on=["slack.mention"]), "expected message_board.<name>"),
+        # harness: the run's, or every role's (as agents.count vs agents.roles)
+        (lambda d: d["agents"]["roles"]["safety"].update(harness="pi"),
+         "set harness in every role of agents.roles, or only at the top level"),
+        (lambda d: [r.update(harness="pi") for r in d["agents"]["roles"].values()]
+         and d.update(harness="pi"), "set harness at the top level or in every role, not both"),
     ],
 )
 def test_spec_checks(tmp_path, edit, error):
@@ -142,6 +147,27 @@ def test_spec_checks(tmp_path, edit, error):
     edit(data)
     with pytest.raises(ValidationError, match=error):
         six_lane_spec(tmp_path, yaml.safe_dump(data))
+
+
+@pytest.mark.parametrize("edit, error", [
+    # Codex runs OpenAI's models only, Claude Code Anthropic's, each with its own key
+    (lambda d: d.update(harness="codex"),
+     r"agents.roles.answers: harness codex runs only models at https://api.openai.com"),
+    (lambda d: d.update(harness="claude-code", inference={
+        "urls": ["https://api.openai.com/v1"], "api_key_env": "OPENAI_KEY"}),
+     "harness claude-code runs only models at https://api.anthropic.com"),
+    (lambda d: d.update(harness="codex", inference={"urls": ["https://api.openai.com/v1"]}),
+     "inference.api_key_env: name the secret holding the role's OPENAI_API_KEY"),
+])
+def test_compile_refuses_other_harness_pairings(tmp_path, edit, error):
+    data = load_spec_yaml(COMPILE)
+    data["agents"]["roles"]["safety"].pop("inference")
+    edit(data)
+    for name in ("team.md", "answers.md", "round.md"):
+        (tmp_path / name).write_text("x")
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    with pytest.raises(ValueError, match=error):
+        compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
 
 
 def test_unset_variable_without_default(tmp_path):
@@ -599,6 +625,35 @@ async def test_the_controller_refuses_a_naming_change_in_a_running_swarm(tmp_pat
     words = swarm.model_copy(update={"naming": "words"})
     r = await client.put("/swarms/crew", json=words.model_dump(mode="json"))
     assert r.status_code == 400 and "names never change in a run" in r.text, r.text
+
+
+def test_each_role_runs_its_own_harness(tmp_path, capsys):
+    """Pi, Codex and Claude Code in one run: each role's type gets its harness, and Pi's (the
+    default) compiles as it did before."""
+    data = load_spec_yaml(COMPILE)
+    roles = data["agents"]["roles"]
+    roles["answers"]["harness"] = "pi"
+    roles["safety"].update(harness="codex", model="gpt-x",
+                           inference={"urls": ["https://api.openai.com/v1"], "api_key_env": "OAI"})
+    roles["review"] = {"harness": "claude-code", "model": "claude-x", "pricing": [3, 15, 0.3],
+                       "inference": {"urls": ["https://api.anthropic.com/v1"],
+                                     "api_key_env": "ANTH"}}
+    for name in ("team.md", "answers.md", "round.md"):
+        (tmp_path / name).write_text("x")
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    swarm = compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
+    assert {n: ts.harbor.config.get("harness") for n, ts in swarm.types.items()} == {
+        "answers": None, "safety": "codex", "review": "claude-code"}
+    # the worker rebuilds each type's config: it validates as a one-role spec of that harness
+    assert Spec.model_validate(swarm.types["review"].harbor.config).harness == "claude-code"
+    assert {n: ts.resolved_model.inference.key_env for n, ts in swarm.types.items()} == {
+        "answers": "HF_INFERENCE_TOKEN", "safety": "OAI", "review": "ANTH"}
+    from legion.ops import role_lines
+
+    assert role_lines(swarm) == [
+        "role answers: harness pi, model Qwen/Qwen3.8-27B, backend hf-sandbox",
+        "role review: harness claude-code, model claude-x, backend hf-sandbox",
+        "role safety: harness codex, model gpt-x, backend hf-sandbox"]
 
 
 def test_e2b_workers_get_the_e2b_key_not_the_hub_token(tmp_path):

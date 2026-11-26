@@ -19,7 +19,7 @@ from legion.controller.store import Store
 from legion.models import AgentHeartbeat, SwarmSpec, TokenUsage, WorkerHeartbeat
 
 from . import fake_models
-from .conftest import HB, TOKEN
+from .conftest import HARBOR, HB, TOKEN
 
 ROUTER = {"hf_router": {"provider": "deepinfra"}}
 GPU1 = {"urls": ["http://qwen-job:8000/v1"], "api_key_env": "VLLM_API_KEY", "max_working": 2}
@@ -462,6 +462,29 @@ def fake_provider(tool_call: bool = True, status: int = 200, follow_up_fails: bo
         return JSONResponse({"id": "c1", "object": "chat.completion", "usage": u,
                              "choices": [{"index": 0, "message": msg, "finish_reason": "stop"}]})
 
+    @fake.post("/v1/responses")
+    async def responses(request: Request):
+        """OpenAI's Responses API (Codex): a function call, then text once its output is sent."""
+        body = await request.json()
+        seen.append({"path": "responses", "auth": request.headers.get("authorization"), **body})
+        done = body["input"][-1].get("type") == "function_call_output"
+        out = ({"type": "message", "content": [{"type": "output_text", "text": "Noon."}]} if done
+               else {"type": "function_call", "call_id": "fc_1", "name": "get_time",
+                     "arguments": '{"timezone": "UTC"}'})
+        return JSONResponse({"output": [out], "usage": usage})
+
+    @fake.post("/v1/messages")
+    async def messages(request: Request):
+        """Anthropic's Messages API (Claude Code): a tool_use, then text after its result."""
+        body = await request.json()
+        seen.append({"path": "messages", "auth": request.headers.get("x-api-key"),
+                     "bearer": request.headers.get("authorization"), **body})
+        done = body["messages"][-1]["role"] == "user" and len(body["messages"]) > 1
+        out = ({"type": "text", "text": "Noon."} if done
+               else {"type": "tool_use", "id": "tu_1", "name": "get_time",
+                     "input": {"timezone": "UTC"}})
+        return JSONResponse({"content": [out], "usage": usage})
+
     return fake, seen
 
 
@@ -578,6 +601,45 @@ async def test_preflight_probes_chat_completions(preflight_client):
     m2 = chats[1]["messages"]
     assert [m["role"] for m in m2] == ["user", "assistant", "tool"]
     assert m2[2]["tool_call_id"] == "call_1" == m2[1]["tool_calls"][0]["id"]
+
+
+def native(harness: str, model: str, url: str, key_env: str) -> dict:
+    """A type whose role runs `harness` (Codex, Claude Code) on its provider's API."""
+    return {**HB, "model": model, "harbor": {**HARBOR, "config": {"task": {}, "harness": harness}},
+            "inference": {"urls": [url], "api_key_env": key_env, "context_window": 200000}}
+
+
+async def test_preflight_probes_each_harness_in_its_api(preflight_client):
+    fake, seen = fake_provider()
+    spec = pspec(FAKE_GPU, pi={**HB, "model": "Qwen/Small"},
+                 codex=native("codex", "m", "https://api.openai.com/v1", "OPENAI_KEY"),
+                 claude=native("claude-code", "m2", "https://api.anthropic.com/v1", "ANTH_KEY"))
+    async with await preflight_client(fake, {**SECRETS, "OPENAI_KEY": "ok"}) as c:
+        rep = (await c.post("/swarms/p/preflight", json=spec.model_dump(mode="json"))).json()
+    assert rep["ok"] is True, rep
+    assert {x["types"][0]: x["api"] for x in rep["results"]} == {
+        "pi": "chat_completions", "codex": "responses", "claude": "anthropic_messages"}
+    assert all(x["tool_call_seen"] and x["follow_up_ok"] for x in rep["results"])
+    by = {k: [x for x in seen if x["path"] == k] for k in ("responses", "messages")}
+    assert [x["auth"] for x in by["responses"]] == ["Bearer ok"] * 2
+    assert by["responses"][1]["input"][-1] == {"type": "function_call_output", "call_id": "fc_1",
+                                               "output": "2026-01-01T12:00:00Z"}
+    # Anthropic's own key header, never a bearer
+    assert [(x["auth"], x["bearer"]) for x in by["messages"]] == [("ak", None)] * 2
+    assert by["messages"][1]["messages"][-1]["content"][0]["tool_use_id"] == "tu_1"
+
+
+async def test_a_native_harness_needs_its_key_on_the_controller(store, clock):
+    """Codex and Claude Code have no keyless default: the apply is refused, naming the secret."""
+    app = create_app(store, TOKEN, clock=clock, secret_source={"HF_TOKEN": "hf-x"},
+                     inference_transport=fake_models.transport())
+    spec = pspec(ROUTER, codex=native("codex", "m", "https://api.openai.com/v1", "OPENAI_KEY"))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t",
+                                 headers={"Authorization": f"Bearer {TOKEN}"}) as c:
+        r = await put(c, spec)
+    assert r.status_code == 400
+    assert r.json()["detail"].endswith("codex needs the secret OPENAI_KEY, which is not set on "
+                                       "the controller")
 
 
 @pytest.mark.parametrize("namespace", ["", "huggingface"])

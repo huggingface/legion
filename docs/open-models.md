@@ -398,8 +398,9 @@ block (`zero_usage_agents`) with a "cost unknown" warning.
 
 `legion update --check` on a running swarm (or `POST /swarms/{swarm}/preflight` with the spec as
 the body) makes the controller probe each distinct model and inference block the way a harness
-starts. First the model check above, then two non-streamed Chat Completions turns, as Pi calls
-it (a tool call written as text is no tool call, since Pi takes only `tool_calls`): turn one asks
+starts. First the model check above, then two non-streamed turns in the role's harness's API
+(Chat Completions for Pi, Responses for Codex, Anthropic Messages for Claude Code:
+[harnesses](harnesses.md)); a tool call written as text is no tool call. Turn one asks
 for a call to a trivial `get_time` tool; turn two sends the model's output back with the tool's
 result and must complete. Per model it reports `ok`, `tool_call_seen`, `follow_up_ok`,
 `usage_reported`, `latency_ms`, `error` and `warning`. `ok` needs both turns: a server that

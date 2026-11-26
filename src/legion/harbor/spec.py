@@ -218,18 +218,6 @@ class Spec(Config):
     def checks(self):
         limits, backend = self.limits, self.environment.backend
         self._top_or_every_role("harness")
-        for name, role in self.roles().items():
-            harness = HARNESSES[self.harness_of(role)]
-            inference = role.inference or self.inference
-            if harness.host and not (inference.urls and all(
-                    urlsplit(u).hostname == harness.host for u in inference.urls)):
-                raise ValueError(f"agents.roles.{name}: harness {self.harness_of(role)} runs only "
-                                 f"models at https://{harness.host}: set the role's inference.urls "
-                                 f"to [https://{harness.host}/v1] and its api_key_env")
-            if harness.host and not inference.api_key_env:
-                raise ValueError(f"agents.roles.{name}.inference.api_key_env: name the secret "
-                                 f"holding the role's {harness.key} (its agents get it under "
-                                 "that name)")
         if self.stop_on_success and self.success_check is None:
             raise ValueError("stop_on_success requires success_check")
         if self.success_check and backend not in ("docker", "podman"):
@@ -359,6 +347,18 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
                              "sandboxes; the router's default key) and would reach every "
                              "agent's container: name an inference-only token, e.g. "
                              "HF_INFERENCE_TOKEN")
+    for name, role in roles.items():  # here, not in Spec: a worker's config has no inference
+        harness = HARNESSES[spec.harness_of(role)]
+        inference = role.inference or spec.inference
+        if harness.host and not (inference.urls and all(
+                urlsplit(u).hostname == harness.host for u in inference.urls)):
+            raise ValueError(f"agents.roles.{name}: harness {spec.harness_of(role)} runs only "
+                             f"models at https://{harness.host}: set the role's inference.urls "
+                             f"to [https://{harness.host}/v1] and its api_key_env")
+        if harness.host and not inference.api_key_env:
+            raise ValueError(f"agents.roles.{name}.inference.api_key_env: name the secret "
+                             f"holding the role's {harness.key} (its agents get it under "
+                             "that name)")
     board = spec.resources.get("message_board") or {}
     if remote and board.get("space_id") and board.get("private") is not False:
         raise ValueError("resources.message_board.private: set it to false: a private Space's "
