@@ -31,7 +31,7 @@ and per-attempt credentials. Set the values below for your cluster.
 ```bash
 uv sync --all-extras
 export QWEN_IMAGE=/shared/images/vllm-openai-v0.32.0.sqsh
-export SFT_EXPORT_PYTHON=/shared/export-env/bin/python  # transformers with Qwen3.5 support and pyarrow
+export SFT_EXPORT_PYTHON=/shared/export-env/bin/python  # transformers with Qwen3.5 support, pyarrow, datasets>=4.7
 RUN=/shared/runs/agentescape-sft-01
 PIPE=experiments/agentescape-sft/pipeline.py
 umask 077
@@ -107,6 +107,28 @@ repeat exports. `report.json` labels the format and separately counts trajectory
 rows (`examples`), assistant targets (`assistant_responses`), and contributing
 agents, with tokens/coverage by difficulty and rejection reasons.
 
+Trajectory exports also write `messages.parquet` for Hugging Face Datasets. Each
+row contains `id`, `messages` (prompt followed by completion), `tools`, and
+`metadata`. The exporter uses `List(Json())` for messages and tool definitions.
+Datasets returns lists of Python dictionaries and preserves the difference
+between an omitted argument and an explicitly null one. Loading this file with
+`Dataset.from_parquet` requires no parsing or field cleanup. Training with
+assistant-only loss on this representation includes assistant history retained
+in post-compaction prompts. Use the prompt/completion representation above if
+you need to exclude that history.
+
+To convert an existing trajectory export and optionally publish the messages
+with `Dataset.push_to_hub()`, run from the Legion checkout:
+
+```bash
+"$SFT_EXPORT_PYTHON" experiments/agentescape-sft/prepare_agentescape_messages.py \
+  "$RUN/dataset-v1/examples.parquet" "$RUN/dataset-v1/messages.parquet" \
+  --push-to-hub YOUR_NAMESPACE/YOUR_DATASET
+```
+
+Omit `--push-to-hub` for a local export. The conversion verifies every row
+after reading the Parquet back.
+
 For the legacy one-response-per-row format, pass `--format responses`. The default
 `--format trajectories` also applies to pilot and production exports in newly
 prepared runs. Existing frozen run scripts and previously published datasets are
@@ -119,8 +141,7 @@ python experiments/agentescape-sft/export.py /absolute/path/to/run \
 ```
 
 Raw capture stays private in native artifacts. Only model-visible message-board
-observations enter a trajectory. No student training or Hub publication is
-performed by this pipeline.
+observations enter a trajectory. The production supervisor only writes local exports.
 
 Implementation reuses the validated Qwen benchmark runner and cluster helpers;
 `task_splits.py` is the existing frozen split validator from TRL, retained with

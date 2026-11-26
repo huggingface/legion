@@ -373,6 +373,11 @@ def export(root, destination, tokenizer=None, pilots=False, format="trajectories
                 batch = []
         if batch:
             writer.write_table(pa.Table.from_pylist(batch, schema=schema))
+    if format == "trajectories" and counts["examples"]:
+        # The optional export environment supplies Hugging Face Datasets.
+        from prepare_agentescape_messages import export_messages
+
+        export_messages(destination / "examples.parquet", destination / "messages.parquet")
     report = {
         "format": format,
         "format_version": 1,
