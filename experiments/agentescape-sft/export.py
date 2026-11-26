@@ -307,6 +307,7 @@ def export(root, destination, tokenizer=None, pilots=False, format="trajectories
                         "scenario_id": row["id"],
                         "difficulty": row["difficulty"],
                         "swarm": run.name,
+                        "swarm_size": row["agents"],
                         "agent": trial.name,
                         "attempt": int(run.name[-1]),
                         "request_id": request["id"],

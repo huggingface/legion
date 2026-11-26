@@ -42,9 +42,11 @@ def save(path, value):
     tmp.replace(path)
 
 
-def prepare(root, secrets, bucket, network_helpers):
+def prepare(root, secrets, bucket, network_helpers, agents=16):
     from huggingface_hub import snapshot_download
 
+    if agents < 1:
+        raise ValueError("agents must be positive")
     root = Path(root).resolve()
     root.mkdir(parents=True, exist_ok=True)
     if (root / "study.json").exists() or (root / "jobs.json").exists():
@@ -103,7 +105,7 @@ def prepare(root, secrets, bucket, network_helpers):
                 "id": r["scenario_id"],
                 "index": i,
                 "scenario_index": i // 5,
-                "agents": 16,
+                "agents": agents,
                 "prefix": f"sft35-{stamp}-{i:03d}",
             }
         )
@@ -142,6 +144,7 @@ def prepare(root, secrets, bucket, network_helpers):
         "template_secrets": str(Path(secrets).resolve()),
         "key_file": str(root / "server/api-key"),
         "concurrency": 8,
+        "agents": agents,
         "split": "sft",
         "seed": 42,
     }
@@ -470,13 +473,14 @@ if __name__ == "__main__":
     parser.add_argument("command", choices=["prepare", "submit", "resume", "supervise", "validate"])
     parser.add_argument("root", type=Path)
     parser.add_argument("--secrets", type=Path)
+    parser.add_argument("--agents", type=int, default=16, help="Agents per production and difficulty-pilot team")
     parser.add_argument("--bucket", help="Writable Hub bucket, namespace/name")
     parser.add_argument("--network-helpers", type=Path, help="Directory containing netavark and aardvark-dns")
     args = parser.parse_args()
     if args.command == "prepare":
         if args.secrets is None or not args.bucket or "/" not in args.bucket or not args.network_helpers:
             parser.error("prepare requires --secrets, --bucket namespace/name and --network-helpers")
-        print(prepare(args.root, args.secrets, args.bucket, args.network_helpers))
+        print(prepare(args.root, args.secrets, args.bucket, args.network_helpers, args.agents))
     elif args.command in ("submit", "resume"):
         print(json.dumps(submit(args.root, resume=args.command == "resume")))
     elif args.command == "validate":

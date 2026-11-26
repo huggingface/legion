@@ -1,6 +1,6 @@
 # AgentEscape swarm SFT collection
 
-Collect Qwen3.5-27B demonstrations with sixteen-agent Harbor/Pi swarms and the
+Collect Qwen3.5-27B demonstrations with Harbor/Pi swarms and the
 existing Legion messageboard. Production is one swarm per frozen SFT scenario:
 25 each at difficulties 5/10/15/20, twelve at 25. Only native-verified winning
 teams enter the export, including all their collaborators' completed responses.
@@ -45,6 +45,9 @@ Use `squeue --me` to see the jobs and `tail -f "$RUN/supervisor.log"` to follow
 the gates. The supervisor writes the production export under `$RUN/dataset-v1/`.
 Use `final-status.json` to distinguish a completed collection from an interrupted one.
 
+Set `--agents 4` on `prepare` for four-agent production teams and difficulty pilots.
+The default is 16. The capture smoke uses two agents in either case.
+
 After a supervisor failure with all pilots completed, use `pipeline.py resume RUN`
 to revalidate and reuse the saved pilots. This requires all prior jobs to be terminal
 and no outstanding attempt reservations. Previous serving state is archived; a new
@@ -57,7 +60,7 @@ nonempty, duplicate, or otherwise unmatched responses still fail the capture gat
 Prepare downloads the pinned registry and tasks, checks all selected scenario
 hashes, and freezes scripts/configuration in the new directory. Submit creates
 an independent router and CPU supervisor with a 24-hour maximum allocation. The supervisor first runs a two-agent
-capture smoke, then five sixteen-agent pilots (one per difficulty). It checks
+capture smoke, then five pilots of the configured team size (one per difficulty). It checks
 capture pairing and native artifacts, exports pilot examples with the actual
 teacher tokenizer, and only then admits the production array. A failed gate
 stops collection and releases this study's jobs. Existing benchmark/RL jobs are
