@@ -1,0 +1,33 @@
+name: ${RUN_NAME:-imo-proofbench}
+model: ${MODEL:-Qwen/Qwen3.8-27B}
+naming: consecutive-id
+inference:
+  urls:
+    - ${SERVER_URL}
+  api_key_env: HF_INFERENCE_TOKEN
+  reasoning_effort: ${REASONING_EFFORT:-off}
+task:
+  repo: https://huggingface.co/datasets/HuggingFaceSwarms/IMO-ProofBench
+  selector: ${TASK_ID}
+  revision: 10d6c29485d5fb117daa9db2b24f1497ea5ae6fc
+agents:
+  count: 4
+team_file: team.md
+resources:
+  message_board:
+    space_id: ${BOARD_SPACE}
+    private: false
+environment:
+  backend: ${ENV_BACKEND:-hf-sandbox}
+workers:
+  agents_per_worker: 4
+  turn_timeout: 6m
+loop:
+  prompt: Continue solving and ensure /app/proof.md contains your final submission.
+  every: turn_end
+  while:
+    until: 30m
+    max_rounds: 100
+limits:
+  run_timeout_seconds: 2400
+  agent_max_turns: 60
