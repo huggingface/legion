@@ -14,6 +14,7 @@ connection errors unless another readiness mechanism replaced them.
 """
 
 import asyncio
+import contextlib
 import json
 import time
 
@@ -50,7 +51,8 @@ async def main():
         for key, task in list(running.items()):
             if task.done():
                 # A failed health check is a container health result, not scheduler failure.
-                task.result()
+                with contextlib.suppress(TimeoutError):
+                    task.result()
                 del running[key]
         if ids:
             code, stdout, _ = await podman("inspect", *ids)

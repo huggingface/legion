@@ -11,6 +11,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import shutil
 import sqlite3
 import threading
 from collections.abc import Callable, Iterable
@@ -428,6 +429,10 @@ class Store:
             self._x("DELETE FROM health_samples WHERE swarm = ?", [name])
             self._x("DELETE FROM usage WHERE swarm = ?", [name])
             self._x("DELETE FROM controls WHERE swarm = ?", [name])
+            self._x("DELETE FROM event_index WHERE swarm = ?", [name])
+            path = self.data_dir / "events" / name
+            if path.exists():
+                shutil.rmtree(path)
 
     # ----------------------------------------------------------------- tools bundles
 
@@ -589,7 +594,7 @@ class Store:
         self._x("DELETE FROM agents WHERE name = ?", [name])
         self._x("DELETE FROM pending_prompts WHERE agent = ?", [name])
         self._x("DELETE FROM agent_tokens WHERE agent = ?", [name])  # revoke
-        self._x("DELETE FROM spawn_keys WHERE parent = ?", [name])
+        self._x("DELETE FROM spawn_keys WHERE parent = ? OR child = ?", [name, name])
         self._x("DELETE FROM loop_agents WHERE agent = ?", [name])
 
     def mark_removing(self, name: str) -> None:
@@ -998,14 +1003,15 @@ class Store:
         return row["lines"] if row else 0
 
     def read_events(self, agent: str, after: int, limit: int = 1000) -> list[dict[str, Any]]:
-        row = self._one("SELECT swarm, lines FROM event_index WHERE agent = ?", [agent])
-        if row is None or after >= row["lines"]:
-            return []
-        out: list[dict[str, Any]] = []
-        with self._events_path(row["swarm"], agent).open(encoding="utf-8") as f:
-            for i, line in enumerate(f):
-                if i >= row["lines"] or len(out) >= limit:
-                    break
-                if i >= after:
-                    out.append(json.loads(line))
-        return out
+        with self._lock:
+            row = self._one("SELECT swarm, lines FROM event_index WHERE agent = ?", [agent])
+            if row is None or after >= row["lines"]:
+                return []
+            out: list[dict[str, Any]] = []
+            with self._events_path(row["swarm"], agent).open(encoding="utf-8") as f:
+                for i, line in enumerate(f):
+                    if i >= row["lines"] or len(out) >= limit:
+                        break
+                    if i >= after:
+                        out.append(json.loads(line))
+            return out

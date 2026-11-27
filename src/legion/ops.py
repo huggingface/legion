@@ -644,6 +644,7 @@ def release_wait(api: Client, swarm: str, *,
 
 
 LOCAL_START_S = 120.0  # s `start_local` waits for a local controller to come up
+LOCAL_STOP_S = VERIFY_WAIT + 30 + 120  # verifier grace plus bundle and shutdown cleanup
 LOCAL_DIR = Path(".legion")  # the local run's data dir and launch.log, in the working directory
 
 
@@ -688,12 +689,15 @@ def start_local(spec: SwarmSpec, spec_file: str, env_files=(),
 
 
 def end_local(run: dict, env: Mapping[str, str] = os.environ) -> None:
-    """SIGTERM a background local run and wait (up to LOCAL_START_S) until it is gone: it
+    """SIGTERM a background local run and wait (up to LOCAL_STOP_S) until it is gone: it
     drains what is left, writes the run bundle (<run_dir>/run.json) and exits (docs/local.md)."""
     with contextlib.suppress(ProcessLookupError):
         os.kill(run["pid"], signal.SIGTERM)
-    end = time.monotonic() + LOCAL_START_S
-    while local_run(env) is not None and time.monotonic() < end:
+    end = time.monotonic() + LOCAL_STOP_S
+    while (current := local_run(env)) is not None and current.get("pid") == run["pid"]:
+        if time.monotonic() >= end:
+            raise SpecError([(f"local run shutdown is still in progress after {LOCAL_STOP_S:g} s; "
+                              f"check {run['run_dir']}")])
         _sleep(0.2)
 
 

@@ -372,3 +372,78 @@ async def test_event_batches_wait_for_a_slot_then_get_503(monkeypatch, store, cl
                          json={"worker": W0, "events": [ev.model_dump(mode="json")]})
         assert r.status_code == 503 and r.headers["retry-after"] == "5"
         assert store.event_count("researcher-0000") == 0
+
+
+async def test_status_keeps_cost_of_deleted_agents(client, store, tick):
+    await apply(client, make_spec(researcher={"replicas": 1}))
+    tick()
+    store.update_agent("researcher-0000", cost=1.25)
+    store.delete_agent("researcher-0000")
+    status = (await client.get("/swarms/demo")).json()["status"]
+    assert status["cost_usd"] == 1.25
+
+
+async def test_words_roster_survives_heartbeat_revision(client, store, clock, tick):
+    from legion.models import TypeSpec, type_spec_rev
+
+    spec = make_spec(researcher={"replicas": 2}).model_copy(update={"naming": "words"})
+    await apply(client, spec)
+    tick()
+    commands = (await client.get(f"/workers/{W0}/commands", params={"wait": 0})).json()["commands"]
+    assigned = next(c for c in commands if c["kind"] == "assign")
+    roster = assigned["spec"]["harbor"]["roster"]
+    assert len(roster) == 2
+    body = hb_body(clock, W0, [])
+    body["spec_rev"] = type_spec_rev(TypeSpec.model_validate(assigned["spec"]))
+    response = (await client.post(f"/workers/{W0}/heartbeat", json=body)).json()
+    assert "type_spec" not in response
+    body["spec_rev"] = "old"
+    response = (await client.post(f"/workers/{W0}/heartbeat", json=body)).json()
+    assert response["type_spec"]["harbor"]["roster"] == roster
+
+
+def test_delete_swarm_removes_event_streams(store, clock):
+    store.put_swarm(make_spec(), 0)
+    store.append_events("demo", "researcher-0000", [
+        Event(type="turn_started", ts=clock(), agent="researcher-0000")])
+    assert store.event_count("researcher-0000") == 1
+    store.delete_swarm("demo")
+    assert store.event_count("researcher-0000") == 0
+    assert not (store.data_dir / "events" / "demo").exists()
+
+
+def test_event_read_and_swarm_deletion_are_serialized(store, clock, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from pathlib import Path
+
+    store.put_swarm(make_spec(), 0)
+    store.append_events("demo", "researcher-0000", [
+        Event(type="turn_started", ts=clock(), agent="researcher-0000")])
+    path = store.data_dir / "events" / "demo" / "researcher-0000.jsonl"
+    opened, resume, deleting = threading.Event(), threading.Event(), threading.Event()
+    real_open = Path.open
+
+    def paused_open(self, *args, **kwargs):
+        if self == path:
+            opened.set()
+            assert resume.wait(5)
+        return real_open(self, *args, **kwargs)
+
+    def delete():
+        deleting.set()
+        store.delete_swarm("demo")
+
+    monkeypatch.setattr(Path, "open", paused_open)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        read = pool.submit(store.read_events, "researcher-0000", 0)
+        try:
+            assert opened.wait(5)
+            deletion = pool.submit(delete)
+            assert deleting.wait(5)
+            assert not deletion.done()
+        finally:
+            resume.set()
+        assert read.result(timeout=5)[0]["type"] == "turn_started"
+        deletion.result(timeout=5)
+    assert store.read_events("researcher-0000", 0) == []

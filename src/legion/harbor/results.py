@@ -20,7 +20,7 @@ def safe_error(exc: BaseException, secrets=()):
     env_secrets = {
         value
         for key, value in os.environ.items()
-        if value and any(name in key.upper() for name in ("TOKEN", "SECRET", "API_KEY"))
+        if len(value) >= 8 and any(name in key.upper() for name in ("TOKEN", "SECRET", "API_KEY"))
     }
     message = str(exc)
     for secret in sorted(

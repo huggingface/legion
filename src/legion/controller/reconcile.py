@@ -651,7 +651,7 @@ def _send_assign(store: Store, worker_id: str, a: Row, type_name: str, ts: TypeS
     # where pending prompts are not delivered until the budget is raised or the hold lifted.
     flags = store.swarm_flags(a["swarm"])
     hard = flags.get("budget_stop") == "hard" or store.held(a, flags)  # or paused
-    hold = bool(resume) and (hard or bool(r and r.inference.max_working))
+    hold = bool(resume) and (hard or bool(ts.max_working or (r and r.inference.max_working)))
     held, resume = (resume, None) if hold else (None, resume)
     if ts.harbor and not ts.harbor.roster:  # words: the run's agents (harbor_roster), with roles
         if roster is None:

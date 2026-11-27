@@ -205,7 +205,7 @@ class HarborAdapter:
                 finally:
                     self._closing = False
                     self._prompts = asyncio.Queue()
-        if run is not None and run.done() and self.spec.harbor.config.get("success_check"):
+        if run is not None and run.done():
             try:
                 await asyncio.to_thread(self._keep_result)
             except Exception as exc:  # noqa: BLE001 - cleanup must still stop the environment
