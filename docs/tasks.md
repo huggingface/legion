@@ -121,7 +121,8 @@ workers:
 ```
 
 `workers.env` is stored in the spec and reaches the worker job as plain environment, so names
-containing `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL` or `AUTH` are refused. A task
+Harbor treats as sensitive are refused: those containing `KEY`, `TOKEN` (but not `TOKENS`),
+`SECRET`, `PASSWORD`, `CREDENTIAL` or `AUTH`. A task
 secret goes in the worker host's environment instead: on Slurm add `NAME=value` to `run.env`,
 which every worker job sources ([Slurm](slurm.md)). The
 [pybot spec](../experiments/pybot/spec.yaml) is a working example.

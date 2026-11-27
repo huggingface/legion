@@ -53,12 +53,13 @@ See [tasks.md](tasks.md) "Select it in Legion".
 ## 2026-11-20: `bucket:` is now `bucket_id:`
 
 [huggingface/legion#131](https://github.com/huggingface/legion/pull/131) (93f5ae3) removed
-`bucket:`. Write `bucket_id:` with a bare name (`legion-runs`, under `HF_TOKEN`'s account) or
-`<namespace>/<name>`; `hf://buckets/...` URLs are refused there.
+`bucket:`. Write `bucket_id:` with a bare name (`legion-runs`, under the spec's `namespace` if
+set, otherwise `HF_TOKEN`'s account) or `<namespace>/<name>`; `hf://buckets/...` URLs are
+refused there.
 
 - `bucket: hf://buckets/ns/name` → `bucket_id: ns/name`.
-- A spec that still says `bucket:` loads without a bucket: `compute: slurm` and `hf-jobs` fail
-  with "bucket_id is required", and a local run keeps no Hub checkpoint.
+- An experiment spec that still says `bucket:` no longer loads: `legion launch` and `legion init`
+  report `bucket: Extra inputs are not permitted`, on every `compute`.
 
 See [billing.md](billing.md).
 
