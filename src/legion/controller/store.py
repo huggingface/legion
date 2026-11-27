@@ -1003,14 +1003,15 @@ class Store:
         return row["lines"] if row else 0
 
     def read_events(self, agent: str, after: int, limit: int = 1000) -> list[dict[str, Any]]:
-        row = self._one("SELECT swarm, lines FROM event_index WHERE agent = ?", [agent])
-        if row is None or after >= row["lines"]:
-            return []
-        out: list[dict[str, Any]] = []
-        with self._events_path(row["swarm"], agent).open(encoding="utf-8") as f:
-            for i, line in enumerate(f):
-                if i >= row["lines"] or len(out) >= limit:
-                    break
-                if i >= after:
-                    out.append(json.loads(line))
-        return out
+        with self._lock:
+            row = self._one("SELECT swarm, lines FROM event_index WHERE agent = ?", [agent])
+            if row is None or after >= row["lines"]:
+                return []
+            out: list[dict[str, Any]] = []
+            with self._events_path(row["swarm"], agent).open(encoding="utf-8") as f:
+                for i, line in enumerate(f):
+                    if i >= row["lines"] or len(out) >= limit:
+                        break
+                    if i >= after:
+                        out.append(json.loads(line))
+            return out

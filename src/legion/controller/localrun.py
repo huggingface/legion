@@ -681,13 +681,13 @@ async def run_local(opts: RunOptions) -> RunResult:
             uv_log.setLevel(logging.CRITICAL)
             await server.stop()
             uv_log.setLevel(level)
-            clear_current(data_dir, os.getpid())
             if state is not None:
                 try:
                     await asyncio.to_thread(state.push, store, force=True, final=True)
                 except Exception:
                     log.exception("final state push failed")
             store.close()
+            clear_current(data_dir, os.getpid())
             logging.getLogger().removeHandler(handler)
             handler.close()
     say(f"run {run_dir.name}: {reason}; {totals.get('agents', 0)} agents, "

@@ -20,7 +20,7 @@ import yaml
 from typer.testing import CliRunner
 
 from legion import cli
-from legion.client import connect
+from legion.client import Client, connect
 from legion.controller import local, localrun
 from legion.controller.api import create_app
 from legion.controller.local import LocalJobsClient
@@ -508,3 +508,23 @@ def test_default_grace_allows_verifier_to_finish():
     from legion.worker.agents import VERIFY_WAIT
 
     assert localrun.RunOptions(spec=local_spec()).grace >= VERIFY_WAIT + 30
+
+
+@pytest.mark.parametrize("finish_at", [200, None])
+def test_stop_waits_for_local_shutdown_and_reports_timeout(monkeypatch, finish_at):
+    from legion import ops
+
+    now = [0.0]
+    run = {"pid": 123, "swarm": "loc", "run_dir": "/tmp/local-run"}
+    monkeypatch.setattr(ops.os, "kill", lambda *args: None)
+    monkeypatch.setattr(ops.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(ops, "_sleep", lambda _: now.__setitem__(0, now[0] + 1))
+    monkeypatch.setattr(ops, "local_run", lambda env: None if finish_at and now[0] >= finish_at else run)
+    api = Client(env={})
+    if finish_at:
+        assert ops.stop(api, "loc", delete=True) == {"ended": run}
+        assert now[0] == finish_at
+    else:
+        with pytest.raises(ops.SpecError, match="shutdown is still in progress"):
+            ops.stop(api, "loc", delete=True)
+        assert now[0] >= ops.LOCAL_STOP_S >= 330

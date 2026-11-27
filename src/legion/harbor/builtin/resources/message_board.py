@@ -494,9 +494,10 @@ class Resource:
     def bind(self, name):
         credential = self.credentials[name]
         env = {"MSGBOARD_URL": self.url, "MSGBOARD_TOKEN": credential["token"]}
-        if self.space and self.space.private:
-            # Client.from_env sends it to the Space's gate, and the board token apart.
-            env["MSGBOARD_HF_TOKEN"] = self.hf_token
+        gate = self._gate()
+        if gate:
+            # Client.from_env sends the gate credential and board token separately.
+            env["MSGBOARD_HF_TOKEN"] = gate["headers"]["Authorization"].removeprefix("Bearer ")
         mounts = []
         hosts = [urlsplit(self.url).hostname]
         source = self._proxy(name) if self._ruled() else self.socket_path  # legion: or a proxy

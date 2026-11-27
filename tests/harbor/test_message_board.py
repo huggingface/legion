@@ -150,3 +150,52 @@ def test_url_space_gate_uses_hf_token(tmp_path, monkeypatch):
                             state_dir=tmp_path, agents=[], secrets=[])
     assert runtime._gate() == {"headers": {"Authorization": "Bearer hf-secret"},
                                "token_header": "X-Msgboard-Token"}
+
+
+async def test_space_url_http_binding_authenticates_agent_request(board, tmp_path, monkeypatch):
+    import httpx
+
+    url = "https://private-board.hf.space"
+    monkeypatch.setenv("MSGBOARD_OPERATOR_TOKEN", board.operator_token)
+    monkeypatch.setenv("HF_TOKEN", "hf-gate-secret")
+    monkeypatch.delenv("MSGBOARD_SOCKET", raising=False)
+    real_client = httpx.Client
+    forward = real_client()
+    seen = []
+
+    def gate(request):
+        seen.append((request.headers.get("authorization"), request.headers.get("x-msgboard-token")))
+        if request.headers.get("authorization") != "Bearer hf-gate-secret":
+            return httpx.Response(401, request=request)
+        headers = dict(request.headers)
+        board_token = headers.pop("x-msgboard-token", None)
+        if board_token:
+            headers["authorization"] = f"Bearer {board_token}"
+        else:
+            headers.pop("authorization", None)
+        headers.pop("host", None)
+        response = forward.request(request.method, board.url + request.url.raw_path.decode(),
+                                   headers=headers, content=request.content)
+        return httpx.Response(response.status_code, headers=response.headers,
+                              content=response.content, request=request)
+
+    def gated_client(*args, **kwargs):
+        if kwargs.get("base_url") == url:
+            kwargs["transport"] = httpx.MockTransport(gate)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "Client", gated_client)
+    resource = BoardResource({"url": url, "transport": "http"},
+                             state_dir=tmp_path / "external", agents=["agent-001"], secrets=[])
+    try:
+        await resource.start()
+        binding = resource.bind("agent-001")
+        for key, value in binding["env"].items():
+            monkeypatch.setenv(key, value)
+        board_tools.post("private space message")
+        assert seen[-1] == ("Bearer hf-gate-secret", binding["env"]["MSGBOARD_TOKEN"])
+        with Client(board.url, board.operator_token) as client:
+            assert client.read(client.channel_id("general"))["messages"][-1]["body"] == "private space message"
+    finally:
+        await resource.stop()
+        forward.close()
