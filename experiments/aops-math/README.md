@@ -27,6 +27,14 @@ the model server.
   card has the vLLM command we used (Qwen3.5: presence penalty 0, higher values break tool calls).
 - `HF_TOKEN` with read access to the dataset. Git must be able to clone it, e.g. `hf auth login --add-to-git-credential`.
 
+**On Podman** (both hit on the HF cluster):
+
+- Harbor 0.25's network allow-list runs `podman-compose exec --no-TTY`, which podman-compose rejects, so every task
+  fails at start (closed, never open). Until Harbor fixes it, change `"--no-TTY"` to `"-T"` in
+  `harbor/environments/docker/docker.py` (`_apply_network_policy`) in your environment.
+- Docker Hub pulls from the cluster's shared IP time out: point Podman at a mirror with `CONTAINERS_REGISTRIES_CONF`
+  (a registries.conf with `mirror.gcr.io` for `docker.io`).
+
 **Cost**: nothing beyond your own model server. One task takes about 30 min (the loop's `until`).
 
 **Launch**
