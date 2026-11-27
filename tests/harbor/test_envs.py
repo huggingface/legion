@@ -6,14 +6,15 @@ in an argv)."""
 import asyncio
 import collections
 import importlib.metadata
+import os
 import re
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from harbor.environments import e2b, hf_sandbox
+from harbor.environments import e2b, hf_sandbox, podman
 from harbor.environments.base import ExecResult
-from harbor.environments.docker import docker
+from harbor.environments.docker import docker, runtime
 from harbor.environments.factory import EnvironmentFactory
 from harbor.models.task.config import EnvironmentConfig, NetworkMode, NetworkPolicy
 from harbor.models.trial.config import EnvironmentConfig as TrialEnvironmentConfig
@@ -104,8 +105,9 @@ async def _done():
 def test_the_copied_start_matches_the_pinned_harbor():
     """HFSandbox.start is Harbor 0.25.0's, copied: a Harbor upgrade must re-copy it (and check
     that _EnvOffArgv still sees `compose exec -e NAME=value`, and whether Podman still needs
-    `--no-TTY` rewritten)."""
+    `--no-TTY` rewritten). legion.harbor.podman_compose patches podman-compose 1.5's rec_subs."""
     assert importlib.metadata.version("harbor") == "0.25.0"
+    assert importlib.metadata.version("podman-compose") == "1.5.0"
 
 
 def compose(monkeypatch, tmp_path, backend, secret_names, config=None, **env_kwargs):
@@ -179,3 +181,41 @@ async def test_network_policy_exec_flag(monkeypatch, tmp_path, backend, flag, st
     (argv, _), = runs
     assert argv[argv.index("exec"):] == ("exec", flag, "harbor-docker-egress-control-sidecar",
                                          "network-policy", "allow", "example.com")
+
+
+async def test_a_bare_exec_secret_interpolates_in_podman_compose(monkeypatch, tmp_path):
+    """podman-compose 1.5 (the real provider, on a fake `podman` engine) gets the agent's
+    secret as a bare `--env HF_TOKEN`, its value in the environment: a task compose file's
+    `${HF_TOKEN:?required}` reads that value (podman-compose alone read it as unset and failed),
+    and legion's own `--env` stays bare (the task's `environment:` is podman-compose's to pass)."""
+    bin_dir, log = tmp_path / "bin", tmp_path / "podman.log"
+    bin_dir.mkdir()
+    (bin_dir / "podman").write_text(
+        '#!/bin/sh\n[ "$1" = --version ] && { echo "podman version 4.9.3"; exit 0; }\n'
+        f'printf "%s\\n" "$*" >> {log}\n')
+    (bin_dir / "podman").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    # Harbor's pick on a host with podman-compose 1.x only (its probe runs podman)
+    monkeypatch.setattr(podman, "resolve_podman_runtime",
+                        lambda: runtime._podman_compose_1x(("podman-compose",)))
+    for cached in (podman.PodmanEnvironment.runtime, envs.Podman.runtime):
+        cached.__func__.cache_clear()
+    (tmp_path / "environment").mkdir()
+    (tmp_path / "environment" / "docker-compose.yaml").write_text(
+        "services:\n  main:\n    environment:\n      TOKEN: ${HF_TOKEN:?required}\n")
+    env = EnvironmentFactory.create_environment_from_config(
+        TrialEnvironmentConfig(type="podman", import_path=ENVIRONMENTS["podman"],
+                               kwargs={"secret_names": ["HF_TOKEN"]}),
+        environment_dir=tmp_path / "environment", environment_name="t", session_id="s",
+        trial_paths=TrialPaths(tmp_path / "trial"),
+        task_env_config=EnvironmentConfig(docker_image="python:3.12"))
+    try:
+        result = await env.exec("true", env={"HF_TOKEN": "s3cret"})
+    finally:
+        for cached in (podman.PodmanEnvironment.runtime, envs.Podman.runtime):
+            cached.__func__.cache_clear()
+    assert result.return_code == 0, result.stdout
+    (exec_argv,) = [line for line in log.read_text().splitlines() if line.startswith("exec ")]
+    assert "--env TOKEN=s3cret " in exec_argv  # the compose file, interpolated
+    assert "--env HF_TOKEN " in exec_argv and "HF_TOKEN=" not in exec_argv

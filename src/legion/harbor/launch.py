@@ -33,8 +33,8 @@ from .tools.setup import TOOLS_MANIFEST, attach_tool_setup
 
 
 def environment_config(config):
-    """The Trial's environment, on legion's subclass of Harbor's (`ENVIRONMENTS`): standalone
-    Trials too get podman's `-T` and no secret in an argv."""
+    """The Trial's environment. Podman's is legion's (`ENVIRONMENTS`), so a standalone Trial
+    too sends podman-compose `-T`, not Harbor's `--no-TTY`; the others are Harbor's own."""
     backend = config.environment.backend
     if backend == "hf-sandbox":
         # The sandbox's idle timeout doesn't count a running foreground command as
@@ -42,7 +42,6 @@ def environment_config(config):
         # delete=True kills the sandbox (an HF Job) when the trial ends.
         return EnvironmentConfig(
             type=backend,
-            import_path=ENVIRONMENTS[backend],
             kwargs={
                 "flavor": config.environment.flavor,
                 "job_timeout": math.ceil(config.limits.run_timeout_seconds) + 60,
@@ -53,14 +52,13 @@ def environment_config(config):
         # E2B's timeout is the sandbox's whole lifetime; stop kills it when the trial ends.
         return EnvironmentConfig(
             type=backend,
-            import_path=ENVIRONMENTS[backend],
             kwargs={"sandbox_timeout_secs": math.ceil(config.limits.run_timeout_seconds) + 60},
             delete=True,
         )
     # Podman Compose force-removes shared images with `down --rmi local`.
     # delete=False still removes trial containers; job cleanup owns images.
-    return EnvironmentConfig(type=backend, import_path=ENVIRONMENTS[backend],
-                             delete=backend != "podman")
+    return EnvironmentConfig(type=backend, delete=backend != "podman",
+                             import_path=ENVIRONMENTS[backend] if backend == "podman" else None)
 
 
 # Where a podman container reaches the machine it runs on: podman puts the name in every
