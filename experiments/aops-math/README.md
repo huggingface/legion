@@ -37,6 +37,7 @@ uv run legion launch experiments/aops-math/spec.yaml
 ```
 
 `uv run legion status` shows progress. The run bundle, with each agent's answer and grade, is written under
-`.legion/` when the run ends. Scoring the team (majority vote over the agents' answers, plus an optional LLM judge for
-structured answers the exact grader rejects), other team sizes, a single agent and one agent given a team's tokens are
-in the dataset card (`setups/`).
+`.legion/` when the run ends. To score the team (majority vote over the agents' answers, plus an optional LLM judge
+for structured answers the exact grader rejects), pass the agents' Harbor trials (or a folder above them) to the
+dataset's `grading/score.py`. Its command line is in the card's
+[Grading](https://huggingface.co/datasets/HuggingFaceSwarms/aops-math-bench#grading) section.
