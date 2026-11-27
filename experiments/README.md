@@ -15,6 +15,29 @@ needs, what it costs and how to launch it.
 - [s3-maze](s3-maze/spec.yaml): agents search their own copies of one tree of rooms for its exit ([docs](../docs/tasks.md#s3-maze)).
 - [smallmath](smallmath/README.md): teams solve exact-integer math tasks with difficulty-stratified scoring.
 
+## What goes in a folder
+
+Everything legion-specific for one experiment lives in `experiments/<exp>/`; the dataset it runs
+holds plain Harbor tasks only ([docs/tasks.md](../docs/tasks.md#where-things-live)).
+
+```text
+experiments/<exp>/
+  spec.yaml        # the entry point: `legion launch experiments/<exp>`; variants as more specs
+  team.md          # the spec's team_file, if any
+  prompts/         # role and loop prompts, if any
+  tools/           # the spec's tools_dir: legion tools only this experiment uses
+  score.py         # scorers or metrics over a run's results, and sweep scripts, if any
+  README.md        # what it needs, what it costs, how to launch it
+```
+
+- The spec loads with `Spec.load` and launches with `legion launch`. No other config format or
+  a dataset's own CLI as the entry point.
+- Pin the dataset with `task.revision`. Never point `tools_dir`, `team_file` or another path
+  into a dataset download (`../../<dataset>/...`): the experiment then depends on where someone
+  downloaded it and on files the pinned revision doesn't cover. Copy what legion needs here.
+- Task text and `team.md` don't name tool commands (`legion-tool ...`); legion's agent
+  instructions describe the tools.
+
 ## Where agents run
 
 `environment.backend` picks where each agent's Harbor Trial runs; `compute` picks where legion's

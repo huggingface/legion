@@ -273,6 +273,10 @@ def test_cli_update_probes_a_model_sent_somewhere_new(tmp_path, monkeypatch, app
     f.write_text(yaml.safe_dump(d))
     r = runner.invoke(cli.app, ["update", str(exp), "--strict"])
     assert r.exit_code == 1 and "preflight inference:m: unverified" in r.output, r.output
+    d["inference"]["preflight"] = False
+    f.write_text(yaml.safe_dump(d))
+    r = runner.invoke(cli.app, ["update", str(exp), "--check", "--strict"])
+    assert r.exit_code == 1 and "preflight inference:m: unverified" in r.output, r.output
 
 
 def test_cli_update_keeps_live_replicas_and_checks(tmp_path, monkeypatch, app, store, tick):

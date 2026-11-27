@@ -217,10 +217,17 @@ class Resource:
 
     def _gate(self):
         """Client options for a private Space: its gate takes the launcher's HF token."""
-        if not (self.space and self.space.private):
+        hf_token = self.hf_token
+        if self.options.url and (httpx.URL(self.options.url).host or "").endswith(".hf.space"):
+            hf_token = get_token()
+            if hf_token and hf_token not in self.secrets:
+                self.secrets.append(hf_token)
+        elif not (self.space and self.space.private):
+            return {}
+        if not hf_token:
             return {}
         return {
-            "headers": {"Authorization": f"Bearer {self.hf_token}"},
+            "headers": {"Authorization": f"Bearer {hf_token}"},
             "token_header": "X-Msgboard-Token",
         }
 
@@ -487,9 +494,10 @@ class Resource:
     def bind(self, name):
         credential = self.credentials[name]
         env = {"MSGBOARD_URL": self.url, "MSGBOARD_TOKEN": credential["token"]}
-        if self.space and self.space.private:
-            # Client.from_env sends it to the Space's gate, and the board token apart.
-            env["MSGBOARD_HF_TOKEN"] = self.hf_token
+        gate = self._gate()
+        if gate:
+            # Client.from_env sends the gate credential and board token separately.
+            env["MSGBOARD_HF_TOKEN"] = gate["headers"]["Authorization"].removeprefix("Bearer ")
         mounts = []
         hosts = [urlsplit(self.url).hostname]
         source = self._proxy(name) if self._ruled() else self.socket_path  # legion: or a proxy

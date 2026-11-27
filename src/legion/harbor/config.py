@@ -228,5 +228,5 @@ class Config(Settings):
             skip_model_parsing=True,
             base_url=self.inference.endpoints[0],
             model_api_key_name=name,
-            model_api_format="openai_chat_completions",
+            model_api_format=self.inference.api_format,
         )

@@ -7,6 +7,11 @@ unless `tools` is set (experiments/pybot/spec.yaml). Its mentions come back as
 `resource` events, which wake loops whose `loop.on` lists `message_board.*` (docs/loop.md "Wake
 queue"). Only `message_board.*` wakes are fed.
 
+`message_board.read` and `wait` with `unread: true` keep the agent's place per channel in a file in
+its container (`/tmp/legion-board/`), not in the saved session: a new Trial or worker (a Slurm
+rotation, a preemption, a resume) starts from the channel's first message again, and the agent is
+shown the history it already read.
+
 ## Where the board runs
 
 Each legion worker starts the run's resources itself, so where the board runs decides how many

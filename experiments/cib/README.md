@@ -2,31 +2,83 @@
 
 One Pi agent is evaluated as a teammate in four dimensions of
 [Stanford's Collaborative Intelligence Benchmark](https://github.com/zou-group/collaborative-intelligence).
-The Harbor task runs the other teammates and judges in separate containers.
+Each Harbor task of the
+[dataset](https://huggingface.co/datasets/HuggingFaceSwarms/collaborative-intelligence-benchmark)
+runs the other teammates, the judges and a model gateway (`model-compat`) in its own containers.
+`spec.yaml` runs one task (a case) with `legion launch`.
 
-**Setup:** follow the [dataset quickstart](https://huggingface.co/datasets/HuggingFaceSwarms/collaborative-intelligence-benchmark#setup)
-to clone `cib-harbor` beside this Legion checkout and configure credentials: the evaluated model's key and
-the team's (partner and judge keys and a Qwen3-14B endpoint), which are needed even for a solo episode.
-You need Linux, rootless Podman (`config.yaml` uses `environment.backend: podman`), and access to the dataset.
-Inference is paid, including partner and judge calls.
-On the HF cluster, run it on a hopper-cpu node and follow the dataset's
-[Podman setup](https://huggingface.co/datasets/HuggingFaceSwarms/collaborative-intelligence-benchmark/blob/main/adapter/README.md#podman).
-On a local machine that runs dockerd, `environment.backend: docker` works too ([Local runs](../README.md#local-runs)).
+## Setup
 
-**Run one Gemini solo episode** from the Legion checkout. To check the setup first without model calls,
-run `collab-intel-harbor-sweep` with the same config, `--dataset-root ../cib-harbor --output results/cib/plan --plan-only`.
+- Linux, rootless Podman 4+ (the spec's default backend), Python 3.12+, uv, Git and Git LFS.
+  With dockerd, set `BACKEND=docker`.
+- Read access to the private dataset through Git: `hf auth login --add-to-git-credential`.
+- On an HF cluster CPU node, use Legion’s [Podman setup](../../docs/slurm.md).
+- Inference is paid, including the partner and judge calls of team episodes.
+
+Credentials stay in the shell that runs `legion launch`; local workers inherit it and compose
+passes them to the task's services. The spec only names them.
+
+| Variable | Purpose |
+|---|---|
+| the evaluated model's key, e.g. `GEMINI_API_KEY` | Pi's calls through the gateway (`MODEL_KEY_ENV` names it) |
+| `CI_PRIVATE_READOUT_API_KEY` | the same key, for the team's private final-answer call |
+| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` | partner models and judges |
+| `HARNESS_VLLM_ENDPOINTS` + `HARNESS_VLLM_API_KEY`, or `HARNESS_OPENAI_COMPAT` + `CI_PARTNER_QWEN14_API_KEY` | the Qwen3-14B partner ([dataset README](https://huggingface.co/datasets/HuggingFaceSwarms/collaborative-intelligence-benchmark#setup)) |
+| `ANTHROPIC_WORKSPACE_ID` | only if your Anthropic key requires it |
+
+## Run one case
 
 ```sh
-uv run --locked --with '../cib-harbor/adapter[hub]' collab-intel-harbor-run \
-  --config experiments/cib/config.yaml
+export GEMINI_API_KEY=...   # plus the team's keys
+export CI_PRIVATE_READOUT_API_KEY="$GEMINI_API_KEY"
+uv run legion launch experiments/cib/spec.yaml
+uv run legion status cib
 ```
 
-The recipe pins a Legion-compatible revision of the dataset. This benchmark uses the dataset's launcher
-with Legion's native Harbor runner.
-Its native config has no Legion `namespace` field: model billing is configured at the
-benchmark's Gemini gateway, independently of HF Jobs and Inference Providers.
-Keep one evaluated agent; the task supplies its teammates. The benchmark launcher configures
-its model gateway and preserves Stanford's solo eligibility rule and score aggregation.
+`CASE` picks the task (default: one Sharing solo). The run sends the task's instruction to the
+agent once, ends after that turn and grades it: the verifier's result is
+`.legion/<run>/agents/_harbor/agent-001/trials/*/verifier/result.json`. The model's endpoint,
+`http://model-compat:8003`, exists only inside the Trial, so the spec sets
+`inference.preflight: false` and the controller reports its probe as unverified. Use the case
+driver below to score a single run against its Legion host and Harbor Trial evidence.
 
-For the four-dimension sweep, other models and results, use the
-[dataset instructions](https://huggingface.co/datasets/HuggingFaceSwarms/collaborative-intelligence-benchmark#run).
+## Other models
+
+Set the variables for one command, as the spec reads them:
+
+| Model | Variables |
+|---|---|
+| Gemini 3.8 Flash (default) | `GEMINI_API_KEY` |
+| GPT-6.1 Sol, Responses API | `MODEL=gpt-6.1-sol MODEL_KEY_ENV=OPENAI_API_KEY API_FORMAT=openai_responses CI_MODEL_UPSTREAM=https://api.openai.com/v1 CI_PRIVATE_READOUT_API=openai-responses` |
+| Claude Opus 5.5, Messages API | `MODEL=claude-opus-5-5 MODEL_KEY_ENV=ANTHROPIC_API_KEY API_FORMAT=anthropic_messages GATEWAY_URL=http://model-compat:8003 CI_MODEL_UPSTREAM=https://api.anthropic.com/v1 CI_PRIVATE_READOUT_API=anthropic-messages` (add `CI_MODEL_HEADERS='{"anthropic-workspace-id": "..."}'` if your key needs it) |
+| DeepSeek-V4.1-Flash on the HF router, thinking off | `MODEL=deepseek-ai/DeepSeek-V4.1-Flash:together MODEL_KEY_ENV=HF_INFERENCE_TOKEN EFFORT=off CI_MODEL_UPSTREAM=https://router.huggingface.co/v1 CI_MODEL_BODY='{"reasoning": {"enabled": false}}' CI_PRIVATE_READOUT_API=openai-compat-chat` (optional `CI_MODEL_HEADERS='{"X-HF-Bill-To": "<org>"}'`) |
+| Another OpenAI-compatible endpoint | `MODEL=<id> MODEL_KEY_ENV=<key var> CI_MODEL_UPSTREAM=https://<endpoint>/v1 CI_PRIVATE_READOUT_API=openai-compat-chat` |
+
+`CI_PRIVATE_READOUT_API_KEY` is always the evaluated model's key. `CI_MODEL_HEADERS` and
+`CI_MODEL_BODY` reach only the evaluated model's calls, never the partners' or judges'.
+
+## A whole dimension
+
+The benchmark runs each scenario's solo first; a passing solo unlocks three team seeds, and the
+dataset's scorer aggregates them. Until `legion sweep` exists, `parity.py` runs one dimension
+that way, one `legion launch` per case in its own folder, and writes `scores.json` with the
+pinned dataset's scorer. It
+needs a clone of the dataset at the spec's revision and supports Sharing (`manifest.json`); the
+other dimensions use aliases and reader grading, which the
+[dataset's sweep](https://huggingface.co/datasets/HuggingFaceSwarms/collaborative-intelligence-benchmark#run)
+still handles.
+
+```sh
+git clone https://huggingface.co/datasets/HuggingFaceSwarms/collaborative-intelligence-benchmark ../cib-harbor
+git -C ../cib-harbor checkout 2404577cc0b03402a86b7195ac62500664f3a75e
+git -C ../cib-harbor lfs pull
+uv run --with ../cib-harbor/adapter python experiments/cib/parity.py --dataset ../cib-harbor \
+  --output results/cib/sharing --concurrency 2
+```
+
+Add `--case <task-id>` to run and score just one case with incomplete coverage allowed.
+Running the same configuration again reuses admitted cases and waits for live local controllers.
+Unavailable attempts are retained when the driver starts a retry. Use a fresh output directory
+for a new model, gateway configuration or manifest. If a sparse dataset checkout leaves Git LFS
+pointer files in place of task archives, include the root `.gitattributes` and fetch the archives
+before launching.

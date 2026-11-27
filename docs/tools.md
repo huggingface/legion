@@ -32,8 +32,11 @@ types include `str`, `int`, `float`, `bool`, `None`, unions, `Literal`, typed li
 and dictionaries with string keys. Defaults become optional arguments. Return
 JSON-serializable values; synchronous and asynchronous functions are supported.
 
-Legion includes tool descriptions in the agent instructions. Inside the task
-environment, the agent invokes them with:
+Legion includes tool descriptions in the agent instructions, each with an example
+call made of its required arguments. When those alone are not a valid call (say a
+tool needs one of two optional arguments), name one in the module's `EXAMPLES`,
+e.g. `EXAMPLES = {"add": {"x": 2}}`. Inside the task environment, the agent
+invokes them with:
 
 ```sh
 legion-tool calculator.add --json '{"x": 2, "y": 3}'

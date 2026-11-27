@@ -13,15 +13,15 @@ from typing import Any
 @dataclass(frozen=True)
 class HarnessEntry:
     adapter: str  # "module:function"; function(workdir, agent name, TypeSpec) -> HarnessAdapter
-    # (harbor's also takes `host=`, the worker's HarborHost)
-    api: str  # the wire API it speaks to its inference endpoints (preflight probes this one)
+    # (harbor's also takes `host=`, the worker's HarborHost). The wire API it speaks to its
+    # inference endpoints is the block's `api_format`.
 
 
 HARNESSES: dict[str, HarnessEntry] = {
     # one Harbor Trial per agent on the upstream Harbor task path (legion.harbor). Harbor installs Pi
     # (legion.harbor.config.PI_VERSION) in the task's container and the Trial delivers the
     # instructions
-    "harbor": HarnessEntry("legion.worker.adapters.harbor:make_adapter", "chat_completions"),
+    "harbor": HarnessEntry("legion.worker.adapters.harbor:make_adapter"),
 }
 
 # `compute.kind` / LEGION_COMPUTE -> "module:function"; function(env, deployment, data_dir) ->
