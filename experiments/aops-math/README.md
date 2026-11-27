@@ -5,19 +5,17 @@ works in its own container and writes its final answer to `/app/answer.txt`: one
 expression. A hidden grader in the container checks it exactly. The tasks are in
 `HuggingFaceSwarms/aops-math-bench` (private): 200 problems with a numeric answer and 200 with a structured one.
 
-The folder has the spec and the prompt; the board tools come with the dataset:
+The folder has the spec and the prompt; the board tools are legion's own:
 
 - `spec.yaml`: the team, the board rules (posts up to 2000 characters, at least 5 s apart, 40 per agent) and the loop.
   Each agent is prompted once and woken by its teammates' posts. At `until: 30m` the loop stops, and every agent gets
   a final prompt to leave just its answer in `/app/answer.txt`. The run then ends by itself.
-- `team.md`: how to work as a team and use the board.
-- the board tools (`board.post`, `board.read`, `board.wait`), from the dataset's `setups/tools/` (downloaded below).
-  Agents write a post to a file and then post it, so math, quotes and `$` never pass through the shell; reads return
-  only unseen posts, one line each.
+- `team.md`: how to work as a team and use legion's board tools (`message_board.post`, `read`, `wait`). Agents
+  write a post to a file and post it with `path`, so math, quotes and `$` never pass through the shell; `read` and
+  `wait` with `unread` and `compact` return only unseen posts, one line each.
 
-Each agent may write at most 32,768 output tokens (`loop.while.agent_usd` with `pricing: [0, 1, 0]`, i.e. $1 per 1M
-output tokens; the prices are not real). The task revision pinned in the spec blocks the agents' network, except
-the model server.
+Each agent may write at most 32,768 output tokens, reasoning included (`loop.while.agent_output_tokens`). The task
+revision pinned in the spec blocks the agents' network, except the model server.
 
 **Needs**
 
@@ -27,14 +25,6 @@ the model server.
   card has the vLLM command we used (Qwen3.5: presence penalty 0, higher values break tool calls).
 - `HF_TOKEN` with read access to the dataset. Git must be able to clone it, e.g. `hf auth login --add-to-git-credential`.
 
-**On Podman** (both hit on the HF cluster):
-
-- Harbor 0.25's network allow-list runs `podman-compose exec --no-TTY`, which podman-compose rejects, so every task
-  fails at start (closed, never open). Until Harbor fixes it, change `"--no-TTY"` to `"-T"` in
-  `harbor/environments/docker/docker.py` (`_apply_network_policy`) in your environment.
-- Docker Hub pulls from the cluster's shared IP time out: point Podman at a mirror with `CONTAINERS_REGISTRIES_CONF`
-  (a registries.conf with `mirror.gcr.io` for `docker.io`).
-
 **Cost**: nothing beyond your own model server. One task takes about 30 min (the loop's `until`).
 
 **Launch**
@@ -42,8 +32,6 @@ the model server.
 From the repository root:
 
 ```sh
-hf download HuggingFaceSwarms/aops-math-bench --repo-type dataset --revision 3f6f3d5f1f03ea2fc92b303c91036085a957aadb \
-  --include "setups/tools/*" --local-dir aops-math-bench
 export MODEL=<served model> SERVER_URL=http://<host>:<port>/v1 TASK_ID=1e0f5b785c687e40
 uv run legion launch experiments/aops-math/spec.yaml
 ```
