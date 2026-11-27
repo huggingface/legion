@@ -339,6 +339,9 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
                              "sandboxes; the router's default key) and would reach every "
                              "agent's container: name an inference-only token, e.g. "
                              "HF_INFERENCE_TOKEN")
+        if "gateway" in spec.resources and inference.api_format != "openai_chat_completions":
+            raise ValueError(f"{where}.api_format: resources.gateway relays only "
+                             "openai_chat_completions")
     board = spec.resources.get("message_board") or {}
     if remote and board.get("space_id") and board.get("private") is not False:
         raise ValueError("resources.message_board.private: set it to false: a private Space's "

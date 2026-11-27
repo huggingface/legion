@@ -642,6 +642,12 @@ def test_a_gateway_runs_on_sandbox_hf_jobs_workers(tmp_path):
     data["environment"] = {"backend": "hf-sandbox"}  # the other sandbox backend
     (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
     Spec.load(tmp_path / "spec.yaml", env={})
+    inference = data.get("inference")
+    data["inference"] = {"urls": ["https://m.example/v1"], "api_format": "openai_responses"}
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    with pytest.raises(ValueError, match="resources.gateway relays only openai_chat_completions"):
+        compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
+    data["inference"] = inference
     data["environment"] = {"backend": "e2b"}
     env = {"name": "ants", "upstream": "http://u", "secret_env": "ANT_ENV_SECRET",
            "credential_env": "ANT_TOKEN_{seat}", "headers": {"Authorization": "{credential}"},
