@@ -57,6 +57,16 @@ paths from the publishing machine. Build and verify it with Harbor before
 publishing, including a known successful submission and an incorrect submission.
 Commit the task to the dataset and record the full commit SHA.
 
+## Where things live
+
+- **The dataset** holds plain Harbor tasks: `tasks/<task-name>/`, plus any generators, graders
+  and checks that run through Harbor. It has no legion specs, imports, tool modules or drivers,
+  and nothing that reads `.legion/`, so it runs under Harbor alone.
+- **Legion's `experiments/<exp>/`** holds everything legion-specific for it: `spec.yaml` (and
+  variant specs), `team.md`, `tools/`, sweep scripts, scorers and a README
+  ([experiments/README.md](../experiments/README.md)). The spec pins the dataset with
+  `task.revision`; no path in it points into a dataset download.
+
 ## Select it in Legion
 
 Add this block to a working experiment spec:
@@ -97,6 +107,24 @@ For a private dataset, the process resolving and downloading the task needs Git
 credentials with read access. Configure your existing HF login for Git, for
 example with `hf auth login --add-to-git-credential`. Do not put tokens in the URL
 or commit them in the spec.
+
+## Pass values to a task (`workers.env`)
+
+A task's `task.toml` can read values from the worker under `[environment.env]`, as
+`NAME = "${NAME}"`: Harbor fills them from the worker process's environment. `workers.env`
+in the spec (or a role's `workers.env`) sets those values on every worker of the type:
+
+```yaml
+workers:
+  env:
+    PYBOT_REPO: '${PYBOT_REPO}'  # filled from the launching shell or run.env when the spec loads
+```
+
+`workers.env` is stored in the spec and reaches the worker job as plain environment, so names
+containing `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL` or `AUTH` are refused. A task
+secret goes in the worker host's environment instead: on Slurm add `NAME=value` to `run.env`,
+which every worker job sources ([Slurm](slurm.md)). The
+[pybot spec](../experiments/pybot/spec.yaml) is a working example.
 
 ## Choose a compatible environment
 
