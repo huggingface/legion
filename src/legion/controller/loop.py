@@ -316,6 +316,17 @@ class LoopEngine:
             self.store.put_loop_agent(agent, a["swarm"], a["type"], st)
             return True
 
+    def board(self, agent: str, source: str, reason: str, data: dict[str, Any]) -> bool:
+        """A board event for the agent: its notice (`notice`) and its wake (`wake`) under one
+        lock, so no tick (`while.quiet`) sees the one without the other. Returns whether it
+        woke the agent."""
+        with self._lock:
+            try:
+                self.notice(agent, reason, data)
+            except Exception:  # a notice never costs the wake
+                log.exception("loop notice failed for %s", agent)
+            return self.wake(agent, f"{source}.{reason}")
+
     def control(self, swarm: str, type_name: str, action: str, final: bool = True) -> LoopStatus:
         """POST /swarms/{swarm}/loop start|stop: stop (optionally without the final round) or start
         the loop again from round 0."""
@@ -515,7 +526,7 @@ class LoopEngine:
             now = self.clock().timestamp()
             if (L.get("first_turn_at") is None and L["state"] == "running"
                     and any(ev.type == "turn_started" for ev in events)):
-                self._first_turn(a, ts.loop, L, now)
+                self._first_turn(spec, a, ts, L, now)
             st = self.store.get_loop_agent(a["name"])
             if st is None:
                 return
@@ -573,15 +584,29 @@ class LoopEngine:
                 self._agent_done(a, st, L, stop_reason, now)
             self.store.put_loop_agent(a["name"], a["swarm"], a["type"], st)
 
-    def _first_turn(self, a: Row, lp: LoopSpec, L: dict, now: float) -> None:
+    def _first_turn(self, spec: SwarmSpec, a: Row, ts: TypeSpec, L: dict, now: float) -> None:
         """The type's first turn in this run of the loop (any agent's, whatever prompted it):
         `until_from: first_turn` counts `until` from here. Kept whatever `until_from` says, so
-        a re-apply that switches to `first_turn` finds it; the event only with `first_turn`."""
+        a re-apply that switches to `first_turn` finds it. With `first_turn`: the event, and the
+        running worker-side loops get their `loop_start` again (same run, so their round counts
+        stay) with the clock and deadline they were sent without."""
         L["first_turn_at"] = now
         self.store.put_loop(a["swarm"], a["type"], L)
-        if lp.while_.until_from == "first_turn":
-            self._event(a["swarm"], "loop_first_turn", {
-                "type": a["type"], "agent": a["name"], "after_s": round(now - L["started_at"], 3)})
+        if ts.loop is None or ts.loop.while_.until_from != "first_turn":
+            return
+        self._event(a["swarm"], "loop_first_turn", {
+            "type": a["type"], "agent": a["name"], "after_s": round(now - L["started_at"], 3)})
+        if L.get("mode") != "worker":
+            return
+        flags = self.store.swarm_flags(a["swarm"])
+        for b in self.store.list_agents(a["swarm"], a["type"]):
+            st = self.store.get_loop_agent(b["name"])
+            if (st is None or st["phase"] != "looping" or not st["wstarted"] or st["acked"]
+                    or st["stop_sent"] or not b["worker"] or b["removing"]
+                    or self.store.held(b, flags)):
+                continue  # no worker loop running, or a stop on its way: not undone here
+            self._loop_start(spec, a["type"], ts, L, b, st, now)
+            self.store.put_loop_agent(b["name"], a["swarm"], a["type"], st)
 
     def _fetched(self, a: Row, arm: dict, now: float) -> bool:
         """The armed loop_start left its worker's command queue (`arm["fetched"]`: when the
@@ -873,6 +898,7 @@ class LoopEngine:
 
     def _agent_done(self, a: Row, st: dict, L: dict, reason: str, now: float) -> None:
         st["phase"], st["done_reason"] = "done", reason
+        self._wakes.pop(a["name"], None)  # out of the loop: a queued wake is never sent
         if L.get("mode") == "worker" and st["wstarted"] and not st["acked"] and a["worker"]:
             self.store.enqueue_command(
                 a["worker"], LoopStopCommand(agent=a["name"], reason=reason).model_dump_json())
@@ -883,11 +909,13 @@ class LoopEngine:
               why: str, now: float, counted: bool = True, wake: bool = False) -> LoopMeta:
         assert ts.loop is not None
         until = ts.loop.while_.until
-        start = _clock_start(ts.loop, L)
-        start = now if start is None else start  # before the first turn: {elapsed} is 0
-        return LoopMeta(kind=kind, type=type_name, round=round, started_at=_ts(start),
-                        wall_s=max(0.0, until_deadline(until, start) - start) if until else None,
-                        cap_usd=agent_cap(ts), why=why, counted=counted, wake=wake)
+        start = _clock_start(ts.loop, L)  # None before the first turn: the worker renders
+        return LoopMeta(                   # {elapsed} as 0 until a loop_start carries it
+            kind=kind, type=type_name, round=round,
+            started_at=None if start is None else _ts(start),
+            wall_s=max(0.0, until_deadline(until, start if start is not None else now)
+                       - (start if start is not None else now)) if until else None,
+            cap_usd=agent_cap(ts), why=why, counted=counted, wake=wake)
 
     def _loop_start(self, spec: SwarmSpec, type_name: str, ts: TypeSpec, L: dict, a: Row,
                     st: dict, now: float) -> None:
@@ -930,26 +958,64 @@ class LoopEngine:
         return None
 
     def _quiet(self, spec: SwarmSpec, type_name: str, L: dict, now: float, quiet: float) -> bool:
-        """`while.quiet`: every agent of the type is idle with nothing pending (no undelivered
-        prompt, no queued wake, no hold) and none has had loop activity (a prompt sent or taken,
-        a turn's end, a `loop_start`) for `quiet` s. An agent not idle (working, not placed
-        yet, unknown, dead) keeps the loop going."""
+        """`while.quiet`: True once every agent of the type has been seen quiet (`_settled`)
+        on every tick for `quiet` s in a row (`L["quiet_since"]`, the first such tick), and
+        none had activity in that window: a loop prompt sent or taken, a turn's end, a
+        `loop_start`, the idle time of its last heartbeat. Time spent queued, unknown or
+        working never counts: the window starts when the controller first sees all of them
+        settled, so a late idle heartbeat or event batch cannot backdate it."""
+        settled, last = self._settled(spec, type_name, L)
+        if not settled:
+            if L.get("quiet_since") is not None:
+                L["quiet_since"] = None
+                self.store.put_loop(spec.swarm, type_name, L)
+            return False
+        if L.get("quiet_since") is None:
+            L["quiet_since"] = now
+            self.store.put_loop(spec.swarm, type_name, L)
+        return now - max(L["quiet_since"], last) >= quiet
+
+    def _settled(self, spec: SwarmSpec, type_name: str, L: dict) -> tuple[bool, float]:
+        """Every agent of the type idle with nothing on its way: no undelivered prompt, no
+        `loop_start` in its worker's queue, no worker-side loop running, no queued wake (an
+        agent out of the loop never gets one), no board notice not yet named in a round
+        (`loop.notices`), no hold. An agent working, not placed yet, unknown or dead is not
+        settled. Also returns the latest activity time among them."""
+        now = self.clock().timestamp()
         agents = [a for a in self.store.list_agents(spec.swarm, type_name) if not a["removing"]]
         if not agents:
-            return False
+            return False, 0.0
         states = self.store.loop_agents(spec.swarm, type_name)
         workers = {w["id"]: w for w in self.store.list_workers(spec.swarm, type_name)}
         pending = self.store.pending_counts(spec.swarm)
         flags = self.store.swarm_flags(spec.swarm)
+        starts = self._queued_starts({a["worker"] for a in agents if a["worker"]})
         last = L["started_at"]
         for a in agents:
-            st = states.get(a["name"])
-            if (st is None or pending.get(a["name"]) or a["name"] in self._wakes
-                    or self.store.held(a, flags) or not a["worker"]
+            name, st = a["name"], states.get(a["name"])
+            if st is None or not a["worker"] or pending.get(name) or name in starts:
+                return False, 0.0
+            arm = st.get("notice_armed")
+            if ((st["phase"] != "done" and name in self._wakes) or st.get("notices")
+                    or (arm and not arm.get("used"))
+                    or (st["wstarted"] and not st["acked"]) or self.store.held(a, flags)
                     or self.turn_state(a, workers.get(a["worker"]), now) != AgentState.idle):
-                return False
-            last = max(last, st["last_activity"] or 0.0)
-        return now - last >= quiet
+                return False, 0.0
+            last = max(last, st["last_activity"] or 0.0, a["idle_since"] or 0.0)
+        return True, last
+
+    def _queued_starts(self, worker_ids: set[str]) -> set[str]:
+        """Agents with a `loop_start` still in their worker's command queue."""
+        out: set[str] = set()
+        for wid in worker_ids:
+            for c in self.store.commands_for(wid):
+                try:
+                    body = json.loads(c["body"])
+                except ValueError:
+                    continue
+                if body.get("kind") == "loop_start":
+                    out.add(body.get("agent"))
+        return out
 
     def _run(self, spec: SwarmSpec, type_name: str, ts: TypeSpec, L: dict, now: float,
              budget: str | None) -> None:
@@ -979,6 +1045,7 @@ class LoopEngine:
                 st = states[name] = _new_agent()
                 changed.add(name)
             if st["phase"] == "done":
+                self._wakes.pop(name, None)  # out of the loop: never sent
                 continue
             if self.store.held(a, flags):  # paused: no prompt, no round; wakes stay queued
                 if (L["mode"] == "worker" and st["wstarted"] and not st["acked"] and a["worker"]

@@ -126,18 +126,25 @@ loop's start, so a worker that waits in a queue (Slurm, a busy machine) does not
 time. The first turn is the first `turn_started` the controller receives from any agent of the
 type in this run of the loop, whatever prompted it (round 1, a resume prompt, a hand prompt);
 a team's clock starts with its first agent, not its last. Until then `until` cannot end the
-loop, the worker-side loops get no deadline (the controller's stop ends them) and `{elapsed}`
-is 0. A new run of the loop (`POST /swarms/{swarm}/loop` start) waits for a new first turn.
+loop, loop prompts carry no start time (`{elapsed}` is 0) and worker-side loops get no
+deadline; at the first turn every running worker-side loop gets its `loop_start` again (same
+run, so its round count stays) with the start time and the deadline. A new run of the loop (`POST /swarms/{swarm}/loop` start) waits for a new first turn.
 `limits.run_timeout_seconds` still counts from the launch. `GET /swarms/{s}/loop` shows the
 time as `first_turn_at` (also with `launch`), and the swarm stream gets `loop_first_turn`.
 
 `quiet` stops the loop (reason `quiet`, then the final round) once every agent of the type has
-been quiet for that long: idle, with no undelivered prompt, no queued wake and no hold, and no
-loop activity (a loop prompt sent or taken, a turn's end, a `loop_start`) in the window. An
-agent that is working, not placed yet, unknown or dead keeps the loop going, so does a held
-one (a pause never ends a loop). Agents already out of the loop (`max_rounds`, ...) count as
-quiet when idle. Typical use: a board-driven team (`every: 24h`, `on: [message_board.*]`)
-that has stopped talking.
+been settled for that long, as the controller sees it on every tick. Settled: idle, with no
+undelivered prompt, no `loop_start` in its worker's queue, no worker-side loop running, no
+queued wake, no board notice not yet named in a round (`notices: true`) and no hold. The
+window opens at the first tick that sees every agent settled and restarts whenever one is
+not, or has activity (a loop prompt sent or taken, a turn's end, the idle time of its
+heartbeat), so time spent queued, unknown or working never counts, and an idle heartbeat
+that comes before its turn's events cannot backdate it. An agent that is working, not placed
+yet, unknown or dead keeps the loop going, so does a held one (a pause never ends a loop).
+Agents already out of the loop (`max_rounds`, ...) count as settled when idle; a wake queued
+for one is dropped when it leaves. A `turn_end` loop run by the workers never goes quiet while
+those loops run (they re-prompt at once): `quiet` is for a board-driven team
+(`every: 24h`, `on: [message_board.*]`) that has stopped talking.
 
 **Undelivered prompts.** A worker that takes a loop prompt and then defers it (draining,
 stopping) reports `prompt_deferred` with the prompt's `{kind, round}`: the controller undoes

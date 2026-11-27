@@ -765,12 +765,8 @@ def create_app(
         source, reason, data = data.get("resource"), data.get("kind"), data.get("data")
         if not (isinstance(source, str) and isinstance(reason, str) and isinstance(data, dict)):
             return
-        try:  # `loop.notices`: named in the agent's next round prompt
-            loops.notice(agent, reason, data)
-        except Exception:
-            log.exception("comms notice failed for %s", agent)
-        try:
-            woke = loops.wake(agent, f"{source}.{reason}")
+        try:  # `loop.notices` (named in the agent's next round prompt) and its `on:` wake
+            woke = loops.board(agent, source, reason, data)
             log.debug("comms %s for %s (wake %s): %s", reason, agent, woke, data)
             if on_comms is not None:
                 on_comms(agent, reason, {"agent": agent, **data})
