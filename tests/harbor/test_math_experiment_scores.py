@@ -58,7 +58,7 @@ def proof_args(**overrides):
 
 
 def openai_reply(value):
-    return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(value)}}]})
+    return httpx.Response(200, json={"choices": [{"message": {"content": value if isinstance(value, str) else json.dumps(value)}}]})
 
 
 def test_answer_aggregation_latest_ties_and_missing(tmp_path):
@@ -78,7 +78,7 @@ def test_answer_aggregation_latest_ties_and_missing(tmp_path):
 
 
 @respx.mock
-def test_answer_dual_order_and_conservative_fallback(tmp_path, monkeypatch):
+def test_answer_qed_single_order_prompt_and_verdict(tmp_path, monkeypatch):
     mod = module("imo-answerbench")
     monkeypatch.setenv("TEST_JUDGE_KEY", "test")
     task = "imo-bench-algebra-002"
@@ -87,20 +87,21 @@ def test_answer_dual_order_and_conservative_fallback(tmp_path, monkeypatch):
     refs.mkdir()
     (refs / f"{task}.json").write_text(json.dumps({"kind": "expression", "answer": "2*x"}))
     (refs / f"{task}.md").write_text("Find all n >= 3 with x = 1.")
-    route = respx.post("https://judge/v1/chat/completions").mock(side_effect=[
-        openai_reply({"equivalent": True}), openai_reply({"equivalent": False})])
+    route = respx.post("https://judge/v1/chat/completions").mock(
+        return_value=openai_reply(r"<thinking>Equivalent.</thinking> \boxed{Correct}"))
     args = answer_args(judge=True, reference_dir=str(refs))
     result = mod.score([tmp_path], args)
-    assert result["teams"][0]["agents"][0]["correct"] == 0
-    assert route.call_count == 2
-    contents = [json.loads(call.request.content)["messages"][0]["content"] for call in route.calls]
-    assert all("Find all n >= 3 with x = 1." in prompt for prompt in contents)
+    assert result["teams"][0]["agents"][0]["correct"] == 1
+    assert route.call_count == 1
+    payload = json.loads(route.calls[0].request.content)
+    template = (ROOT / "qed-nano-prompts/answerbench.txt").read_text()
+    assert payload["messages"][0]["content"] == template.format(
+        problem_statement="Find all n >= 3 with x = 1.", student_answer="x + x", gold_answer="2*x")
+    assert "response_format" not in payload
     assert result["teams"][0]["task"] == "imo-answerbench/" + task
     assert result["teams"][0]["task_id"] == task
-    assert contents[0].index("x + x") < contents[0].index("2*x")
-    assert contents[1].index("2*x") < contents[1].index("x + x")
-    route.mock(return_value=openai_reply({"equivalent": True}))
-    assert mod.score([tmp_path], args)["teams"][0]["best_of_n"] == 1
+    route.mock(return_value=openai_reply(r"<thinking>Not equivalent.</thinking> \boxed{Incorrect}"))
+    assert mod.score([tmp_path], args)["teams"][0]["best_of_n"] == 0
 
 
 def test_smallmath_levels_and_integer_votes(tmp_path):
@@ -129,15 +130,17 @@ def test_proof_openai_grades_and_aggregates(tmp_path, monkeypatch):
     for name, proof in [("a", "A proof"), ("b", "A proof"), ("c", "Another proof")]:
         trial(tmp_path, "pb-basic-001", name, reward=1, proof=proof)
     route = respx.post("https://judge/v1/chat/completions").mock(side_effect=[
-        openai_reply({"score": n, "reason": "reason"}) for n in (4, 6, 7)])
+        openai_reply(f"analysis <points>{n} out of 7</points>") for n in (1, 6, 7)])
     records = mod.score([tmp_path], proof_args(selected_agent="a"))
     assert route.call_count == 3
-    assert records[0]["percent_of_7"] == 400 / 7
+    assert records[0]["percent_of_7"] == 100 / 7
     team = records[-1]
-    assert (team["mean"], team["max"], team["consensus"], team["selected"]) == (17 / 3, 7, 5, 4)
+    assert (team["mean"], team["max"], team["consensus"], team["selected"]) == (14 / 3, 7, 3.5, 1)
     prompt = json.loads(route.calls[0].request.content)["messages"][0]["content"]
-    assert '"grading_guidelines": "G"' in prompt
-    assert '"reference_solution": "S"' in prompt
+    template = (ROOT / "qed-nano-prompts/proofbench.txt").read_text()
+    assert prompt == template.format(problem_statement="P", solution="S", guidelines="G",
+                                     student_answer="A proof")
+    assert "response_format" not in json.loads(route.calls[0].request.content)
 
 
 @respx.mock
@@ -146,13 +149,13 @@ def test_proof_gemini_and_invalid_scores(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_JUDGE_KEY", "test")
     trial(tmp_path, "pb-basic-001", "a", reward=1, proof="A proof")
     route = respx.post("https://judge/v1/models/judge:generateContent").mock(return_value=httpx.Response(
-        200, json={"candidates": [{"content": {"parts": [{"text": '{"score": 7, "reason": "ok"}'}]}}]}))
+        200, json={"candidates": [{"content": {"parts": [{"text": "<points>7 out of 7</points>"}]}}]}))
     result = mod.score([tmp_path], proof_args(provider="gemini"))
     assert result[0]["score"] == 7
     assert route.calls[0].request.headers["x-goog-api-key"] == "test"
     route.mock(return_value=httpx.Response(200, json={"candidates": [{"content": {"parts": [
-        {"text": '{"score": 8, "reason": "bad"}'}]}}]}))
-    with pytest.raises(ValueError, match="0–7"):
+        {"text": "<points>8 out of 7</points>"}]}}]}))
+    with pytest.raises(ValueError, match="N in 0, 1, 6, 7"):
         mod.score([tmp_path], proof_args(provider="gemini"))
 
 
@@ -196,8 +199,8 @@ def test_judge_invalid_answer_and_http_failure(tmp_path, monkeypatch):
     (refs / f"{task}.json").write_text('{"kind":"literal","answer":"y"}')
     (refs / f"{task}.md").write_text("Problem statement")
     route = respx.post("https://judge/v1/chat/completions").mock(
-        return_value=openai_reply({"equivalent": "yes"}))
-    with pytest.raises(ValueError, match="boolean"):
+        return_value=openai_reply("Maybe"))
+    with pytest.raises(ValueError, match="boxed Correct or Incorrect"):
         mod.score([tmp_path], answer_args(judge=True, reference_dir=str(refs)))
     route.mock(return_value=httpx.Response(503))
     with pytest.raises(httpx.HTTPStatusError):
@@ -407,10 +410,10 @@ def test_proof_comparison_solo_and_team(tmp_path, monkeypatch):
     for idx in range(4):
         trial(team, "pb-basic-001", f"a{idx}", proof="proof", reward=1)
     respx.post("https://judge/v1/chat/completions").mock(side_effect=[
-        openai_reply({"score": n, "reason": "ok"}) for n in (1, 3, 6, 7, 4, 4, 6, 7)])
+        openai_reply(f"<points>{n} out of 7</points>") for n in (1, 1, 6, 7, 1, 1, 6, 7)])
     records = mod.score([*roots, team], proof_args())
     result = mod.compare_proof(records)[0]
-    assert result["solo"]["pass_at_1_percent_of_7"]["mean"] == pytest.approx(100 * 17 / 28)
+    assert result["solo"]["pass_at_1_percent_of_7"]["mean"] == pytest.approx(100 * 15 / 28)
     assert result["solo"]["pass_at_k_ge_6"] == 1
     assert result["solo"]["max_observed_percent_of_7"] == 100
     assert result["team"]["pass_at_k_ge_6"]["mean"] == 1
@@ -460,12 +463,12 @@ def test_selected_team_agent_with_mixed_solo_and_team(tmp_path, monkeypatch):
     for idx in range(1, 5):
         trial(team_root, "pb-basic-001", f"agent-{idx:03d}", proof="team proof", reward=1)
     respx.post("https://judge/v1/chat/completions").mock(side_effect=[
-        openai_reply({"score": n, "reason": "ok"}) for n in (1, 2, 3, 4, 5, 6)])
+        openai_reply(f"<points>{n} out of 7</points>") for n in (1, 0, 1, 6, 7, 6)])
     records = mod.score([*solo_roots, team_root], proof_args(selected_agent="agent-002"))
     teams = [r for r in records if r["type"] == "team"]
     assert all(r["selected"] is None and r["selected_agent"] is None for r in teams[:2])
     assert teams[2]["selected_agent"] == "agent-002"
-    assert teams[2]["selected"] == 4
+    assert teams[2]["selected"] == 6
     comparison = mod.compare_proof(records)[0]
     assert comparison["solo"]["n"] == 2 and comparison["team"]["n_runs"] == 1
 
@@ -516,6 +519,96 @@ def test_selected_agent_still_required_for_team(tmp_path, monkeypatch):
     for name in ("agent-001", "agent-003"):
         trial(tmp_path, "pb-basic-001", name, proof="proof", reward=1)
     respx.post("https://judge/v1/chat/completions").mock(
-        return_value=openai_reply({"score": 3, "reason": "ok"}))
+        return_value=openai_reply("<points>1 out of 7</points>"))
     with pytest.raises(ValueError, match="Selected agent agent-002 absent"):
         mod.score([tmp_path], proof_args(selected_agent="agent-002"))
+
+
+def test_qed_nano_prompt_files_match_pinned_revision():
+    import hashlib
+
+    hashes = {"answerbench": "77852b856741cd08de5e0de49f97aacfacd3e2453a561e71d610bfae0c8703a2",
+              "proofbench": "1f05fe22b17b20bf670daf6faad21e7904827e86002b54fe420513bf2b065cbd"}
+    for name, digest in hashes.items():
+        assert hashlib.sha256((ROOT / "qed-nano-prompts" / f"{name}.txt").read_bytes()).hexdigest() == digest
+
+
+def test_qed_boxed_verdicts_and_nested_braces():
+    module("imo-answerbench")
+    from math_eval_common import find_last_boxed_content, parse_answer_verdict
+
+    assert find_last_boxed_content(r"first \boxed{wrong}; then \boxed{\frac{1}{2}}") == r"wrong,\frac{1}{2}"
+    assert find_last_boxed_content(r"\boxed{\boxed{Correct}}") == "Correct"
+    assert find_last_boxed_content("\\boxed{first}\n\\boxed{last}") == "last"
+    assert parse_answer_verdict(r"\boxed{Incorrect} and finally \boxed{Correct}") is True
+    assert parse_answer_verdict(r"\boxed{Correct} and finally \boxed{Incorrect}") is False
+    for invalid in ("Correct", r"\boxed{Maybe}", r"\boxed{Correct"):
+        with pytest.raises(ValueError, match="boxed Correct or Incorrect"):
+            parse_answer_verdict(invalid)
+
+
+@pytest.mark.parametrize("value", [0, 1, 6, 7])
+def test_qed_points_first_tag_and_discrete_buckets(value):
+    module("imo-proofbench")
+    from math_eval_common import parse_proof_points
+
+    assert parse_proof_points(f"<points>{value} out of 7</points> then <points>7 out of 7</points>") == value
+    if value != 7:
+        assert parse_proof_points(f"<points>7 out of 7</points><points>{value} out of 7</points>") == 7
+
+
+@pytest.mark.parametrize("text", ["no points", "<points>2 out of 7</points>",
+                                   "<points>7/7</points>",
+                                   "<points>invalid</points><points>7 out of 7</points>"])
+def test_qed_points_rejects_invalid_first_tag(text):
+    module("imo-proofbench")
+    from math_eval_common import parse_proof_points
+
+    with pytest.raises(ValueError, match="N in 0, 1, 6, 7"):
+        parse_proof_points(text)
+
+
+def test_qed_self_evaluation_cleanup():
+    module("imo-proofbench")
+    from math_eval_common import remove_self_evaluation
+
+    for heading in ("# Evaluation", "## Self Evaluation", "### **Final Evaluation**"):
+        assert remove_self_evaluation(f"A valid proof.\n\n{heading}\nI deserve 7 points.\nMore") == "A valid proof."
+    assert remove_self_evaluation("A valid proof.\n## Details\nProof continues.") == "A valid proof.\n## Details\nProof continues."
+
+
+@respx.mock
+def test_proof_judge_receives_qed_cleaned_proof(tmp_path, monkeypatch):
+    mod = module("imo-proofbench")
+    monkeypatch.setenv("TEST_JUDGE_KEY", "test")
+    trial(tmp_path, "pb-basic-001", "a", reward=1,
+          proof="Proof of claim.\n## Self Evaluation\nI deserve 7 points.")
+    route = respx.post("https://judge/v1/chat/completions").mock(
+        return_value=openai_reply("Justification. <points>6 out of 7</points>"))
+    result = mod.score([tmp_path], proof_args())
+    template = (ROOT / "qed-nano-prompts/proofbench.txt").read_text()
+    request = json.loads(route.calls[0].request.content)
+    assert request["messages"][0]["content"] == template.format(
+        problem_statement="P", solution="S", guidelines="G", student_answer="Proof of claim.")
+    assert result[0]["score"] == 6
+    assert "I deserve 7 points." in result[0]["proof"]
+    assert "response_format" not in request
+
+
+@respx.mock
+def test_answer_gemini_text_response_and_api_key(tmp_path, monkeypatch):
+    mod = module("imo-answerbench")
+    monkeypatch.setenv("TEST_JUDGE_KEY", "test")
+    task = "imo-bench-algebra-002"
+    trial(tmp_path, task, "a", "x", 0)
+    refs = tmp_path / "refs"
+    refs.mkdir()
+    (refs / f"{task}.json").write_text('{"kind":"literal","answer":"x"}')
+    (refs / f"{task}.md").write_text("Problem statement")
+    route = respx.post("https://judge/v1/models/judge:generateContent").mock(return_value=httpx.Response(
+        200, json={"candidates": [{"content": {"parts": [
+            {"text": "internal thought", "thought": True}, {"text": r"\boxed{Correct}"}]}}]}))
+    result = mod.score([tmp_path], answer_args(judge=True, reference_dir=str(refs), provider="gemini"))
+    assert result["teams"][0]["best_of_n"] == 1
+    assert route.calls[0].request.headers["x-goog-api-key"] == "test"
+    assert "generationConfig" not in json.loads(route.calls[0].request.content)

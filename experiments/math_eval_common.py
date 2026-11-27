@@ -99,7 +99,8 @@ def summary(values):
     return {"count": len(values), "mean": sum(values) / len(values) if values else None}
 
 
-def judge_json(prompt, model, base_url, api_key_env, gemini=False):
+def judge_text(prompt, model, base_url, api_key_env, gemini=False):
+    """Request ordinary text; QED-Nano graders use tags, not JSON mode."""
     key = os.environ.get(api_key_env)
     if not key:
         raise ValueError(f"Set {api_key_env} for the judge")
@@ -108,21 +109,85 @@ def judge_json(prompt, model, base_url, api_key_env, gemini=False):
         url = f"{base}/models/{model}:generateContent"
         response = httpx.post(url, headers={"x-goog-api-key": key}, json={
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"responseMimeType": "application/json"},
         }, timeout=120)
         response.raise_for_status()
-        content = response.json()["candidates"][0]["content"]["parts"][0]["text"]
+        parts = response.json()["candidates"][0]["content"]["parts"]
+        content = "".join(part.get("text", "") for part in parts if not part.get("thought"))
     else:
         base = (base_url or "https://router.huggingface.co/v1").rstrip("/")
         response = httpx.post(f"{base}/chat/completions", headers={"Authorization": f"Bearer {key}"},
-                              json={"model": model, "messages": [{"role": "user", "content": prompt}],
-                                    "response_format": {"type": "json_object"}}, timeout=120)
+                              json={"model": model, "messages": [{"role": "user", "content": prompt}]},
+                              timeout=120)
         response.raise_for_status()
         content = response.json()["choices"][0]["message"]["content"]
-    value = json.loads(content)
-    if not isinstance(value, dict):
-        raise TypeError("Judge must return a JSON object")
-    return value
+    if not isinstance(content, str):
+        raise TypeError("Judge must return text")
+    return content
+
+
+def remove_self_evaluation(text):
+    """Apply QED-Nano's evaluation-heading cleanup to a candidate solution."""
+    pattern = r"(?ms)^#+\s*[*\s]*(?:(?:Self|Final)\s*[*\s]*){0,2}Evaluation\b.*$"
+    return re.sub(pattern, "", text).strip()
+
+
+def _boxed_matches(text):
+    """Find non-overlapping boxed/fbox values using balanced braces."""
+    matches = []
+    pos = 0
+    while match := re.search(r"(?:boxed|fbox)\{", text[pos:]):
+        start = pos + match.start()
+        inner = pos + match.end()
+        depth = 1
+        for i in range(inner, len(text)):
+            depth += (text[i] == "{") - (text[i] == "}")
+            if depth == 0:
+                matches.append((start, i + 1, text[inner:i]))
+                pos = i + 1
+                break
+        else:
+            pos = inner
+    return matches
+
+
+def _remove_inner_boxed(text):
+    matches = _boxed_matches(text)
+    for start, end, value in reversed(matches):
+        if start > 0 and text[start - 1] == "\\":
+            text = text[:start - 1] + _remove_inner_boxed(value) + text[end:]
+    return text
+
+
+def find_last_boxed_content(text):
+    """QED-Nano extraction: combine boxes on the last line, unwrapping inner boxes."""
+    matches = _boxed_matches(text)
+    if not matches:
+        return None
+    if len(matches) > 1:
+        for line in reversed(text.split("\n")):
+            same_line = _boxed_matches(line)
+            if same_line:
+                return ",".join(_remove_inner_boxed(value) for _, _, value in same_line)
+    return _remove_inner_boxed(matches[-1][2])
+
+
+def parse_answer_verdict(text):
+    # A verdict is the final box, even if other boxes appear on the same line.
+    matches = _boxed_matches(text)
+    boxed = _remove_inner_boxed(matches[-1][2]).strip().lower() if matches else None
+    if boxed not in {"correct", "incorrect"}:
+        raise ValueError("Judge must return a final boxed Correct or Incorrect verdict")
+    return boxed == "correct"
+
+
+def parse_proof_points(text):
+    # The user-requested prompt contract specifies the first tag. QED-Nano's current
+    # extract_html implementation instead chooses the last tag when several are present.
+    match = re.search(r"<points(?:\s[^>]*)?>(.*?)</points>", text, re.DOTALL)
+    points = re.fullmatch(r"\s*([0167])\s+out\s+of\s+7\s*", match.group(1), re.IGNORECASE) if match else None
+    if points is None:
+        raise ValueError("Judge must return a first <points>N out of 7</points> with N in 0, 1, 6, 7")
+    return int(points.group(1))
 
 
 def output_tokens(agent):
