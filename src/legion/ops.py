@@ -382,7 +382,8 @@ def launch(api: Client, spec: SwarmSpec, spec_file: str, *, env_files=(),
            source: dict[str, str] | None = None, types: list[str] | None = None, agents: list[str] | None = None,
            preflight: bool | None = None, strict: bool = False,
            checked: tuple[Any, list[str]] | None = None,
-           say: Callable[[str], None] = lambda _: None, hold: bool = False) -> dict[str, Any]:
+           say: Callable[[str], None] = lambda _: None, hold: bool = False,
+           start_controller: bool = True) -> dict[str, Any]:
     """`legion launch` (docs/live.md "Lifecycle") on a spec read with `read_spec`. First, when
     no controller answers (always with `compute: local`): `up` starts the run's controller
     (and world), which restores its checkpoint. Missing on the controller: created; refused
@@ -400,7 +401,8 @@ def launch(api: Client, spec: SwarmSpec, spec_file: str, *, env_files=(),
     and world, the controller restoring every swarm held and released (as `legion stop
     --release`), so `legion update` can change the spec before any worker starts; nothing is
     created or resumed. "held" is the swarm's holds, or None when the controller has no such
-    swarm. Refused when a controller already answers."""
+    swarm. Refused when a controller already answers. Set `start_controller=False` when
+    reconciling a submission whose original controller must still be live."""
     bundle, warnings = checked or check_spec(spec, spec_file)
     done: dict[str, Any] = {"warnings": warnings}
     try:
@@ -416,6 +418,8 @@ def launch(api: Client, spec: SwarmSpec, spec_file: str, *, env_files=(),
             except SpecError as e:
                 raise SpecError(e.lines, done) from None
             if spec.compute.kind == "local" or not api.answers():
+                if not start_controller:
+                    raise SpecError(["the original controller is no longer reachable"], done)
                 try:
                     started = up(api, spec, spec_file, env_files, say=say, hold=hold)
                 except SpecError as e:

@@ -31,6 +31,8 @@ legion stop demo --release              # drain, checkpoint, stop the world, can
 legion launch runs/demo/experiment      # the jobs again: the controller restores, the swarm resumes
 ```
 
+For a fixed matrix of pinned Harbor runs, use [`legion sweep`](sweeps.md).
+
 The jobs are named `legion-world-<run>` and `legion-ctl-<run>` (one of each per run:
 `--dependency=singleton`); `legion launch` submits one only when no job of that name is pending
 or running, with `-o logs/%x-%j.out`, `-p` from `WORLD_PARTITION` / `CTL_PARTITION`, else
