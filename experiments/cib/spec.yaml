@@ -17,7 +17,7 @@ inference:
   reasoning_effort: ${EFFORT:-low}
 task:
   repo: https://huggingface.co/datasets/HuggingFaceSwarms/collaborative-intelligence-benchmark
-  revision: 2404577cc0b03402a86b7195ac62500664f3a75e
+  revision: 070e8bf4264f0d88d88d0286e2772fb497f147ba
   selector: ${CASE:-ci-sharing-h2-r-choosing-the-safe-field-station-solo-s0}
 agents:
   count: 1  # the task supplies the teammates

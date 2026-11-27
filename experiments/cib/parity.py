@@ -1,5 +1,5 @@
 """Run one CIB dimension through `legion launch`, case by case, for the parity check against
-the dataset's published results (until `legion sweep` exists).
+the dataset's published results (until `legion sweep` supports gated schedules).
 
 Every solo case runs first; then the three team seeds of each scenario whose solo passed, as
 the benchmark's gate does. Each case is one local run of spec.yaml (CASE set) in its own folder,
@@ -30,6 +30,7 @@ from pathlib import Path
 
 from legion.current import read_current
 from legion.harbor.spec import Spec
+from legion.results import load
 
 SPEC = Path(__file__).resolve().with_name("spec.yaml")
 POLL_S = 30
@@ -41,45 +42,19 @@ def read_json(path: Path):
     return json.loads(path.read_text())
 
 
-def completed_trial(case: Path) -> Path | None:
-    """Find the Harbor Trial backed by the completed Legion host turn."""
-    hosts = list(case.glob(".legion/*/run.json"))
-    if len(hosts) != 1:
-        return None
-    host = read_json(hosts[0])
-    run = hosts[0].parent
-    agents = host.get("agents", [])
-    if host.get("stop_reason") != "idle" or not host.get("ended_at") or len(agents) != 1:
-        return None
-    [agent] = agents
-    workers = [w for w in host.get("workers", []) if w.get("id") == agent.get("worker")]
-    if len(workers) != 1 or workers[0].get("crashes") or workers[0].get("last_error"):
-        return None
-    if agent.get("turns_completed") != 1 or agent.get("state") != "idle":
-        return None
-    events = run / "events" / f"{agent['name']}.jsonl"
-    if not events.is_file():
-        return None
-    observed = [json.loads(line) for line in events.read_text().splitlines()]
-    if any(e.get("type") in {"turn_interrupted", "error"} for e in observed):
-        return None
-    turns = [e for e in observed if e.get("type") == "turn_ended"]
-    if len(turns) != 1:
-        return None
-    status = (turns[0].get("data") or {}).get("data") or {}
-    if status.get("status") != "completed" or status.get("error"):
-        return None
-    trials = list((run / "agents" / "_harbor" / agent["name"] / "trials").glob("*/result.json"))
-    return trials[0] if len(trials) == 1 else None
-
-
 def result(case: Path, identity: dict, gateway: dict) -> Path | None:
-    """Admit only a verifier envelope backed by a completed host turn and Harbor Trial."""
-    if (trial_path := completed_trial(case)) is None:
+    """Admit the verifier envelope only when Legion considers the run completed."""
+    try:
+        run = load(case)
+    except ValueError:  # no finished bundle, or ambiguous bundles
         return None
-    trial = read_json(trial_path)
-    path = trial_path.parent / "verifier" / "result.json"
-    if not path.is_file() or not trial.get("finished_at") or trial.get("exception_info"):
+    if not run.outcome.completed or len(run.agents) != 1:
+        return None
+    trials = run.agents[0].trials
+    if len(trials) != 1 or not trials[0].outcome.completed or trials[0].verifier_dir is None:
+        return None
+    path = run.root / trials[0].verifier_dir / "result.json"
+    if not path.is_file():
         return None
     envelope = read_json(path)
     if envelope.get("identity") != identity or envelope.get("fixture") is not False:
@@ -87,18 +62,7 @@ def result(case: Path, identity: dict, gateway: dict) -> Path | None:
     metadata = (envelope.get("configuration") or {}).get("agent") or {}
     if metadata.get("runner") != RUNNER or metadata.get("model_gateway") != gateway:
         raise ValueError(f"{path}: gateway configuration differs from this run")
-    if type(envelope.get("reward")) not in (int, float) or (
-            (trial.get("verifier_result") or {}).get("rewards") or {}).get("reward") != envelope["reward"]:
-        return None
-    if envelope.get("status") == "finished":
-        return path
-    if envelope.get("status") == "abandoned" and envelope.get("terminal_reason") not in {
-            "unanswered_request_timeout", "episode_timeout"}:
-        evidence = envelope.get("partial_evidence") or {}
-        if not (evidence.get("observations") and "delivered_request_ids" in evidence
-                and not evidence["delivered_request_ids"] and not evidence.get("actions")):
-            return path  # the benchmark admits abandonment after a healthy host turn
-    return None
+    return path
 
 
 def wait_current(case: Path) -> bool:
@@ -231,7 +195,6 @@ def main() -> int:
     if not solos or (args.case and len(selected) != 1):
         parser.error("the manifest must contain solos and the selected case")
     from collab_harbor.compact_runtime import ensure_upstream
-    from collab_harbor.legion_results import load_runs
     from collab_harbor.scoring import IncompleteRunsError, score_runs
 
     tests = args.dataset.resolve() / solos[0]["path"] / "tests"
@@ -271,7 +234,7 @@ def main() -> int:
         if not runs:
             return 1
         try:
-            report = score_runs(load_runs(runs), manifest,
+            report = score_runs([read_json(path) for path in runs], manifest,
                                 allow_incomplete=bool(selected) or len(runs) != len(results))
         except IncompleteRunsError as exc:
             report = exc.report

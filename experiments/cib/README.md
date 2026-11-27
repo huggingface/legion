@@ -60,25 +60,51 @@ Set the variables for one command, as the spec reads them:
 ## A whole dimension
 
 The benchmark runs each scenario's solo first; a passing solo unlocks three team seeds, and the
-dataset's scorer aggregates them. Until `legion sweep` exists, `parity.py` runs one dimension
-that way, one `legion launch` per case in its own folder, and writes `scores.json` with the
-pinned dataset's scorer. It
-needs a clone of the dataset at the spec's revision and supports Sharing (`manifest.json`); the
-other dimensions use aliases and reader grading, which the
-[dataset's sweep](https://huggingface.co/datasets/HuggingFaceSwarms/collaborative-intelligence-benchmark#run)
-still handles.
+dataset's scorer aggregates them. Until `legion sweep` supports gated schedules, `parity.py`
+runs one dimension that way, one `legion launch` per case in its own folder, and writes
+`scores.json` with the pinned dataset's scorer. It needs a clone of the dataset at the spec's
+revision and supports Sharing (`manifest.json`); the
+other dimensions use aliases and reader grading and are not supported by this driver.
 
 ```sh
 git clone https://huggingface.co/datasets/HuggingFaceSwarms/collaborative-intelligence-benchmark ../cib-harbor
-git -C ../cib-harbor checkout 2404577cc0b03402a86b7195ac62500664f3a75e
+git -C ../cib-harbor checkout 070e8bf4264f0d88d88d0286e2772fb497f147ba
 git -C ../cib-harbor lfs pull
 uv run --with ../cib-harbor/adapter python experiments/cib/parity.py --dataset ../cib-harbor \
   --output results/cib/sharing --concurrency 2
 ```
 
-Add `--case <task-id>` to run and score just one case with incomplete coverage allowed.
+To run and score just the default solo case with incomplete coverage allowed:
+
+```sh
+uv run --with ../cib-harbor/adapter python experiments/cib/parity.py --dataset ../cib-harbor \
+  --output results/cib/single --case ci-sharing-h2-r-choosing-the-safe-field-station-solo-s0
+```
+
 Running the same configuration again reuses admitted cases and waits for live local controllers.
 Unavailable attempts are retained when the driver starts a retry. Use a fresh output directory
 for a new model, gateway configuration or manifest. If a sparse dataset checkout leaves Git LFS
 pointer files in place of task archives, include the root `.gitattributes` and fetch the archives
 before launching.
+
+For a small Sharing validation on a cluster CPU node with Podman configured, create a
+one-scenario manifest (the solo and its three team seeds), then run the same driver. It runs
+all solo cells first and starts team seeds only for a passing solo:
+
+```sh
+python - <<'PY'
+import json
+from pathlib import Path
+
+root = Path('../cib-harbor')
+manifest = json.loads((root / 'manifest.json').read_text())
+scenario = 'h2_r_choosing_the_safe_field_station'
+manifest['tasks'] = [t for t in manifest['tasks'] if t['identity']['scenario_id'] == scenario]
+(root / 'manifest-sharing-small.json').write_text(json.dumps(manifest, indent=2) + '\n')
+PY
+uv run --with ../cib-harbor/adapter python experiments/cib/parity.py --dataset ../cib-harbor \
+  --manifest manifest-sharing-small.json --output results/cib/sharing-small --concurrency 2
+```
+
+This uses local controllers on the node where the command runs; keep that allocation alive until
+the driver exits. Results in `scores.json` are partial benchmark coverage, not a full Sharing score.
