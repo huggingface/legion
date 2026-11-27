@@ -6,6 +6,8 @@ import pytest
 
 from legion.controller.hf_jobs_servers import vllm_command
 from legion.harbor.spec import Spec, compile_spec
+from legion.models import parse_duration
+from legion.worker.agents import VERIFY_WAIT
 
 ROOT = Path(__file__).resolve().parents[2] / "experiments"
 BENCHMARKS = {
@@ -25,7 +27,7 @@ def test_math_spec(name, revision, filename):
     spec = Spec.load(path, env=env)
     assert spec.task.revision == revision
     assert spec.workers.turn_timeout == ("30m" if filename == "hf-jobs-thinking.yaml" else "6m")
-    assert spec.limits.run_timeout_seconds == 2400
+    assert spec.limits.run_timeout_seconds == (5400 if filename == "hf-jobs-thinking.yaml" else 2400)
     assert spec.team_file == path.parent / "team.md"
     board = spec.resources["message_board"]
     assert board["wake"] == ["mention", "thread", "channel"]
@@ -61,6 +63,12 @@ def test_math_spec(name, revision, filename):
     if filename == "hf-jobs-thinking.yaml":
         expected += ["--reasoning-parser", "qwen3"]
         assert spec.inference.reasoning_effort == "xhigh"
+        job_timeout = parse_duration(compiled.inference.hf_jobs.timeout).total_seconds()
+        startup = parse_duration(spec.inference.hf_jobs.startup_timeout).total_seconds()
+        loop_duration = parse_duration(spec.loop.while_.until).total_seconds()
+        turn_timeout = parse_duration(spec.workers.turn_timeout).total_seconds()
+        assert job_timeout == 135 * 60
+        assert job_timeout >= startup + loop_duration + 2 * turn_timeout
     expected += ["--tensor-parallel-size", "1", "--max-num-seqs", "4",
                  "--max-model-len", "131072"]
     if filename == "hf-jobs-nothink.yaml":
@@ -96,12 +104,19 @@ def test_solo_math_spec(name, revision, filename):
     assert spec.environment.backend == ("podman" if filename == "solo.yaml" else "hf-sandbox")
     compiled = compile_spec(spec, {"repo": "example", "selector": "example", "revision": revision})
     assert compiled.types["agent"].replicas == 1
+    assert compiled.types["agent"].turn_timeout == "30m"
     assert compiled.types["agent"].loop is None
     if filename == "solo.yaml":
         assert spec.inference.urls == ["https://example.com/v1"]
+        assert compiled.inference.hf_jobs is None
         assert spec.inference.reasoning_effort == "off"
     else:
         assert spec.inference.max_working == 1
+        job_timeout = parse_duration(compiled.inference.hf_jobs.timeout).total_seconds()
+        startup = parse_duration(spec.inference.hf_jobs.startup_timeout).total_seconds()
+        turn_timeout = parse_duration(spec.workers.turn_timeout).total_seconds()
+        assert job_timeout == 85 * 60
+        assert job_timeout >= startup + turn_timeout + VERIFY_WAIT
         assert vllm_command(spec.model, spec.inference.hf_jobs, 1, 1) == [
             "vllm", "serve", "Qwen/Qwen3.8-27B", "--host", "0.0.0.0", "--port", "8000",
             "--served-model-name", "Qwen/Qwen3.8-27B", "--enable-auto-tool-choice",
@@ -109,3 +124,16 @@ def test_solo_math_spec(name, revision, filename):
             "--max-num-seqs", "1", "--max-model-len", "131072",
             "--default-chat-template-kwargs", '{"enable_thinking": false}',
         ]
+
+
+@pytest.mark.parametrize("name,revision", BENCHMARKS.items())
+@pytest.mark.parametrize("override,expected", [(None, "6m"), ("30m", "30m")])
+def test_shared_team_turn_timeout(name, revision, override, expected):
+    env = {"TASK_ID": "example", "SERVER_URL": "https://example.com/v1",
+           "REASONING_EFFORT": "xhigh" if override else "off"}
+    if override:
+        env["TURN_TIMEOUT"] = override
+    spec = Spec.load(ROOT / name / "spec.yaml", env=env)
+    swarm = compile_spec(spec, {"repo": "example", "selector": "example", "revision": revision})
+    assert spec.workers.turn_timeout == expected
+    assert swarm.types["agent"].turn_timeout == expected

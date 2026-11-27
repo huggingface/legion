@@ -47,5 +47,5 @@ loop:
   final:
     prompt: "The run is ending. Write your complete self-contained proof to /app/proof.md, then stop."
 limits:
-  run_timeout_seconds: 2400
+  run_timeout_seconds: 5400
   agent_max_turns: 60

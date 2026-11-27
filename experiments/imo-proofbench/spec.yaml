@@ -30,7 +30,7 @@ workers:
   env:
     LEGION_RESULTS_DIR: ${RESULTS_DIR:-./results}
   agents_per_worker: 4
-  turn_timeout: 6m
+  turn_timeout: ${TURN_TIMEOUT:-6m}
 loop:
   prompt: Continue solving and ensure /app/proof.md contains your final submission.
   every: 24h

@@ -18,7 +18,7 @@ Each team run uses four task environments and a board; each solo uses one enviro
 
 For AnswerBench and ProofBench scoring, the default open-weight judge is `moonshotai/Kimi-K3.1-Pro` on the HF Router (`https://router.huggingface.co/v1`, `HF_INFERENCE_TOKEN`); SmallMath itself uses its offline verifier. For a Gemini reference judge, use `--provider gemini` (default model `gemini-3.1-pro-preview`) with `GEMINI_API_KEY` or, if it is unset or empty, `GOOGLE_API_KEY`. Phase 1 cluster validation reported agreement with Gemini on 60/60 ProofBench and 86/86 AnswerBench cases, and the best open-weight MAE on human-graded IMO-GradingBench.
 
-The Phase 1 runs also found that Pi's default `max_tokens=16384` can truncate long thinking turns; override the limit at the model proxy or server where supported. Solo and thinking variants allow 30 minutes per turn; thinking-off team variants retain six minutes. When invoking `localrun` directly under heavy concurrency, provide a generous verifier drain grace, for example `--grace 600` (the option is in seconds; `--grace 300` means 300 seconds). The current default is 330 seconds, so do not lower it when a larger margin is needed.
+The Phase 1 runs also found that Pi's default `max_tokens=16384` can truncate long thinking turns; override the limit at the model proxy or server where supported. Solo and standalone thinking variants allow 30 minutes per turn; thinking-off team variants retain six minutes. For a shared thinking server, set `TURN_TIMEOUT=30m` in the URL team spec. When invoking `localrun` directly under heavy concurrency, provide a generous verifier drain grace, for example `--grace 600` (the option is in seconds; `--grace 300` means 300 seconds). The current default is 330 seconds, so do not lower it when a larger margin is needed.
 
 ## Launch
 
@@ -38,7 +38,7 @@ uv run legion launch experiments/imo-proofbench/hf-jobs-thinking.yaml
 uv run legion status "$RUN_NAME"
 ```
 
-The `hf_jobs` specs start and stop their own model server. To share one server across multiple tasks, start one of those server specs with `legion serve`; use the printed `/v1` URL with `spec.yaml` for each independent run. For thinking, set `REASONING_EFFORT=xhigh`; for the no-thinking server leave it `off`. Select the corresponding server configuration, and give each run a fresh `RUN_NAME`, `RESULTS_DIR`, and `TASK_ID`. The URL team spec uses a local board, and the solo spec uses none; neither requires `BOARD_SPACE`. The server spec still requires it to load, although `legion serve` does not deploy the board.
+The `hf_jobs` specs start and stop their own model server. The standalone thinking spec declares a 90-minute run timeout; compilation gives the server a 135-minute timeout including startup and margin, though Legion cancels it when the run ends. Budget for the longer possible lifetime; `legion serve --timeout` sets a separate shared-server lifetime. To share one server across multiple tasks, start one of those server specs with `legion serve`; use the printed `/v1` URL with `spec.yaml` for each independent run. For thinking, set `REASONING_EFFORT=xhigh` and `TURN_TIMEOUT=30m`; for the no-thinking server use `REASONING_EFFORT=off` and the default `TURN_TIMEOUT=6m`. Select the corresponding server configuration, and give each run a fresh `RUN_NAME`, `RESULTS_DIR`, and `TASK_ID`. The URL team spec uses a local board, and the solo spec uses none; neither requires `BOARD_SPACE`. The server spec still requires it to load, although `legion serve` does not deploy the board.
 
 ```sh
 # BOARD_SPACE and TASK_ID must be set. Choose one server mode:
@@ -47,8 +47,9 @@ uv run legion serve experiments/imo-proofbench/hf-jobs-nothink.yaml --timeout 4h
 # Or use the thinking server instead:
 uv run legion serve experiments/imo-proofbench/hf-jobs-thinking.yaml --timeout 4h
 export SERVER_URL='https://<job-id>--8000.hf.jobs/v1'
-# Set xhigh for the thinking server, or off for the no-thinking server.
+# For thinking, set both; for no-thinking use off and unset TURN_TIMEOUT (6m).
 export REASONING_EFFORT=xhigh
+export TURN_TIMEOUT=30m
 uv run legion launch experiments/imo-proofbench/spec.yaml
 # After all runs finish, stop the server using the same spec you started:
 RUN_NAME="$SERVER_RUN_NAME" uv run legion serve experiments/imo-proofbench/hf-jobs-thinking.yaml --stop
@@ -65,6 +66,7 @@ The thinking-off comparison uses the same task and model for four independently 
 ```sh
 # Start the shared no-thinking server as shown above and set SERVER_URL to its /v1 URL.
 export REASONING_EFFORT=off
+unset TURN_TIMEOUT  # restore the team URL spec's 6m no-thinking default
 # Run this block four separate times, substituting i=1, 2, 3, 4.
 i=1
 export RUN_NAME="imo-proofbench-solo-$i"
