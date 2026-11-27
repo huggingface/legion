@@ -17,9 +17,23 @@ runs the other teammates, the judges and a model gateway (`model-compat`) in its
 
 ### Prerequisites
 
-The dataset's runtime tarballs use Git LFS; install Git LFS and fetch the objects before
-running. Set the evaluated model's key and readout key in separate exports, so the latter
-receives the actual key value:
+The dataset's runtime tarballs use Git LFS; install and configure Git LFS and fetch the objects
+before running. Until [the sparse checkout issue](https://github.com/huggingface/legion/issues/174)
+is fixed, after cloning and checking out the dataset as below, set Git's attributes file for the
+launching shell and its workers to that pinned clone's root `.gitattributes`. This preserves any
+existing `GIT_CONFIG_*` entries. The clone must remain accessible to the workers, and LFS
+smudging must be enabled:
+
+```sh
+unset GIT_LFS_SKIP_SMUDGE
+cib_git_slot=${GIT_CONFIG_COUNT:-0}
+export "GIT_CONFIG_KEY_${cib_git_slot}=core.attributesFile"
+export "GIT_CONFIG_VALUE_${cib_git_slot}=$(git -C ../cib-harbor rev-parse --show-toplevel)/.gitattributes"
+export GIT_CONFIG_COUNT=$((cib_git_slot + 1))
+```
+
+Set the evaluated model's key and readout key in separate exports, so the latter receives the
+actual key value:
 
 ```sh
 export GEMINI_API_KEY=...   # plus the partner and judge keys below
@@ -39,6 +53,8 @@ the task's services. The spec only names them.
 | `ANTHROPIC_WORKSPACE_ID` | only if your Anthropic key requires it |
 
 ## Run one case
+
+Clone the pinned dataset as shown below and apply the Git LFS workaround first.
 
 ```sh
 export GEMINI_API_KEY=...   # plus the team's keys
@@ -82,6 +98,11 @@ other dimensions use aliases and reader grading and are not supported by this dr
 git clone https://huggingface.co/datasets/HuggingFaceSwarms/collaborative-intelligence-benchmark ../cib-harbor
 git -C ../cib-harbor checkout 070e8bf4264f0d88d88d0286e2772fb497f147ba
 git -C ../cib-harbor lfs pull
+```
+
+Apply the Git LFS workaround in Prerequisites, then run:
+
+```sh
 uv run --with ../cib-harbor/adapter python experiments/cib/parity.py --dataset ../cib-harbor \
   --output results/cib/sharing --concurrency 2
 ```
@@ -96,9 +117,8 @@ uv run --with ../cib-harbor/adapter python experiments/cib/parity.py --dataset .
 
 Running the same configuration again reuses admitted cases and waits for live local controllers.
 Unavailable attempts are retained when the driver starts a retry. Use a fresh output directory
-for a new model, gateway configuration or manifest. If a sparse dataset checkout leaves Git LFS
-pointer files in place of task archives, include the root `.gitattributes` and fetch the archives
-before launching.
+for a new model, gateway configuration or manifest. Apply the Git LFS workaround in
+Prerequisites before launching.
 
 For a small Sharing validation on a cluster CPU node with Podman configured, create a
 one-scenario manifest (the solo and its three team seeds), then run the same driver. It runs
