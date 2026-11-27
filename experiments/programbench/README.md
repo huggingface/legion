@@ -1,12 +1,14 @@
 # ProgramBench with repository collaboration
 
-Two agents implement their own copies of the csview task and exchange original
-source through a private HF dataset. Each agent still builds and submits its own
-solution. A merged collaboration PR is not a successful benchmark submission.
+Two agents implement their own copies of the csview task from
+[ProgramBench](https://huggingface.co/datasets/HuggingFaceSwarms/ProgramBench)
+and exchange original source through a private HF dataset. Each agent still
+builds and submits its own solution. A merged collaboration PR is not a
+successful benchmark submission.
 
 ## Setup
 
-- Install Legion (`uv sync`) and Docker with Compose.
+- Install Legion (`uv sync`) and Docker with Compose: the spec runs `compute: local` with `backend: docker` ([Local runs](../README.md#local-runs)).
 - Create a private HF dataset in your personal account with an initial README commit on `main`.
 - Set `HF_REPO_ID` to its `<your-username>/<name>`, `HF_REPO_TOKEN` to a credential with
   write access to it, and `HF_INFERENCE_TOKEN` to a model credential with Inference Providers

@@ -130,6 +130,8 @@ if [ "${LEGION_HARNESS:-}" = harbor ]; then
   printf '[engine]\ncompose_warning_logs = false\n' > "$PODMAN_LOCAL/containers.conf" \
     || die "cannot write $PODMAN_LOCAL/containers.conf"
   export CONTAINERS_CONF_OVERRIDE=$PODMAN_LOCAL/containers.conf
+  # Docker Hub through mirror.gcr.io (this run's slurm/registries.conf), unless the profile sets one
+  export CONTAINERS_REGISTRIES_CONF=${CONTAINERS_REGISTRIES_CONF:-$SLURM_DIR/registries.conf}
   # Harbor clones task repos with git: HF_TOKEN for huggingface.co only (the upstream helper), read
   # from a 0600 file, as the worker's environment never holds it
   if [ -n "${HF_TOKEN:-}" ]; then

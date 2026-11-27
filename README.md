@@ -33,8 +33,9 @@ uv sync
 
 Use `uv run legion` for the commands below.
 
-Docker with Compose or Podman is needed for local task containers. The mini-swarm
-example below uses Hugging Face Sandboxes instead, so it does not need Docker.
+Rootless Podman (the default `environment.backend`) or, for local runs only, Docker with Compose
+is needed for task containers. The mini-swarm example below uses Hugging Face Sandboxes instead,
+so it needs neither.
 
 ## Usage
 

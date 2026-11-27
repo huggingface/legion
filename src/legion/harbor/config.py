@@ -110,7 +110,7 @@ E2B_SETUP_S = 600
 
 
 class EnvironmentSettings(Settings):
-    backend: Literal["docker", "podman", "hf-sandbox", "e2b"] = "docker"
+    backend: Literal["docker", "podman", "hf-sandbox", "e2b"] = "podman"
     # Hugging Face Jobs hardware for hf-sandbox, e.g. cpu-basic or cpu-upgrade.
     flavor: str | None = Field(default=None, min_length=1)
 
