@@ -22,7 +22,8 @@ legion init $PWD/runs/demo --from my-experiment --profile my-cluster.env --secre
 #   slurm/              a copy of scripts/slurm: the job scripts `legion launch` submits
 #   cluster.env         a copy of the cluster profile (below)
 #   run.env (mode 600)  every ${VAR} the spec reads (commented: the spec's default),
-#                       the secrets it names, per-run LEGION_TOKEN and LEGION_WORLD_TOKEN
+#                       the secrets it names, per-run LEGION_TOKEN and LEGION_WORLD_TOKEN,
+#                       and LEGION_WORLD_ADMIN_TOKEN for a `url` world it starts (`command`)
 $EDITOR runs/demo/run.env              # fill what the checks report; rerun `legion init runs/demo`
 export LEGION_RUN_DIR=$PWD/runs/demo     # or `legion --run runs/demo ...` on each command
 legion launch runs/demo/experiment      # sbatch the world and the controller, wait, create

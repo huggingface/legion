@@ -389,6 +389,7 @@ def test_cli_status_json_and_watch(app, store, monkeypatch):
     out = runner.invoke(cli.app, ["status", "demo", "--watch"])
     assert out.exit_code == 0, out.output
     for want in ("gen 1", "no world", "workers (by time to memory limit)", "demo-researcher-w0000",
+                 "800/1000",
                  "world tools:", "open_pr", "restores:", "control-plane events", "crash",
                  "reaches its memory limit in 30 min"):
         assert want in out.output, (want, out.output)

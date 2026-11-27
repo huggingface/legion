@@ -3,7 +3,8 @@
 # CPU Slurm job. `legion launch` submits it with the controller when the spec has a world command;
 # `legion stop --release` stops it before it cancels the controller (docs/slurm.md "Deploying").
 # By hand: sbatch -J legion-world-<run> -o <run dir>/logs/%x-%j.out <run dir>/slurm/world.sbatch <run dir>
-# Size: sbatch -c / --mem (`legion launch` passes WORLD_CPUS / WORLD_MEM from run.env).
+# Size: sbatch -c / --mem (`legion launch` passes WORLD_CPUS / WORLD_MEM from cluster.env or run.env).
+# The #SBATCH defaults below fit a small world only: set both for a busy one.
 #
 # - The command runs on this node, as `compute: local` starts it (docs/world.md): {port} is a free
 #   port, {python} the venv's python; LEGION_WORLD_PORT, LEGION_WORLD_HOST=0.0.0.0, LEGION_SWARM and

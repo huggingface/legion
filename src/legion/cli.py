@@ -346,6 +346,8 @@ def _show_held(r: dict) -> None:
     h = r["held"]
     held = [f"type {n}" for n in h["types"]] + [f"agent {n}" for n in h["agents"]]
     typer.echo(f"{r['swarm']}: held: {', '.join(held) or 'nothing'}")
+    if miss := r.get("not_lifted"):  # a resume's --type/--agent with no hold of their own
+        typer.echo("not lifted: " + ", ".join(f"{n} ({why})" for n, why in miss.items()))
 
 
 @app.command()
@@ -692,10 +694,11 @@ def _print_health(h: dict | None, workers: list[dict]) -> None:
                 key=lambda x: (x[1].get("eta_limit_s") is None, x[1].get("eta_limit_s") or 0))
     if ws:
         typer.echo("workers (by time to memory limit):")
-        _table([[wid, f"{_num(wk['mem'].get('current_mb'))}/{_num(wk['mem'].get('limit_mb'))}",
+        # non-reclaimable memory, what the slope, ETA and limits use (not page cache)
+        _table([[wid, f"{_num(wk['mem'].get('nonreclaim_mb'))}/{_num(wk['mem'].get('limit_mb'))}",
                  _num(wk.get("slope_mb_h")), _num(wk.get("eta_limit_s"), "{:.0f}s"),
                  wk.get("relaunches", 0)] for wid, wk in ws[:15]],
-               ["worker", "mem MB", "MB/h", "to limit", "relaunches"])
+               ["worker", "nonreclaim MB", "MB/h", "to limit", "relaunches"])
     restores = [(wid, wk["restore"]) for wid, wk in ws if wk.get("restore")]
     if restores:
         typer.echo("restores:")

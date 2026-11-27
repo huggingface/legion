@@ -73,6 +73,7 @@ def test_init_creates_everything_then_changes_nothing(tmp_path):
     values = read_env_file(env_file)
     assert len(values["LEGION_TOKEN"]) > 30 and values["LEGION_WORLD_TOKEN"] != values["LEGION_TOKEN"]
     assert values["PYBOT_WORLD_TOKEN"] == values["LEGION_WORLD_TOKEN"]  # world.token_env
+    assert "LEGION_WORLD_ADMIN_TOKEN" not in values  # an external world: its own is set for it
     text = env_file.read_text()
     assert "# swarm (default: demo)\n#SWARM=demo\n" in text  # a default stays the spec's
     assert "#ANTHROPIC_API_KEY=" in text and "#HF_TOKEN=" in text  # secrets named, unset
@@ -167,6 +168,10 @@ def test_tokens_must_match(tmp_path):
     assert rundir.check_tokens(data, ok).ok
     assert not rundir.check_tokens(data, {**ok, "PYBOT_WORLD_TOKEN": "x"}).ok
     assert "LEGION_TOKEN" in rundir.check_tokens(data, {**ok, "LEGION_TOKEN": ""}).detail
+    url = {"world": {**data["world"], "url": "http://w:7860", "command": ["w"]}}
+    assert "LEGION_WORLD_ADMIN_TOKEN" in rundir.check_tokens(url, ok).detail  # unset
+    assert rundir.check_tokens(url, {**ok, "LEGION_WORLD_ADMIN_TOKEN": "adm"}).ok
+    assert not rundir.check_tokens(url, {**ok, "LEGION_WORLD_ADMIN_TOKEN": "w"}).ok
 
 
 class FakeBucket:
@@ -247,7 +252,10 @@ def test_world_dir_made_absolute_for_the_copy(tmp_path):
     (src / "prompts" / "system.md").write_text("x\n")
     run = tmp_path / "runs" / "r"
     rep = rundir.init(run, src, env={})
-    assert read_env_file(run / "run.env")["WORLD_DIR"] == str(tmp_path / "repo" / "worlds" / "w")
+    values = read_env_file(run / "run.env")
+    assert values["WORLD_DIR"] == str(tmp_path / "repo" / "worlds" / "w")
+    admin = values["LEGION_WORLD_ADMIN_TOKEN"]  # the run starts this `url` world: generated
+    assert len(admin) > 30 and admin not in (values["LEGION_TOKEN"], values["LEGION_WORLD_TOKEN"])
     assert _by_name(rep)["spec"].ok, _by_name(rep)["spec"].lines
     assert rundir.init(run, src, env={}).created == []
 
