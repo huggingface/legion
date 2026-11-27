@@ -107,6 +107,18 @@ async def _body(request, limit):
     return bytes(body)
 
 
+def _tool_error(content):
+    """A World API tool's error code (`{"ok": false, "error": {"code"}}`, sent as a 200), or None.
+    Only the code is logged: the message may quote the upstream."""
+    try:
+        body = json.loads(content)
+    except ValueError:
+        return None
+    if isinstance(body, dict) and body.get("ok") is False and isinstance(body.get("error"), dict):
+        return str(body["error"].get("code"))
+    return None
+
+
 class Resource:
     def __init__(self, options, *, state_dir, agents, secrets):
         self.options = Options.model_validate(options or {})
@@ -228,9 +240,10 @@ class Resource:
                 route = path.removeprefix("/world") + (f"?{query}" if query else "")
                 status, headers, content = await self.world.call(
                     name, request.method, route, request.headers, body)
-                (log.info if status < 400 else log.warning)(
-                    "gateway %s %s: %d, %.0f ms", name, path, status,
-                    (time.monotonic() - started) * 1000)
+                error = _tool_error(content) if status == 200 else None
+                (log.info if status < 400 and not error else log.warning)(
+                    "gateway %s %s: %d%s, %.0f ms", name, path, status,
+                    f" {error}" if error else "", (time.monotonic() - started) * 1000)
                 return Response(content, status, headers=headers)
             relay = await self._inference(name, request, body, started)
             return relay

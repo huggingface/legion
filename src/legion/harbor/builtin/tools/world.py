@@ -118,7 +118,8 @@ def tools() -> dict:
 
 
 def call(tool: str, args: dict[str, Scalar | list[Scalar] | dict[str, Scalar]] | None = None):
-    """Call a world tool (see world.tools) as yourself; a clone path it takes is uploaded."""
+    """Call a world tool (see world.tools) as yourself: `tool` is its name and `args` its
+    arguments, e.g. {"tool": "move", "args": {"to": "north"}}; a clone path it takes is uploaded."""
     with _client() as world:
         manifest = _body(world.get("/manifest"))
         spec = next((t for t in manifest.get("tools", []) if t.get("name") == tool), None)

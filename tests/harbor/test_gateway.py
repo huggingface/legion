@@ -216,6 +216,7 @@ async def test_an_env_world_acts_as_each_agent_with_its_own_credential(
             await asyncio.to_thread(call, "agent-001", "act", {"seat": 1})
         with pytest.raises(RuntimeError, match=r"upstream_403: .*\[redacted\]") as refused:
             await asyncio.to_thread(call, "agent-001", "refused", {})
+        assert "agent-001 /world/tools/refused: 200 upstream_403" in caplog.text  # its code, logged
         assert [s["seat"] for s in Upstream.seen] == [0, 1, 0]
         for secret in [ENV_SECRET, *CREDS]:
             assert secret not in str(refused.value) and secret not in caplog.text
