@@ -9,7 +9,8 @@ progress and model usage.
 
 Run from a laptop, on Hugging Face Jobs, or through Slurm. Use Hugging Face
 Inference Providers or your own OpenAI-compatible model endpoint, and add tools
-as Python functions. Pi is currently the supported agent harness.
+as Python functions. Each role runs Pi, Codex or Claude Code
+([harnesses](docs/harnesses.md)).
 
 Legion was called Flock until 2026-11-24; [docs/migrations.md](docs/migrations.md) maps the old
 names and lists breaking spec changes.
@@ -187,6 +188,7 @@ invocation, and shared resources.
 
 ## Further reading
 
+- [Harnesses: Pi, Codex and Claude Code](docs/harnesses.md)
 - [Message boards](docs/comms.md) and [shared worlds](docs/world.md)
 - [Live updates](docs/live.md), [agent spawning](docs/spawn.md), and [health](docs/health.md)
 - [HF repository Git and pull-request tools](docs/hf-repo.md)

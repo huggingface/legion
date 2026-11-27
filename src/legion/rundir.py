@@ -837,7 +837,7 @@ def init(run_dir: str | Path, experiment: str | Path | None = None, *,
     """`legion init`: create what RUN_DIR is missing (logs/, hosts/, the experiment copy, the
     cluster profile's copy cluster.env, run.env with per-run tokens; `secrets_file` fills
     run.env keys), then run every check. Raises ValueError when there is nothing to copy from."""
-    from legion.ops import SpecError, check_spec, read_spec
+    from legion.ops import SpecError, check_spec, read_spec, role_lines
     from legion.secrets_file import SecretsFileError, read_file
 
     rep = InitReport()
@@ -919,6 +919,8 @@ def init(run_dir: str | Path, experiment: str | Path | None = None, *,
     rep.checks.append(Check("spec", not unset, f"{spec.swarm}: loads and validates with "
                             f"{RUN_ENV}" if not unset else f"empty, no default: {', '.join(unset)}",
                             warnings))
+    if roles := role_lines(spec):
+        rep.checks.append(Check("roles", True, f"{len(roles)} Harbor role(s)", roles))
     secret_env = {**env, **values}
     rep.checks += [check_slots(spec), check_task(spec), check_bucket(spec, secret_env, rep),
                    check_providers(spec, secret_env), check_board(spec, secret_env),

@@ -105,6 +105,14 @@ def test_six_lane_spec_loads(tmp_path):
     assert Spec.model_validate(dumped) == spec
 
 
+def on(d, answers, safety):
+    """LANES with each role on its own backend."""
+    d.pop("environment")
+    for role, backend in (("answers", answers), ("safety", safety)):
+        d["agents"]["roles"][role]["environment"] = {"backend": backend}
+    return d
+
+
 @pytest.mark.parametrize(
     "edit, error",
     [
@@ -135,6 +143,38 @@ def test_six_lane_spec_loads(tmp_path):
         (lambda d: d.update(environment={"backend": "docker"}) or d.update(compute="slurm"),
          "compute slurm runs rootless"),
         (lambda d: d["loop"].update(on=["slack.mention"]), "expected message_board.<name>"),
+        # harness: the run's, or every role's (as agents.count vs agents.roles)
+        (lambda d: d["agents"]["roles"]["safety"].update(harness="pi"),
+         "set harness in every role of agents.roles, or only at the top level"),
+        (lambda d: [r.update(harness="pi") for r in d["agents"]["roles"].values()]
+         and d.update(harness="pi"), "set harness at the top level or in every role, not both"),
+        # environment: the same rule, and each backend check per role
+        (lambda d: d["agents"]["roles"]["safety"].update(environment={"backend": "docker"}),
+         "set environment in every role of agents.roles, or only at the top level"),
+        (lambda d: on(d, "docker", "docker").update(environment={"backend": "docker"}),
+         "set environment at the top level or in every role, not both"),
+        (lambda d: on(d, "docker", "hf-sandbox").update(
+            success_check={"service": "puzzle", "command": "check"}),
+         "success_check requires a docker or podman sidecar: role safety runs on hf-sandbox"),
+        (lambda d: on(d, "docker", "e2b")["limits"].update(trial_hours=23.5),
+         "e2b caps a sandbox at 24 h: limits.trial_hours plus safety's turn_timeout"),
+        (lambda d: on(d, "hf-sandbox", "docker").update(compute="hf-jobs"),
+         "compute hf-jobs cannot run containers"),
+        (lambda d: on(d, "podman", "hf-sandbox")["resources"].update(spawn={}),
+         r"resources.spawn needs a mount: use backend docker or podman \(role safety"),
+        (lambda d: on(d, "docker", "hf-sandbox")["resources"]["message_board"].pop("url"),
+         "role safety runs on a sandbox: agents reach the board over the network, so it can't "
+         "be a local board: set message_board.url or space_id"),
+        # mixed backends: every role reaches the board and the world over the network
+        (lambda d: on(d, "docker", "podman")["resources"]["message_board"].pop("url"),
+         "the roles use different backends: agents reach the board over the network"),
+        (lambda d: on(d, "docker", "hf-sandbox")["resources"]["message_board"].update(
+            transport="unix"), "resources.message_board.transport: roles on different backends"),
+        (lambda d: on(d, "docker", "hf-sandbox")["resources"].update(
+            world={"url": "http://world.example", "transport": "unix"}),
+         "resources.world.transport: roles on different backends"),
+        (lambda d: on(d, "docker", "podman")["resources"].update(
+            world={"url": "http://127.0.0.1:8770"}), "resources.world.url: roles on different"),
     ],
 )
 def test_spec_checks(tmp_path, edit, error):
@@ -142,6 +182,33 @@ def test_spec_checks(tmp_path, edit, error):
     edit(data)
     with pytest.raises(ValidationError, match=error):
         six_lane_spec(tmp_path, yaml.safe_dump(data))
+
+
+@pytest.mark.parametrize("edit, error", [
+    # Codex runs OpenAI's models only, Claude Code Anthropic's, each with its own key
+    (lambda d: d.update(harness="codex"),
+     r"agents.roles.answers: harness codex runs only models at https://api.openai.com"),
+    (lambda d: d.update(harness="claude-code", inference={
+        "urls": ["https://api.openai.com/v1"], "api_key_env": "OPENAI_KEY"}),
+     "harness claude-code runs only models at https://api.anthropic.com"),
+    (lambda d: d.update(harness="codex", inference={"urls": ["https://api.openai.com/v1"]}),
+     "inference.api_key_env: name the secret holding the role's OPENAI_API_KEY"),
+    # an api_format the harness's Harbor class does not speak
+    (lambda d: d.update(harness="claude-code", inference={
+        "urls": ["https://api.anthropic.com"], "api_key_env": "K",
+        "api_format": "openai_chat_completions"}),
+     "inference.api_format: harness claude-code speaks anthropic_messages, not "
+     "openai_chat_completions"),
+])
+def test_compile_refuses_other_harness_pairings(tmp_path, edit, error):
+    data = load_spec_yaml(COMPILE)
+    data["agents"]["roles"]["safety"].pop("inference")
+    edit(data)
+    for name in ("team.md", "answers.md", "round.md"):
+        (tmp_path / name).write_text("x")
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    with pytest.raises(ValueError, match=error):
+        compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
 
 
 def test_a_slurm_spec_without_a_backend_runs_podman(tmp_path):
@@ -606,6 +673,82 @@ async def test_the_controller_refuses_a_naming_change_in_a_running_swarm(tmp_pat
     words = swarm.model_copy(update={"naming": "words"})
     r = await client.put("/swarms/crew", json=words.model_dump(mode="json"))
     assert r.status_code == 400 and "names never change in a run" in r.text, r.text
+
+
+def test_each_role_runs_its_own_harness(tmp_path, capsys):
+    """Pi, Codex and Claude Code in one run: each role's type gets its harness, and Pi's (the
+    default) compiles as it did before."""
+    data = load_spec_yaml(COMPILE)
+    roles = data["agents"]["roles"]
+    roles["answers"]["harness"] = "pi"
+    roles["safety"].update(harness="codex", model="gpt-x",
+                           inference={"urls": ["https://api.openai.com/v1"], "api_key_env": "OAI"})
+    roles["review"] = {"harness": "claude-code", "model": "claude-x", "pricing": [3, 15, 0.3],
+                       "inference": {"urls": ["https://api.anthropic.com"],
+                                     "api_key_env": "ANTH"}}
+    for name in ("team.md", "answers.md", "round.md"):
+        (tmp_path / name).write_text("x")
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    swarm = compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
+    assert {n: ts.harbor.config.get("harness") for n, ts in swarm.types.items()} == {
+        "answers": None, "safety": "codex", "review": "claude-code"}
+    # the worker rebuilds each type's config: it validates as a one-role spec of that harness
+    assert Spec.model_validate(swarm.types["review"].harbor.config).harness == "claude-code"
+    assert {n: ts.resolved_model.inference.key_env for n, ts in swarm.types.items()} == {
+        "answers": "HF_INFERENCE_TOKEN", "safety": "OAI", "review": "ANTH"}
+    # api_format left unset: the one API Harbor's Codex and Claude Code classes speak; Pi's role
+    # keeps the run's block as written
+    assert {n: ts.resolved_model.inference.api_format for n, ts in swarm.types.items()} == {
+        "answers": "openai_chat_completions", "safety": "openai_responses",
+        "review": "anthropic_messages"}
+    assert swarm.types["answers"].inference is None
+    from legion.ops import role_lines
+
+    assert role_lines(swarm) == [
+        "role answers: harness pi, model Qwen/Qwen3.8-27B, backend hf-sandbox",
+        "role review: harness claude-code, model claude-x, backend hf-sandbox",
+        "role safety: harness codex, model gpt-x, backend hf-sandbox"]
+
+
+def test_each_role_runs_on_its_own_backend(tmp_path):
+    """A role's type gets its environment and only its backend's worker secrets."""
+    data = load_spec_yaml(COMPILE)
+    data.pop("environment")
+    roles = data["agents"]["roles"]
+    roles["answers"]["environment"] = {"backend": "podman"}
+    roles["safety"]["environment"] = {"backend": "e2b"}
+    roles["review"] = {"environment": {"backend": "hf-sandbox", "flavor": "cpu-upgrade"}}
+    for name in ("team.md", "answers.md", "round.md"):
+        (tmp_path / name).write_text("x")
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    swarm = compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
+    types = swarm.types
+    assert {n: ts.harbor.config["environment"] for n, ts in types.items()} == {
+        "answers": {"backend": "podman", "flavor": None},
+        "review": {"backend": "hf-sandbox", "flavor": "cpu-upgrade"},
+        "safety": {"backend": "e2b", "flavor": None}}
+    assert {n: ts.secrets for n, ts in types.items()} == {
+        "answers": ["MSGBOARD_OPERATOR_TOKEN"],
+        "review": ["MSGBOARD_OPERATOR_TOKEN", "HF_TOKEN"],
+        "safety": ["MSGBOARD_OPERATOR_TOKEN", "E2B_API_KEY"]}
+    worker = Spec.model_validate(types["safety"].harbor.config)  # as the worker rebuilds it
+    assert worker.environment.backend == "e2b"
+    # every role reaches the board over the network; a single-backend run keeps its transport
+    # (test_compile_gives_one_harbor_type_per_role)
+    assert all(ts.harbor.resources["message_board"]["transport"] == "http"
+               for ts in types.values())
+
+
+def test_launch_warns_that_board_rules_over_http_are_not_enforced(tmp_path):
+    from legion.ops import UNENFORCED, check_spec
+
+    data = load_spec_yaml(COMPILE)
+    data["resources"]["message_board"]["rules"] = {"max_len": 1000}
+    for name in ("team.md", "answers.md", "round.md"):
+        (tmp_path / name).write_text("x")
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    swarm = compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)  # hf-sandbox: http
+    assert check_spec(swarm, str(tmp_path / "spec.yaml"))[1] == [UNENFORCED]
 
 
 def test_e2b_workers_get_the_e2b_key_not_the_hub_token(tmp_path):

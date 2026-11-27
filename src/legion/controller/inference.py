@@ -188,6 +188,10 @@ def check(spec: SwarmSpec, secrets: Mapping[str, str],
                 continue
             where = f"types.{name}.model {r.model_id!r} on {r.provider_name}"
             key = secrets.get(r.inference.key_env) if r.inference.key_env else None
+            if key is None and ts.harbor and ts.harbor.config.get("harness"):
+                # Codex and Claude Code call their provider's API: no keyless or logged-in default
+                raise InferenceError(f"{where}: {ts.harbor.config['harness']} needs the secret "
+                                     f"{r.inference.key_env}, which is not set on the controller")
             try:
                 got = {}
                 for url in r.inference.endpoints:

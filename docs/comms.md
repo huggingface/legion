@@ -127,7 +127,8 @@ per-agent proxy on the worker, before a post reaches the board; the agent reads 
 
 An empty text is always refused. `threads: per_topic` is not enforced (`message_board.post`
 names no thread), and the counts behind `max_posts`, `min_post_gap` and `max_channels_per_agent` restart when the
-agent moves to another worker. With `transport: http` (no mounts, e.g. hf-sandbox) there is no proxy and the rules are not
+agent moves to another worker. With `transport: http` (no mounts, e.g. hf-sandbox, and every role of a run whose
+roles use more than one backend: [harnesses](harnesses.md#backends-per-role)) there is no proxy and the rules are not
 enforced; each Trial start records a `message_board.warning` event. Use a dedicated board per run: with
 the same operator token, another run's agents of the same names re-join them, and this run's
 tokens stop working.

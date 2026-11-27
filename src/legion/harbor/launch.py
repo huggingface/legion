@@ -25,7 +25,7 @@ from harbor.trial.trial import Trial
 
 from legion.models import NO_KEY_ENV, loopback_url
 
-from .config import PI_VERSION, SANDBOXES, Config
+from .config import HARNESSES, PI_VERSION, SANDBOXES, Config
 from .envs import ENVIRONMENTS
 from .harnesses.pi import attach_pi_setup, terminal_pi_error
 from .instructions import build_agent_instructions
@@ -90,8 +90,14 @@ def build_trial_config(
     inference = inference or config.inference
     run = run_dir.name if run is None else run
     backend = config.environment.backend
-    key_name = inference.key_env or NO_KEY_ENV
-    agent_kwargs = {"version": PI_VERSION, "max_turns": config.limits.agent_max_turns}
+    harness = HARNESSES[config.harness]
+    # the agent gets only its role's key, under its harness's own name (Pi: the configured one)
+    key_name = harness.key or inference.key_env or NO_KEY_ENV
+    pi = config.harness == "pi"
+    url = agent_url(inference.endpoint_for(run, name), backend)
+    agent_kwargs = {"version": PI_VERSION} if pi else {}
+    if config.harness != "codex":  # Codex has no turn limit
+        agent_kwargs["max_turns"] = config.limits.agent_max_turns
     if inference.reasoning_effort is not None:
         agent_kwargs["reasoning_effort"] = inference.reasoning_effort
     return TrialConfig(
@@ -106,15 +112,16 @@ def build_trial_config(
         trial_name=f"{run_dir.name}-{name}",
         trials_dir=run_dir / "trials",
         agent=AgentConfig(
-            name="pi",
+            name=config.harness,
             override_timeout_sec=config.limits.agent_timeout_seconds,
             # the id as the servers take it (`<model>:<provider>` on the router), unparsed
             model_name=inference.request_model(config.model),
             skip_model_parsing=True,
-            base_url=agent_url(inference.endpoint_for(run, name), backend),
+            base_url=url,  # always explicit, so no *_BASE_URL in the worker's env moves it
             model_api_key_name=key_name,
             model_api_format=inference.api_format,
             env={
+                **harness.mask,
                 key_name: api_key,
                 "LEGION_TOOLS_MANIFEST": TOOLS_MANIFEST,
             },
@@ -153,7 +160,8 @@ async def run_experiment(config: Config):
 
 async def _run_experiment(config: Config):
     api_key = config.api_key()
-    config.check_model_connection(api_key)
+    if config.harness == "pi":  # Harbor checks the other harnesses' connections at Trial start
+        config.check_model_connection(api_key)
     instructions = (
         config.team_file.read_text(encoding="utf-8")
         if config.team_file is not None
@@ -232,7 +240,8 @@ async def _run_experiment(config: Config):
         result = None
         try:
             trial = await Trial.create(trial_config)
-            attach_pi_setup(trial, config.inference)
+            if config.harness == "pi":
+                attach_pi_setup(trial, config.inference)
             if config.tools:
                 attach_tool_setup(trial, bundle)
             result = await trial.run()
@@ -290,7 +299,7 @@ async def _run_experiment(config: Config):
                     "error", "Verification did not produce a reward"
                 )
             if record["status"] == "completed":
-                pi_error = terminal_pi_error(
+                pi_error = config.harness == "pi" and terminal_pi_error(
                     run_dir / "trials" / trial_config.trial_name / "agent" / "pi.txt",
                     max_turns=config.limits.agent_max_turns,
                 )

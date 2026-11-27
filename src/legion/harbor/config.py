@@ -1,7 +1,9 @@
 """The small, deliberately strict experiment interface."""
 
+import dataclasses
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
@@ -13,6 +15,34 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from legion.models import NO_KEY, Inference
 
 PI_VERSION = "1.5.0"
+
+
+@dataclass(frozen=True)
+class Harness:
+    """A harness legion serves turns with: its turn server (legion.harbor.agent; its Harbor
+    class names the wire APIs it speaks), the env name its model key takes in the agent
+    (None: the role's own `api_key_env`), the one provider host it may call (None: any), and
+    the agent env that masks what Harbor would otherwise read from the worker's own env (a
+    local worker has the operator's shell): another login, key or auth mode."""
+
+    agent: str
+    key: str | None = None
+    host: str | None = None
+    mask: dict[str, str] = dataclasses.field(default_factory=dict)  # Harbor's bools take "0", not ""
+
+
+HARNESSES = {
+    "pi": Harness("legion.harbor.agent:LegionPi"),
+    "codex": Harness("legion.harbor.agent:LegionCodex", "OPENAI_API_KEY",
+                     "api.openai.com", {"CODEX_API_KEY": "", "CODEX_AUTH_JSON_PATH": "",
+                                        "CODEX_FORCE_AUTH_JSON": "0"}),
+    "claude-code": Harness("legion.harbor.agent:LegionClaudeCode", "ANTHROPIC_API_KEY",
+                           "api.anthropic.com", {
+                               "ANTHROPIC_AUTH_TOKEN": "", "CLAUDE_CODE_OAUTH_TOKEN": "",
+                               "CLAUDE_FORCE_OAUTH": "0", "CLAUDE_CODE_USE_BEDROCK": "0",
+                               "AWS_BEARER_TOKEN_BEDROCK": ""}),
+}
+HarnessName = Literal["pi", "codex", "claude-code"]
 # Legion's own resource providers and tools, shipped inside the package.
 BUILTIN = Path(__file__).resolve().parent / "builtin"
 
@@ -145,7 +175,7 @@ class SuccessCheck(Settings):
 
 class Config(Settings):
     name: str = Field(default="pi-team", pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
-    harness: Literal["pi"] = "pi"
+    harness: HarnessName = "pi"
     success_check: SuccessCheck | None = None
     model: str = Field(min_length=1)
     inference: Inference = Field(default_factory=Inference)

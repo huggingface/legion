@@ -1,5 +1,7 @@
 """HarborAdapter + LegionPi on fakes: a FakeTrial (test_launch's) that runs the real LegionPi
-against a FakeEnv (after harbor-core's test_agent.py) whose `pi --print` writes a canned pi.txt.
+against a FakeEnv (after harbor-core's test_agent.py) whose `pi --print` writes a canned pi.txt
+(and `codex exec`, `claude --verbose` their own outputs and session files, for LegionCodex and
+LegionClaudeCode).
 Container networks are faked at their command boundary (legion.harbor.networking.command)."""
 
 import asyncio
@@ -13,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 from harbor.agents.factory import AgentFactory
 from harbor.environments.base import ExecResult
+from harbor.environments.capabilities import EnvironmentCapabilities
 from harbor.models.agent.context import AgentContext
 from harbor.models.trial.result import ExceptionInfo
 from harbor.models.verifier.result import VerifierResult
@@ -23,7 +26,7 @@ from legion.harbor.agent import LegionPi
 from legion.harbor.spec import Spec, compile_spec
 from legion.models import Inference
 from legion.worker.adapters import harbor as harbor_adapter
-from legion.worker.adapters.base import ResumeError
+from legion.worker.adapters.base import ResumeError, transient_error
 from legion.worker.adapters.harbor import HarborAdapter, make_adapter
 
 from .test_envs import compose
@@ -36,6 +39,8 @@ TASK = {
     "task": {"git_url": "https://example.com/tasks.git", "git_commit_id": "c" * 40, "path": "t"},
 }
 SESSIONS = "/logs/agent/pi/sessions"
+NATIVE = {"codex": "codex exec ", "claude-code": "claude --verbose"}  # what each call runs
+KILL_PI = legion_agent.kill_command(LegionPi.PROCESS)
 
 
 class Fakes:
@@ -48,6 +53,8 @@ class Fakes:
         self.success_gate = None
         self.success_calls = []
         self.pi_env = []  # each `pi --print` exec's env
+        self.prompts = []  # each call's prompt
+        self.files = []  # each upload_file's target
         self.probe_ok, self.upload_fails, self.kill_fails = True, False, False
         self.probe_hangs = False  # `true` (a probe or ping) never answers: a hung sandbox
         self.fail = None  # pi call number -> "exit" | "provider"
@@ -57,6 +64,7 @@ class Fakes:
         self.start_gate = self.verify_gate = None  # set: Trial.run waits for them
         self.route_gate = None  # set: `ip route` (a Trial network's first command) waits for it
         self.steps = False  # True: the verifier's files land as a multi-step Trial's
+        self.compose = True  # the environment's Harbor docker_compose capability (sidecars)
 
     def gate(self, n):
         return self.gates.setdefault(n, asyncio.Event())
@@ -69,6 +77,7 @@ class FakeEnv:
     def __init__(self, logs_dir, fakes):
         self.logs_dir, self.fakes, self.default_user = logs_dir, fakes, None
         self.killed = False
+        self.capabilities = EnvironmentCapabilities(docker_compose=fakes.compose)
 
     async def service_exec(self, command, *, service, timeout_sec):
         # Compose mixes a banner from stderr into stdout; the command frames its JSON body.
@@ -88,16 +97,13 @@ class FakeEnv:
                           + (self.fakes.success_response or original) + CHECK_END)
 
     async def upload_file(self, source, target):
-        pass
+        self.fakes.files.append(str(target))
 
     async def upload_dir(self, source, target):
         if self.fakes.upload_fails:
             raise OSError("upload failed")
         self.fakes.uploads.append((Path(source), target))
-        local = self.logs_dir / "pi" / "sessions"  # /logs/agent is mounted at logs_dir
-        local.mkdir(parents=True, exist_ok=True)
-        for path in Path(source).glob("*.jsonl"):
-            (local / path.name).write_text(path.read_text())
+        shutil.copytree(source, self._remote(target), dirs_exist_ok=True)
 
     def is_path_mounted(self, environment_path, host_path):
         return self.fakes.mounted
@@ -119,7 +125,7 @@ class FakeEnv:
             return ExecResult(return_code=0 if f.probe_ok else 1)
         if user == "root":
             f.root.append(command)
-        if command.endswith(legion_agent.KILL_PI):
+        if command.endswith(KILL_PI):
             if f.kill_fails:
                 return ExecResult(return_code=1)
             self.killed = True
@@ -128,13 +134,18 @@ class FakeEnv:
             return ExecResult(return_code=0)
         if "rm -f /logs/agent/pi.txt" in command:
             self._remote("/logs/agent/pi.txt").unlink(missing_ok=True)
-        if " pi --print " not in command:
+        if "CODEX_RUNTIME_ID" in command:  # Codex asks the agent's uid and gid
+            return ExecResult(return_code=0, stdout="CODEX_RUNTIME_ID 0 0\n")
+        harness = next((h for h, call in NATIVE.items() if call in command), None)
+        if " pi --print " not in command and harness is None:
             return ExecResult(return_code=0)
         f.pi.append(command)
         f.pi_env.append(env)
         n = len(f.pi)
         words = shlex.split(command)
-        prompt = words[words.index("2>&1") - 1]
+        prompt = (next(v for k, v in env.items() if k.startswith("CLAUDE_CODE_INSTRUCTION_"))
+                  if harness == "claude-code" else words[words.index("2>&1") - 1])
+        f.prompts.append(prompt)
         if n in f.hold or prompt.endswith("[hold]"):  # [hold]: a tiny run's long turn
             await f.gate(n).wait()
         if self.killed:
@@ -143,6 +154,8 @@ class FakeEnv:
         failure = f.fail and f.fail(n)
         if failure == "exit":
             return ExecResult(return_code=1, stderr="boom")
+        if harness:
+            return self._native(harness, n, prompt)
         message = {
             "role": "assistant",
             "content": [{"type": "text", "text": f"reply-{n}"}],
@@ -165,6 +178,33 @@ class FakeEnv:
         with (sessions / "s.jsonl").open("a") as out:
             # the prompt too: the tiny runs' "what the model was told" (tests/tinyrun.py)
             out.write(json.dumps({"call": n, "prompt": prompt}) + "\n")
+        return ExecResult(return_code=0)
+
+
+    def _native(self, harness, n, prompt):
+        """A Codex or Claude Code call: its JSON-lines output (one reply, its usage) and one
+        line more in its session file, where the real CLI keeps it under /logs/agent."""
+        if harness == "codex":
+            out, session = "codex.txt", "sessions/2026/11/26/rollout-2026-11-26T10-00-00-s.jsonl"
+            events = [{"type": "item.completed",
+                       "item": {"type": "agent_message", "text": f"reply-{n}"}},
+                      {"type": "item.completed",
+                       "item": {"type": "command_execution", "command": "ls"}},
+                      {"type": "turn.completed", "usage": {
+                          "input_tokens": 1500, "cached_input_tokens": 500, "output_tokens": 100}}]
+        else:
+            out, session = "claude-code.txt", "sessions/projects/-app/s.jsonl"
+            events = [{"type": "assistant", "message": {"content": [
+                          {"type": "text", "text": f"reply-{n}"},
+                          {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}]}},
+                      {"type": "result", "is_error": False, "usage": {
+                          "input_tokens": 1000, "cache_read_input_tokens": 500,
+                          "output_tokens": 100}}]
+        (self.logs_dir / out).write_text("".join(json.dumps(e) + "\n" for e in events))
+        path = self.logs_dir / session
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as file:
+            file.write(json.dumps({"call": n, "prompt": prompt}) + "\n")
         return ExecResult(return_code=0)
 
 
@@ -331,6 +371,82 @@ async def test_one_trial_across_bursts(fakes, tmp_path):
     assert len(session.read_text().splitlines()) == 2
 
 
+def native_spec(harness):
+    """pi-hf.yaml's agents on Codex or Claude Code, at their provider's API."""
+    spec = Spec.load(EXAMPLES / "pi-hf.yaml", env={})
+    url, key = {"codex": ("https://api.openai.com/v1", "OPENAI_ROLE_KEY"),
+                "claude-code": ("https://api.anthropic.com", "ANTHROPIC_ROLE_KEY")}[harness]
+    spec.harness, spec.model = harness, "native-model"
+    spec.inference = Inference(urls=[url], api_key_env=key)  # api_format: Harbor's
+    return compile_spec(spec, TASK).types["agent"]
+
+
+@pytest.mark.parametrize("harness, key, resume, session", [
+    ("codex", "OPENAI_API_KEY", "codex exec resume --last ",
+     "2026/11/26/rollout-2026-11-26T10-00-00-s.jsonl"),
+    ("claude-code", "ANTHROPIC_API_KEY", "--continue ", "projects/-app/s.jsonl"),
+])
+async def test_codex_and_claude_code_turns_resume_their_sessions(
+        fakes, tmp_path, monkeypatch, harness, key, resume, session):
+    """Harbor's own Codex and Claude Code under the turn server: each call gets only the role's
+    key, under the harness's own name (never another role's key or the worker's Hub token),
+    usage comes from the call's output, and the native session files are kept at their paths and
+    put back for a relaunched worker's Trial, whose first turn resumes them."""
+    secrets = {"OPENAI_ROLE_KEY": "openai-secret", "ANTHROPIC_ROLE_KEY": "anthropic-secret"}
+    for name, value in secrets.items():  # a worker holding both (each type's has only its own)
+        monkeypatch.setenv(name, value)
+    login = tmp_path / "auth.json"
+    login.write_text("{}")
+    # a local worker has the operator's shell: logins, other keys and endpoints Harbor reads
+    operator = {"CLAUDE_CODE_OAUTH_TOKEN": "oauth-secret", "ANTHROPIC_AUTH_TOKEN": "auth-secret",
+                "CODEX_API_KEY": "codex-secret", "AWS_BEARER_TOKEN_BEDROCK": "aws-secret",
+                "ANTHROPIC_BASE_URL": "https://elsewhere.example",
+                "OPENAI_BASE_URL": "https://elsewhere.example/v1",
+                "CODEX_AUTH_JSON_PATH": str(login), "CODEX_FORCE_AUTH_JSON": "1",
+                "CLAUDE_FORCE_OAUTH": "1", "CLAUDE_CODE_USE_BEDROCK": "1"}
+    for name, value in operator.items():
+        monkeypatch.setenv(name, value)
+    spec = native_spec(harness)
+    own = secrets[spec.resolved_model.inference.key_env]
+    a = make_adapter(tmp_path / "work" / "agent-0000", "agent-0000", spec)
+    sid, events = await start(a)
+    await a.send("First.")
+    evs = await read(events, "turn_ended")
+    assert evs[0].kind == "turn_started" and [e.kind for e in evs[-2:]] == ["usage", "turn_ended"]
+    messages = [e.message for e in evs if e.kind == "message"]  # in legion's (Pi's) shape
+    assert messages[0]["content"][0]["text"] == "reply-1" and evs[-1].status == "completed"
+    calls = [b for m in messages for b in m["content"] if b.get("type") == "toolCall"]
+    assert calls and (harness == "codex" or calls[0]["arguments"] == {"command": "ls"})
+    u = evs[-2].usage
+    assert (evs[-2].model, u.input, u.cache_read, u.output) == ("native-model", 1000, 500, 100)
+    await a.send("Second.")
+    await read(events, "turn_ended")
+    assert resume not in fakes.pi[0] and "TASK" in fakes.prompts[0]
+    assert resume in fakes.pi[1] and "TASK" not in fakes.prompts[1]
+    url = {"codex": ("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+           "claude-code": ("ANTHROPIC_BASE_URL", "https://api.anthropic.com")}[harness]
+    for env in fakes.pi_env:
+        assert env[key] == own and env[url[0]] == url[1]  # the role's key, at the role's URL
+        others = {*secrets.values(), "test-inference-secret", "oauth-secret", "auth-secret",
+                  "codex-secret", "aws-secret"} - {own}
+        assert not others & set(env.values()), sorted(env)
+        assert not [v for v in env.values() if "elsewhere" in v or str(login) in v]
+    assert not [f for f in fakes.files if f.endswith("auth.json")]  # no login uploaded
+    (path,) = a.session_files(sid)
+    assert path == a.home / "sessions" / session and len(path.read_text().splitlines()) == 2
+    await a.close()
+
+    shutil.rmtree(a.root / "trials")  # a relaunched worker: only the synced home is back
+    b = make_adapter(tmp_path / "work" / "agent-0000", "agent-0000", spec)
+    _, events = await start(b, sid)
+    assert fakes.uploads == [(b.home / "sessions", "/logs/agent/sessions")]
+    await b.send("Third.")
+    assert (await read(events, "turn_ended"))[-1].status == "completed"
+    assert resume in fakes.pi[2] and "TASK" not in fakes.prompts[2] and "Third." in fakes.prompts[2]
+    assert len(path.read_text().splitlines()) == 3
+    await b.close()
+
+
 async def test_an_empty_first_prompt_sends_the_instruction_alone(fakes, tmp_path):
     a = adapter(tmp_path)
     sid, events = await start(a)
@@ -464,7 +580,7 @@ async def test_stop_kills_a_turn_in_flight(fakes, tmp_path):
     await a.stop()
     evs = await read(events, "exited")
     assert [(e.kind, e.status) for e in evs] == [("turn_ended", "interrupted"), ("exited", None)]
-    assert any(c.endswith(legion_agent.KILL_PI) for c in fakes.root)
+    assert any(c.endswith(KILL_PI) for c in fakes.root)
     assert a.alive()
     _, events = await start(a)  # same Trial; the queued prompt was dropped
     await a.send("b")
@@ -487,7 +603,7 @@ async def test_a_new_trial_gets_the_saved_sessions(fakes, tmp_path):
 
 async def test_resume_errors(fakes, tmp_path):
     a = adapter(tmp_path)
-    with pytest.raises(ResumeError, match="no Pi session files"):
+    with pytest.raises(ResumeError, match="no session files"):
         await a.start(a.workdir, "gone", a.spec)
     assert fakes.trials == []
     (a.home / "sessions").mkdir(parents=True)
@@ -842,7 +958,7 @@ async def test_a_failed_kill_is_reported(fakes, tmp_path, monkeypatch):
     await a.stop()
     evs = await read(events, "exited")
     assert [e.kind for e in evs] == ["error", "exited"] and "kill pi" in evs[0].error
-    assert "pkill" not in legion_agent.KILL_PI
+    assert "pkill" not in KILL_PI
     fakes.release(1)
 
 
@@ -857,15 +973,50 @@ def test_read_turn_counts_compaction(tmp_path):
     assert len(messages) == 1 and (usage.input, usage.output) == (110, 21)
 
 
-def test_the_kill_script_needs_no_procps_and_spares_itself(tmp_path):
-    """KILL_PI on a fake /proc, `kill` stubbed: nothing on this machine is signalled. It ends
-    `pi` and its tool processes (12 -> 11 -> 20 -> 21), not the rest."""
+DONE = {"type": "turn.completed", "usage": {"input_tokens": 5, "output_tokens": 1}}
+
+
+@pytest.mark.parametrize("parse, events, error, ended, transient", [
+    # Codex: a failed turn (rate-limited: the loop backs off), a recovered reconnect, a refusal
+    ("codex_turn", [{"type": "turn.failed", "error": {"message": "429 Too Many Requests"}}],
+     "429 Too Many Requests", False, True),
+    ("codex_turn", [{"type": "error", "message": "Reconnecting... 1/5"}, DONE], None, True, None),
+    ("codex_turn", [{"type": "error", "message": "401 Unauthorized"}], "401 Unauthorized", False,
+     False),
+    # Claude Code: an API error, the turn limit (a normal end), a call cut before its result
+    ("claude_turn", [{"type": "result", "is_error": True, "subtype": "success",
+                      "result": "API Error: 429 rate_limit_error"}],
+     "API Error: 429 rate_limit_error", False, True),
+    ("claude_turn", [{"type": "result", "is_error": True, "subtype": "error_max_turns"}], None,
+     True, None),
+    ("claude_turn", [{"type": "result", "is_error": True, "subtype": "success",
+                      "result": "Invalid API key"}], "Invalid API key", False, False),
+    ("claude_turn", [], None, False, None),
+])
+def test_native_turn_outputs(tmp_path, parse, events, error, ended, transient):
+    """(error, ended) as the turn server takes them: an error fails the turn (a transient one is
+    retried with backoff); `ended` makes a non-zero exit no error."""
+    path = tmp_path / "out.txt"
+    path.write_text("".join(json.dumps(e) + "\n" for e in events))
+    _, _, got, done = getattr(legion_agent, parse)(path)
+    assert (got, done) == (error, ended)
+    assert transient is None or transient_error(got) is transient
+
+
+@pytest.mark.parametrize("server, cli", [
+    (LegionPi, ["node", "/usr/bin/pi", "--print", "--mode", "json"]),
+    (legion_agent.LegionCodex, ["node", "/usr/bin/codex", "exec", "--json"]),
+    (legion_agent.LegionClaudeCode, ["claude", "--verbose", "--print"]),
+])
+def test_the_kill_script_needs_no_procps_and_spares_itself(tmp_path, server, cli):
+    """Each harness's kill script on a fake /proc, `kill` stubbed: nothing on this machine is
+    signalled. It ends the call and its tool processes (12 -> 11 -> 20 -> 21), not the rest."""
     import subprocess
 
     proc = tmp_path / "proc"
-    script = legion_agent.KILL_PI.replace("/proc", str(proc))
-    for pid, ppid, argv in [("11", "12", ["node", "/usr/bin/pi", "--print", "--mode", "json"]),
-                            ("12", "1", ["bash", "-c", "set -o pipefail; pi --print 'hi'"]),
+    script = legion_agent.kill_command(server.PROCESS).replace("/proc", str(proc))
+    for pid, ppid, argv in [("11", "12", cli),
+                            ("12", "1", ["bash", "-c", f"set -o pipefail; {' '.join(cli)} 'hi'"]),
                             ("20", "11", ["bash", "-c", "make test"]), ("21", "20", ["make"]),
                             ("13", "1", ["sleep", "100"]), ("14", "1", ["bash", "-c", script])]:
         (proc / pid).mkdir(parents=True)
@@ -1044,6 +1195,18 @@ async def test_sidecar_success_survives_until_verification(fakes, tmp_path, body
             assert "config" not in json.loads(saved.read_text())
     finally:
         await a.close(0)
+
+
+async def test_success_check_needs_a_backend_that_runs_sidecars(fakes, tmp_path):
+    """Harbor's own docker_compose capability of the Trial's environment, not a backend list."""
+    fakes.compose = False
+    ts = type_spec()
+    ts.harbor.config["success_check"] = {"service": "puzzle", "command": "check"}
+    a = make_adapter(tmp_path / "work" / "agent-0000", "agent-0000", ts)
+    with pytest.raises(RuntimeError, match="backend docker cannot run sidecar services"):
+        await a.start(a.workdir, None, ts)
+    assert not fakes.success_calls
+    await a.close(0)
 
 
 @pytest.mark.parametrize("enabled", [False, True])

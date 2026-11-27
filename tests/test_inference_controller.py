@@ -20,7 +20,7 @@ from legion.models import AgentHeartbeat, SwarmSpec, TokenUsage, WorkerHeartbeat
 from legion.ops import provider_backed, unprobed
 
 from . import fake_models
-from .conftest import HB, TOKEN
+from .conftest import HARBOR, HB, TOKEN
 
 ROUTER = {"hf_router": {"provider": "deepinfra"}}
 GPU1 = {"urls": ["http://qwen-job:8000/v1"], "api_key_env": "VLLM_API_KEY", "max_working": 2}
@@ -691,6 +691,25 @@ async def test_preflight_false_keeps_the_controller_off_the_endpoints(store, clo
     assert types["pixel"]["resolved_model"]["context_window"] is None  # Pi's default
     assert types["pinned"]["resolved_model"]["context_window"] == 400000
     assert not provider_backed(spec) and len(unprobed(spec)) == 2
+
+
+def native(harness: str, model: str, url: str, key_env: str) -> dict:
+    """A type whose role runs `harness` (Codex, Claude Code) on its provider's API."""
+    return {**HB, "model": model, "harbor": {**HARBOR, "config": {"task": {}, "harness": harness}},
+            "inference": {"urls": [url], "api_key_env": key_env, "context_window": 200000}}
+
+
+async def test_a_native_harness_needs_its_key_on_the_controller(store, clock):
+    """Codex and Claude Code have no keyless default: the apply is refused, naming the secret."""
+    app = create_app(store, TOKEN, clock=clock, secret_source={"HF_TOKEN": "hf-x"},
+                     inference_transport=fake_models.transport())
+    spec = pspec(ROUTER, codex=native("codex", "m", "https://api.openai.com/v1", "OPENAI_KEY"))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t",
+                                 headers={"Authorization": f"Bearer {TOKEN}"}) as c:
+        r = await put(c, spec)
+    assert r.status_code == 400
+    assert r.json()["detail"].endswith("codex needs the secret OPENAI_KEY, which is not set on "
+                                       "the controller")
 
 
 @pytest.mark.parametrize("namespace", ["", "huggingface"])

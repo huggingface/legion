@@ -141,6 +141,8 @@ which every worker job sources ([Slurm](slurm.md)). The
 - HF Jobs workers use HF Sandboxes or E2B. Slurm workers use Podman or HF Sandboxes.
   `compute` chooses where workers run; `environment.backend` chooses where their
   task environments run.
+- Roles can use different backends: set `environment` in every role instead of at
+  the top level ([backends per role](harnesses.md#backends-per-role)).
 
 Start with one agent and the smallest useful task before scaling up. Check task
 startup, a model turn, tool access, and the task's verifier output. Legion keeps a

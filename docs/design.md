@@ -59,8 +59,8 @@ agent's workdir and Pi sessions to the bucket, and drains `drain_window` before 
 
 A name, a workdir and a Pi session, on whichever worker holds it. Its Trial (an environment on
 docker, podman, hf-sandbox or e2b: `legion.worker.adapters.harbor`) starts on the first prompt and
-stays up; each prompt is one Pi turn in it, and prompts that arrive during a turn join the next
-one. A Trial that fails is reported and the next prompt starts a new one on the same session.
+stays up; each prompt is one turn of the role's harness in it (Pi, Codex or Claude Code:
+docs/harnesses.md), and prompts that arrive during a turn join the next one. A Trial that fails is reported and the next prompt starts a new one on the same session.
 
 ### CLI and library
 
@@ -92,7 +92,7 @@ worker and CLI read nothing else, and `tests/test_registry.py` checks every entr
 
 ### Resume across workers
 
-`persist_workdir` (default true): the worker syncs each agent's workdir and Pi sessions to
+`persist_workdir` (default true): the worker syncs each agent's workdir and harness sessions to
 `<bucket>/<swarm>/<type>/<agent>/` while it works and once more when it leaves, and a new worker
 restores both before the agent's first turn there. File modes travel in
 `<workdir>/.legion-modes.json`, since buckets keep only bytes. When a session cannot be resumed

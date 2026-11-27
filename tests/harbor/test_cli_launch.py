@@ -16,7 +16,7 @@ import legion.harbor
 from legion import cli, rundir
 from legion.harbor import env as env_world
 from legion.harbor import sources
-from legion.ops import SpecError, check_spec, read_spec
+from legion.ops import UNENFORCED, SpecError, check_spec, read_spec
 
 EXPERIMENTS = Path(__file__).parents[2] / "experiments"
 FIXTURES = Path(__file__).parents[1] / "fixtures"
@@ -127,7 +127,8 @@ def experiment_spec(monkeypatch, pins, name, rev, env=None):
     path = EXPERIMENTS / name
     path = path / "spec.yaml" if path.is_dir() else path
     swarm = read_spec(str(path))
-    assert check_spec(swarm, str(path))[1] == []  # no refusals, no warnings
+    # no refusals, no warnings but board rules a sandbox run cannot enforce (pybot's)
+    assert set(check_spec(swarm, str(path))[1]) <= {UNENFORCED}
     assert all(ts.harbor.task["task"]["git_commit_id"] == "a" * 40 for ts in swarm.types.values())
     return swarm
 
@@ -221,6 +222,21 @@ def test_the_mini_swarm_spec_compiles(monkeypatch, pins):
     assert (hj.flavor, hj.vllm_args, hf.inference.api_key_env) == (
         "h200", ["max_model_len=131072"], "HF_INFERENCE_TOKEN")
     assert hj.timeout == "3300s"  # startup_timeout 30m + run_timeout_seconds 600 + 15m
+    # mixed.yaml: one agent per harness, the same names, task and loop; Codex on e2b here
+    for key in ("OPENAI_MODEL", "ANTHROPIC_MODEL", "PI_BACKEND", "CLAUDE_BACKEND"):
+        monkeypatch.delenv(key, raising=False)
+    mixed = experiment_spec(monkeypatch, pins, "mini-swarm/mixed.yaml",
+                            "d0e1fee0f1036a80d5400d67f7fad9143668ba94",
+                            {"BOARD_URL": "https://board.example", "CODEX_BACKEND": "e2b"})
+    assert {n: (t.harbor.config.get("harness"), t.harbor.config["environment"]["backend"],
+                t.resolved_model.inference.key_env, t.secrets) for n, t in mixed.types.items()} == {
+        "pi": (None, "hf-sandbox", "HF_INFERENCE_TOKEN", ["MSGBOARD_OPERATOR_TOKEN", "HF_TOKEN"]),
+        "codex": ("codex", "e2b", "OPENAI_API_KEY", ["MSGBOARD_OPERATOR_TOKEN", "E2B_API_KEY"]),
+        "claude": ("claude-code", "hf-sandbox", "ANTHROPIC_API_KEY",
+                   ["MSGBOARD_OPERATOR_TOKEN", "HF_TOKEN"])}
+    assert mixed.types["pi"].harbor.roster == {
+        "agent-001": "pi", "agent-002": "codex", "agent-003": "claude"}
+    assert mixed.types["pi"].loop == ts.loop
 
 
 def test_the_escape_room_spec_compiles(monkeypatch, pins):

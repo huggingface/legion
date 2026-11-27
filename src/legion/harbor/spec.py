@@ -17,6 +17,7 @@ import shutil
 import tempfile
 from pathlib import Path
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
 from harbor.utils.env import is_sensitive_env_key
 from pydantic import AfterValidator, BeforeValidator, Field, field_validator, model_validator
@@ -33,17 +34,21 @@ from legion.models import (
     TypeSpec,
     WorkerKnobs,
     load_spec_yaml,
+    loopback_url,
     max_workers,
     parse_duration,
 )
+from legion.registry import load
 from legion.world.protocol import ADMIN_TOKEN_ENV
 
 from .config import (
     E2B_SETUP_S,
+    HARNESSES,
     SANDBOXES,
     AgentSettings,
     Config,
     EnvironmentSettings,
+    HarnessName,
     Limits,
     RoleName,
     RoleSettings,
@@ -127,6 +132,8 @@ class Workers(Settings):
 
 class Role(RoleSettings):
     count: int = Field(default=1, ge=0, strict=True)  # 0: spawned agents only (`spawn:`)
+    harness: HarnessName | None = None  # in every role or none (the run's then)
+    environment: EnvironmentSettings | None = None  # the same
     model: str | None = Field(default=None, min_length=1)  # the run's model otherwise
     inference: Inference | None = None  # its own endpoints (a whole block); the run's otherwise
     ramp: Ramp | None = None
@@ -181,6 +188,21 @@ class Spec(Config):
         """Role name -> Role; `agents.count` is one role, `agent`, whose agents have no role."""
         return self.agents.roles or {"agent": Role(count=self.agents.count)}
 
+    def harness_of(self, role: Role) -> str:
+        return role.harness or self.harness
+
+    def backend_of(self, role: Role) -> str:
+        return (role.environment or self.environment).backend
+
+    def _top_or_every_role(self, field):
+        """`field` is the run's (no role sets it) or every role's, never both: as agents.count
+        and agents.roles."""
+        own = [getattr(r, field) is not None for r in (self.agents.roles or {}).values()]
+        if any(own) and not all(own):
+            raise ValueError(f"set {field} in every role of agents.roles, or only at the top level")
+        if any(own) and field in self.model_fields_set:
+            raise ValueError(f"set {field} at the top level or in every role, not both")
+
     def type_loops(self):
         """Each role's loop: its own, else the run's. Roles sharing the run's loop split its
         `final.reserve_usd`, which is held back once (legion sums its types' reserves)."""
@@ -200,11 +222,18 @@ class Spec(Config):
 
     @model_validator(mode="after")
     def checks(self):
-        limits, backend = self.limits, self.environment.backend
+        limits = self.limits
+        self._top_or_every_role("harness")
+        self._top_or_every_role("environment")
+        backends = {name: self.backend_of(role) for name, role in self.roles().items()}
+        sandboxed = {name: b for name, b in backends.items() if b in SANDBOXES}
         if self.stop_on_success and self.success_check is None:
             raise ValueError("stop_on_success requires success_check")
-        if self.success_check and backend not in ("docker", "podman"):
-            raise ValueError("success_check requires a docker or podman sidecar")
+        if self.success_check and sandboxed:
+            # shortcut: Harbor's docker_compose capability needs a built environment, so the
+            # worker checks it per Trial; here the sandboxes are known not to have it
+            raise ValueError("success_check requires a docker or podman sidecar: role "
+                             f"{next(iter(sandboxed))} runs on {next(iter(sandboxed.values()))}")
         loops = self.type_loops().values()
         for loop in loops:
             try:
@@ -229,7 +258,8 @@ class Spec(Config):
             raise ValueError(
                 f"loop final.reserve_usd ({reserve:g}) is more than limits.budget_usd"
             )
-        for name, role in self.roles().items() if backend in SANDBOXES else ():
+        for name, backend in sandboxed.items():
+            role = self.roles()[name]
             turn = ((role.workers and role.workers.turn_timeout) or self.workers.turn_timeout
                     or TypeSpec.model_fields["turn_timeout"].default)
             setup = E2B_SETUP_S if backend == "e2b" else 0  # in an e2b sandbox's lifetime
@@ -243,10 +273,12 @@ class Spec(Config):
                 named := [n for n, r in self.roles().items() if r.name_prefix]):
             raise ValueError(f"agents.roles.{named[0]}.name_prefix needs naming: words "
                              "(consecutive-id names are agent-001, ...)")
-        if backend in SANDBOXES and "spawn" in self.resources:
-            raise ValueError("resources.spawn needs a mount: use backend docker or podman")
+        if sandboxed and "spawn" in self.resources:
+            raise ValueError("resources.spawn needs a mount: use backend docker or podman "
+                             f"(role {next(iter(sandboxed))} runs on a sandbox)")
         gateway = "gateway" in self.resources
-        if gateway and (backend not in SANDBOXES or self.compute.kind != "hf-jobs"):
+        if gateway and (len(sandboxed) != len(backends) or self.compute.kind != "hf-jobs"):
+            # checked per role: a role outside a sandbox would not reach it
             raise ValueError("resources.gateway needs a sandbox backend (e2b, hf-sandbox) on compute "
                              "hf-jobs: sandboxes reach it on the worker job's public port")
         if (self.resources.get("world") or {}).get("transport") == "gateway" and not gateway:
@@ -254,9 +286,29 @@ class Spec(Config):
         if (self.resources.get("world") or {}).get("env") and self.naming != "consecutive-id":
             raise ValueError("resources.world.env needs naming: consecutive-id (agent i of the "
                              "roster has the env's seat i-1)")
-        if backend in SANDBOXES and (self.resources.get("message_board") or {}).get("rules"):
+        kinds = set(backends.values())
+        mixed = len(kinds) > 1  # every role reaches the board and the world over the network
+        board = self.resources.get("message_board")
+        if (sandboxed or mixed) and board is not None and not board.get("space_id") and not \
+                board.get("url"):
+            why = (f"role {next(iter(sandboxed))} runs on a sandbox" if sandboxed
+                   else "the roles use different backends")
+            raise ValueError(f"{why}: agents reach the board over the network, so it can't be a "
+                             "local board: set message_board.url or space_id")
+        if sandboxed and (board or {}).get("rules"):
             # no mounts, no rule proxy: the board runs its rules unenforced and warns
-            self.resources["message_board"].setdefault("transport", "http")
+            board.setdefault("transport", "http")
+        for name in ("message_board", "world") if mixed else ():
+            options = self.resources.get(name)
+            if options is not None and options.get("transport") == "unix":
+                raise ValueError(f"resources.{name}.transport: roles on different backends "
+                                 "all reach it over the network: remove transport: unix")
+            if options is not None:
+                options["transport"] = "http"
+        if mixed and loopback_url((self.resources.get("world") or {}).get("url") or ""):
+            raise ValueError("resources.world.url: roles on different backends reach the world "
+                             "over the network, so not on localhost: use an address their "
+                             "containers and sandboxes reach")
         budgets = limits.budget_usd is not None or any(
             loop.while_.agent_usd is not None or loop.while_.budget_usd is not None
             for loop in loops
@@ -266,11 +318,11 @@ class Spec(Config):
         for name, role in self.roles().items():
             if budgets and role.model not in (None, self.model) and role.pricing is None:
                 raise ValueError(f"agents.roles.{name} has its own model: budgets need its pricing")
-        if self.compute.kind == "hf-jobs" and backend not in SANDBOXES:
+        if self.compute.kind == "hf-jobs" and kinds - set(SANDBOXES):
             raise ValueError("compute hf-jobs cannot run containers: use backend hf-sandbox or e2b")
-        if self.compute.kind == "slurm" and backend == "docker":
+        if self.compute.kind == "slurm" and "docker" in kinds:
             raise ValueError("compute slurm runs rootless: use backend podman or hf-sandbox")
-        if self.compute.kind == "slurm" and backend == "e2b":
+        if self.compute.kind == "slurm" and "e2b" in kinds:
             # shortcut: the E2B client reads E2B_API_KEY from os.environ only, and a Slurm worker
             # has it in LEGION_WORKER_SECRETS_FILE; pass api_key from secret_env() to lift this
             raise ValueError("compute slurm keeps E2B_API_KEY out of the worker's environment, "
@@ -329,21 +381,45 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
     )
     # the inference key goes into every agent's container: never the token a remote worker
     # syncs the bucket and starts sandboxes with
-    remote = spec.environment.backend in SANDBOXES or spec.compute.kind in ("slurm", "hf-jobs")
+    hub_compute = spec.compute.kind in ("slurm", "hf-jobs")
+    remote = {n: hub_compute or spec.backend_of(r) in SANDBOXES for n, r in roles.items()}
     # the blocks the roles run on: a role's own, else the run's (unused when every role has one)
-    blocks = dict((f"agents.roles.{n}.inference", r.inference) if r.inference
-                  else ("inference", spec.inference) for n, r in roles.items())
-    for where, inference in blocks.items():
-        if remote and inference.key_env == "HF_TOKEN":
+    for name, role in roles.items():
+        where = f"agents.roles.{name}.inference" if role.inference else "inference"
+        if remote[name] and (role.inference or spec.inference).key_env == "HF_TOKEN":
             raise ValueError(f"{where}.api_key_env: HF_TOKEN is the workers' Hub token (bucket, "
                              "sandboxes; the router's default key) and would reach every "
                              "agent's container: name an inference-only token, e.g. "
                              "HF_INFERENCE_TOKEN")
-        if "gateway" in spec.resources and inference.api_format != "openai_chat_completions":
+    own = {}  # each role's compiled block: its own (or the run's) with api_format resolved
+    for name, role in roles.items():  # here, not in Spec: a worker's config has no inference
+        kind, harness = spec.harness_of(role), HARNESSES[spec.harness_of(role)]
+        inference = role.inference or spec.inference
+        where = f"agents.roles.{name}.inference" if role.inference else "inference"
+        if harness.host and not (inference.urls and all(
+                urlsplit(u).hostname == harness.host for u in inference.urls)):
+            raise ValueError(f"agents.roles.{name}: harness {kind} runs only models at "
+                             f"https://{harness.host}: set the role's inference.urls to it and "
+                             "its api_key_env")
+        if harness.host and not inference.api_key_env:
+            raise ValueError(f"{where}.api_key_env: name the secret holding the role's "
+                             f"{harness.key} (its agents get it under that name)")
+        api = inference.api_format
+        if kind != "pi":  # Pi: the block's, as written
+            # the APIs Harbor's agent class speaks; unset with only one of them: that one
+            speaks = [f.value for f in load(harness.agent).MODEL_CONNECTION.supported_api_formats]
+            if "api_format" not in inference.model_fields_set and len(speaks) == 1:
+                api = speaks[0]
+            elif api not in speaks:
+                raise ValueError(f"{where}.api_format: harness {kind} speaks "
+                                 f"{', '.join(speaks)}, not {api}")
+        own[name] = (inference.model_copy(update={"api_format": api})
+                     if api != inference.api_format else role.inference)
+        if "gateway" in spec.resources and api != "openai_chat_completions":
             raise ValueError(f"{where}.api_format: resources.gateway relays only "
                              "openai_chat_completions")
     board = spec.resources.get("message_board") or {}
-    if remote and board.get("space_id") and board.get("private") is not False:
+    if any(remote.values()) and board.get("space_id") and board.get("private") is not False:
         raise ValueError("resources.message_board.private: set it to false: a private Space's "
                          "gate needs the workers' Hub token in every agent's container")
     for where, w in [("workers", spec.workers)] + [
@@ -367,11 +443,13 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
     # besides the inference key (the provider's): what the workers read on their own host
     # sandboxes start with the worker's HF token (hf-sandbox) or E2B key (e2b); an HF Jobs
     # worker needs the HF token for its bucket either way
-    backend = spec.environment.backend
-    secrets = resource_secrets(spec) + (
-        ["HF_TOKEN"] if backend == "hf-sandbox" or spec.compute.kind == "hf-jobs" else []) + (
-        ["E2B_API_KEY"] if backend == "e2b" else [])
-    secrets = list(dict.fromkeys(secrets))  # a Space board's HF_TOKEN may be the sandboxes' too
+    shared = resource_secrets(spec)
+
+    def secrets(backend):
+        """A role's workers' secrets: the resources', and its backend's (and compute's)."""
+        own = (["HF_TOKEN"] if backend == "hf-sandbox" or spec.compute.kind == "hf-jobs" else []
+               ) + (["E2B_API_KEY"] if backend == "e2b" else [])
+        return list(dict.fromkeys(shared + own))  # a Space board's HF_TOKEN may be the sandboxes'
     def lifetime(inference: Inference | None) -> Inference | None:
         """An `hf_jobs` block's `timeout` filled in: the job outlives the run by a margin."""
         hj = inference.hf_jobs if inference is not None else None
@@ -388,7 +466,8 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
         role.model: role.pricing for role in roles.values() if role.model and role.pricing}
     types = {}
     for name, role in roles.items():
-        model = role.model or spec.model
+        model, harness = role.model or spec.model, spec.harness_of(role)
+        environment = role.environment or spec.environment
         packing = spec.workers.model_dump(exclude_none=True)
         packing |= role.workers.model_dump(exclude_none=True) if role.workers else {}
         slots = {k: packing.pop(k) for k in ("initial", "max_extra") if k in packing}
@@ -405,7 +484,7 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
             **packing,
             "harness": "harbor",
             "model": model,
-            "inference": lifetime(role.inference),
+            "inference": lifetime(own[name]),
             "pricing": prices.get(model) or prices["*"],
             "name_prefix": role.name_prefix,
             "replicas": 0 if ramp else role.count,  # the ramp raises them
@@ -415,12 +494,15 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
             },
             "workers": slots or None,
             "max_turns": spec.limits.agent_max_turns,
-            "secrets": secrets,
+            "secrets": secrets(environment.backend),
             "loop": loop and loop.model_dump(exclude={"resume_prompt"}),
             "resume_prompt": loop and loop.resume_prompt,
             "harbor": {
                 "task": task,
-                "config": {**config, "model": model},
+                # Pi's is the default: a Pi run compiles as before (a stored spec still matches)
+                "config": {**config, "model": model,
+                           "environment": environment.model_dump(mode="json")} | (
+                    {"harness": harness} if harness != "pi" else {}),
                 "team": team,
                 "role": label[name],
                 "role_text": role.role_file.read_text(encoding="utf-8") if role.role_file else "",
