@@ -123,6 +123,15 @@ if [ "${LEGION_HARNESS:-}" = harbor ]; then
   PODMAN=$(command -v podman) || die "podman is not on PATH"
   PODMAN_LOCAL=$(mktemp -d /tmp/legion-podman.XXXXXX) || die "cannot create the podman storage dir"
   trap podman_cleanup EXIT
+  # The controller may hand down its own node-local paths. Podman starts before the worker
+  # process can recover, so give it a usable home and use this node's default temporary path.
+  if [ ! -d "${HOME:-}" ] || [ ! -w "$HOME" ]; then
+    export HOME=$PODMAN_LOCAL/home
+    mkdir -p "$HOME" || die "cannot create this job's home"
+  fi
+  if [ -n "${TMPDIR:-}" ] && { [ ! -d "$TMPDIR" ] || [ ! -w "$TMPDIR" ]; }; then
+    unset TMPDIR
+  fi
   export XDG_RUNTIME_DIR=$PODMAN_LOCAL/runtime HF_XET_CACHE=$PODMAN_LOCAL/xet GIT_TERMINAL_PROMPT=0
   mkdir -p "$XDG_RUNTIME_DIR" "$PODMAN_LOCAL/bin" || die "cannot create $PODMAN_LOCAL"
   # `podman compose` prints a banner about its external provider on the stderr of every call,
