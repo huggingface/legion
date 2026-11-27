@@ -1,8 +1,10 @@
 # ProgramBench with repository collaboration
 
-Two agents implement their own copies of the csview task and exchange original
-source through a private HF dataset. Each agent still builds and submits its own
-solution. A merged collaboration PR is not a successful benchmark submission.
+Two agents implement their own copies of the csview task from
+[ProgramBench](https://huggingface.co/datasets/HuggingFaceSwarms/ProgramBench)
+and exchange original source through a private HF dataset. Each agent still
+builds and submits its own solution. A merged collaboration PR is not a
+successful benchmark submission.
 
 ## Setup
 
