@@ -322,6 +322,8 @@ class Inference(BaseModel):
             raise ValueError(f"set one of hf_router, urls or hf_jobs, not {' and '.join(given)}")
         if not given:
             self.hf_router = HFRouter()
+        if self.hf_router is not None and self.api_format != "openai_chat_completions":
+            raise ValueError("hf_router requires api_format: openai_chat_completions")
         if self.metrics and self.urls is None:
             raise ValueError("metrics scrapes your servers' vLLM metrics: it needs urls")
         if self.metrics and not self.preflight:

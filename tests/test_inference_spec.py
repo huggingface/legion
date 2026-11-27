@@ -115,6 +115,14 @@ def test_block_validation(inference, needle):
     assert needle in err({"a": {**HB, "model": "m"}}, inference)
 
 
+@pytest.mark.parametrize("api_format", ["openai_responses", "anthropic_messages"])
+@pytest.mark.parametrize("router", [{}, {"hf_router": {"provider": "deepinfra"}}])
+def test_the_router_only_accepts_chat_completions(api_format, router):
+    inference = {**router, "api_format": api_format}
+    msg = err({"a": {**HB, "model": "Qwen/Qwen3.8-27B"}}, inference)
+    assert "hf_router requires api_format: openai_chat_completions" in msg
+
+
 def test_a_type_runs_on_its_own_block():
     s = spec({"a": {**HB, "model": "m"}, "b": {**HB, "model": "m", "inference": URLS}},
              {"hf_router": {"provider": "deepinfra"}})

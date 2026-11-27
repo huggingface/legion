@@ -46,14 +46,14 @@ inference:
   context_window: 131072           # used only when the servers report none
   reasoning_effort: low            # Pi's --thinking level
   metrics: true                    # urls only: scrape each server's vLLM /metrics (docs/health.md)
-  api_format: openai_responses     # Pi's wire API (default openai_chat_completions)
-  preflight: false                 # the controller never calls these endpoints
+  api_format: openai_chat_completions  # Pi's wire API (default)
+  preflight: true                     # check the models and probe tool calling (default)
 ```
 
 | Field | Meaning |
 |---|---|
 | `hf_router.provider` | A router provider (`deepinfra`, `cerebras`, ...), or a selection policy: `fastest`, `cheapest`, `preferred`. Unset: the router's default (`fastest`). legion sends `<model>:<provider>`. |
-| `urls` | One or more base URLs ending in `/v1`, all serving `model`. A comma-separated string works too (`urls: ${VLLM_URLS}`). |
+| `urls` | One or more base URLs for the selected [API format](#api-format), all serving `model`. A comma-separated string works too (`urls: ${VLLM_URLS}`). |
 | `hf_jobs.flavor` | Required. The GPU flavor of each server's job, e.g. `l4x1`, `a100-large`, `h200`. |
 | `hf_jobs.tool_call_parser` | Required. vLLM's `--tool-call-parser` (`qwen3_coder` for Qwen3.5 and Qwen3.8); legion always adds `--enable-auto-tool-choice`. |
 | `hf_jobs.reasoning_parser` | vLLM's `--reasoning-parser` (`qwen3`). |
@@ -97,9 +97,9 @@ use the same one:
 | `openai_responses` | `POST {url}/responses` | `https://api.openai.com/v1` | `Authorization: Bearer` |
 | `anthropic_messages` | `POST {url}/v1/messages` | `https://api.anthropic.com` (no `/v1`) | `x-api-key` |
 
-The HF router and most servers you run speak Chat Completions; the other two are for OpenAI's
-or Anthropic's own API, or a gateway in front of one. Their model metadata may report no
-context window, so set `context_window` with them.
+Legion's `hf_router` block supports Chat Completions. With `urls`, select the format the
+endpoint serves. If the endpoint's model metadata omits the context window, set
+`context_window`.
 
 ```yaml
 model: claude-opus-5-5
