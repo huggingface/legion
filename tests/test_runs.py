@@ -1,6 +1,6 @@
 """Tiny real runs (tests/tinyrun.py): a `compute: local` Harbor swarm through its whole
-lifecycle, a controller that crashes mid-loop and comes back, loops; and the remote backends on
-fakes: Slurm (tests/fixtures/slurm_stubs) and HF Jobs (tests/fake_hub.py)."""
+lifecycle, a controller that crashes mid-loop and comes back, loops, the run's result; and the
+remote backends on fakes: Slurm (tests/fixtures/slurm_stubs) and HF Jobs (tests/fake_hub.py)."""
 
 from __future__ import annotations
 
@@ -14,8 +14,10 @@ from pathlib import Path
 
 import pytest
 
+from legion import results
 from legion.controller.jobs import BOOTSTRAP_IMAGE, bootstrap_command
 from legion.controller.slurm import read_env_file
+from legion.results import Outcome
 
 from . import fake_hub
 
@@ -117,6 +119,63 @@ def test_lifecycle(tiny):
     assert {x["name"]: x["turns_completed"] for x in doc["agents"]} == {  # replicas kept: 2
         w0: 3, w1: 0}
     assert doc["totals"]["cost_usd"] == round(a["cost_usd"], 6)
+
+
+def worker_pid(run: Path, worker: str) -> int | None:
+    """The pid of the live worker process `worker` of the local run in `run`, if any: tiny runs
+    in parallel tests reuse worker ids, so its WORK_ROOT (the run's agents/) must match too."""
+    want = {f"WORKER_ID={worker}".encode(), f"WORK_ROOT={run / 'agents'}".encode()}
+    for d in Path("/proc").glob("[0-9]*"):
+        try:
+            if (b"legion.worker.main" in (d / "cmdline").read_bytes()
+                    and want <= set((d / "environ").read_bytes().split(b"\0"))):
+                return int(d.name)
+        except OSError:
+            continue
+    return None
+
+
+def test_results(tiny):
+    """`legion results` on a local run (docs/results.md): a verifier's 0 is a completed result
+    (s3's wrong answer), and an agent whose worker was killed and relaunched is worker_replaced,
+    though its new Trial completed: the relaunch reuses its Trial names (huggingface/legion#121)."""
+    spec = tiny.spec(replicas=3, env='TINY_FAKE_REWARD: "0"')  # 2 workers: 2 agents and 1
+    tiny.legion("launch", spec, "--skip-preflight")
+    run = Path(json.loads(Path(".legion/current").read_text())["run_dir"])
+    names = tiny.names("writer", 3)
+    tiny.legion("prompt", "--swarm", "tiny", "--type", "writer", "go")
+    workers = {n: tiny.turns(n, 1)["worker"] for n in names}
+    [lone] = [n for n in names if list(workers.values()).count(workers[n]) == 1]
+    victim = workers[lone]
+    pid = worker_pid(run, victim)
+    assert pid is not None
+    os.kill(pid, signal.SIGKILL)  # no drain, no exit record
+    tiny.wait(lambda: worker_pid(run, victim) not in (None, pid))
+    tiny.legion("prompt", lone, "again")
+    tiny.turns(lone, 2)
+    tiny.legion("stop", "tiny", "--delete", "--yes")  # drains: the Trials are verified
+
+    out = tiny.legion("results", str(run))
+    r = results.RunResult.model_validate_json(out)
+    assert r == results.load(run) == results.load(Path.cwd())  # a folder holding one bundle
+    assert (r.run_id, r.attempt_id, r.swarm, r.compute) == ("tiny", run.name, "tiny", "local")
+    held = r.agent(lone).workers  # the relaunched slot, or another worker it was placed on
+    assert victim in held, r
+    assert (r.outcome, r.reasons) == (Outcome.WORKER_REPLACED,
+                                      [f"{lone}: worker_replaced, worker {', '.join(held)}"]), r
+    assert (r.planned_agents, r.stop_reason, r.limits["agent_max_turns"]) == (3, "interrupted", 30)
+    assert r.task == {"repo": "https://huggingface.co/datasets/ns/tasks", "selector": "t",
+                      "revision": "main"}
+    for a in r.agents:
+        assert a.reward == 0.0 and (a.name == lone or a.workers == [workers[a.name]]), a
+        assert a.outcome is (Outcome.WORKER_REPLACED if a.name == lone else Outcome.COMPLETED), a
+        t = a.trials[-1]  # the Trial itself says completed, with Harbor's files
+        assert (t.outcome, t.reward, t.rewards) == (Outcome.COMPLETED, 0.0, {"reward": 0.0}), t
+        assert t.result_path == Path("agents/_harbor", a.name, "trials", t.name, "result.json")
+        assert (run / t.result_path).is_file() and (run / t.verifier_dir / "reward.txt").is_file()
+    killed = next(w for w in r.workers if w.id == victim).incarnations[0]
+    assert killed.exit is None and killed.agents == [lone], killed
+    assert all(i.exit == "drained" for w in r.workers for i in w.incarnations if i is not killed)
 
 
 # appended under role writer
@@ -291,8 +350,35 @@ WORKER_SBATCH = """\
 #!/bin/bash
 set -a; . "$1"; . "$LEGION_SECRETS_FILE"; set +a
 unset BUCKET_ID
-export WORK_ROOT="{node}/$WORKER_ID/work"
+export WORK_ROOT="{node}/$WORKER_ID/work" LEGION_RESULTS_DIR="{results}"
 exec env PYTHONPATH="{pythonpath}" {python} -m legion.worker.main
+"""
+
+
+# a resource whose export, as its worker exits, is one file (a board's board.jsonl)
+NOTE = """\
+import asyncio
+
+
+class Resource:
+    def __init__(self, options, *, state_dir, agents, secrets):
+        self.metadata = {}
+
+    async def start(self):
+        pass
+
+    def bind(self, name):
+        return {"env": {}, "mounts": []}
+
+    async def wait(self):
+        await asyncio.Event().wait()
+
+    async def export(self, directory):
+        (directory / "board.jsonl").write_text("{}\\n")
+        return {"board": "board.jsonl"}
+
+    async def stop(self):
+        pass
 """
 
 
@@ -304,11 +390,14 @@ def test_slurm(tiny, slurm, hub, tmp_path, monkeypatch):
     monkeypatch.setenv("SLURM_STUB_RUN", "1")
     script, secrets, host = (tmp_path / n for n in ("worker.sbatch", "secrets.env", "ctl.host"))
     script.write_text(WORKER_SBATCH.format(python=sys.executable, node=tmp_path / "node",
+                                           results=tmp_path / "results",
                                            pythonpath=os.environ.get("PYTHONPATH", "")))
     script.chmod(0o755)
     secrets.write_text("LEGION_TOKEN=tiny-token\nFAKE_KEY=fake-key\n")
     secrets.chmod(0o600)
     host.write_text("127.0.0.1\n")
+    (tmp_path / "resources").mkdir()
+    (tmp_path / "resources" / "note.py").write_text(NOTE)
     port = tiny.controller(tmp_path / "ctl", compute="slurm")
     out = tiny.legion("launch", tiny.spec(), "--skip-preflight", code=1)  # compute: local
     assert "compute 'slurm'" in out, out
@@ -317,7 +406,8 @@ def test_slurm(tiny, slurm, hub, tmp_path, monkeypatch):
                f"secrets_file: {secrets}}}")
     spec = tiny.spec(compute=compute, backend="podman", env='FLUSH_INTERVAL: "0.2"', extra=(
         '      loop: {prompt: one, while: {max_rounds: 1}, resume_prompt: resumed}\n'
-        'limits: {run_timeout_seconds: 900}\nbucket_id: ns/tiny\n'))
+        'limits: {run_timeout_seconds: 900}\nbucket_id: ns/tiny\n'
+        'resources_dir: resources\nresources: {note: {}}\n'))
     tiny.legion("launch", spec, "--skip-preflight")
     assert hub.asked == ["/api/buckets/ns/tiny/tree/tiny%2F?recursive=true"]  # empty
     w0, = tiny.names("writer", 1)
@@ -378,6 +468,57 @@ def test_slurm(tiny, slurm, hub, tmp_path, monkeypatch):
     assert ended[0] in ("FAILED", ours) and ended[1] in ("COMPLETED", ours), ended
     [wk] = json.loads(tiny.legion("status", "tiny", "--json"))["workers"]
     assert (wk["state"], wk["crashes"]) == ("dead", 0), wk
+
+    # the result (docs/results.md), from this folder as a run dir (tmp_path: logs/, launch/,
+    # results/): the agent's Trial completed after the relaunch, under the name its cut Trial
+    # had (huggingface/legion#121), so the agent counts as preempted. Only the drained worker
+    # exported its resources (the preempted one exits within its budget)
+    (tmp_path / "experiment").mkdir()
+    (tmp_path / "experiment" / "spec.yaml").write_text(Path(spec).read_text())
+    r = results.load(tmp_path)
+    assert (r.compute, r.swarm, r.outcome, r.planned_agents) == (
+        "slurm", "tiny", Outcome.PREEMPTED, 1)
+    assert r.reasons == [f"{w0}: preempted, worker {w}"]
+    [worker] = r.workers
+    assert [(i.job_id, i.exit, i.agents) for i in worker.incarnations] == [
+        (first, "preempted", [w0]), (second, "drained", [w0])]
+    [agent] = r.agents
+    assert (agent.name, agent.workers, agent.outcome, agent.reward) == (
+        w0, [w], Outcome.PREEMPTED, 1.0)
+    [trial] = agent.trials
+    assert trial.outcome is Outcome.COMPLETED
+    assert trial.result_path == Path("results/tiny", w0, "trials", trial.name, "result.json")
+    assert r.exports == [results.ResourceExport(
+        worker=w, resource="note", path=Path("results/tiny", w, "resources/note/board.jsonl"))]
+    # a sweep attempt's receipt names the logical run; without one, `-rN` is part of the name
+    assert (r.run_id, r.attempt_id, r.attempt) == ("tiny", tmp_path.name, 0)
+    (tmp_path / "attempt.json").write_text('{"run_id": "cell-1", "attempt": 2}')
+    assert (results.load(tmp_path).run_id, results.load(tmp_path).attempt) == ("cell-1", 2)
+
+    # a sweep attempt (legion sweep) that kept no Trial: its receipt's failure is the evidence,
+    # in its own words; each planned agent takes it rather than `unknown`
+    failed = tmp_path / "sweep-ab12-cell-r0"
+    (failed / "experiment").mkdir(parents=True)
+    (failed / "experiment" / "spec.yaml").write_text(
+        Path(spec).read_text().replace("name: tiny", "name: sweep-ab12-cell-r0")
+        + "naming: consecutive-id\n")
+    (failed / "attempt.json").write_text(json.dumps(
+        {"phase": "infrastructure_failure", "failure": "worker_crash", "note": None}))
+    f = results.load(failed)  # one launch: the crashed worker was lost, not replaced
+    assert (f.run_id, f.attempt_id, f.attempt) == ("sweep-ab12-cell", failed.name, 0)
+    assert (f.outcome, f.reasons) == (Outcome.WORKER_LOST, [
+        "attempt.json: infrastructure_failure, worker_crash",
+        "agent-001: worker_lost, no Trials; see attempt.json"]), f
+    assert [(a.name, a.outcome, a.reward, a.trials) for a in f.agents] == [
+        ("agent-001", Outcome.WORKER_LOST, None, [])]
+    (failed / "launch").mkdir()  # a second launch of the worker: it was replaced
+    for incarnation in ("a" * 32, "b" * 32):
+        (failed / "launch" / f"{w}-{incarnation}.env").write_text(f"WORKER_ID={w}\n")
+    f = results.load(failed)
+    assert (f.outcome, f.reasons) == (Outcome.WORKER_REPLACED, [
+        f"worker {w}: worker_replaced (2 launches), agents unknown",
+        "attempt.json: infrastructure_failure, worker_crash",
+        "agent-001: worker_replaced, no Trials; see attempt.json"]), f
 
 
 def test_hf_jobs(tiny, hub, tmp_path, monkeypatch):

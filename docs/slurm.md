@@ -248,6 +248,11 @@ ends, in `results/<swarm>/<agent>/trials/<trial>/`, and the resources' exports (
 `board.jsonl` and `channels.json`) as the worker exits, in `results/<swarm>/<worker id>/resources/`.
 A Trial is verified when its worker drains (`legion stop --release`, or the end of its lifetime):
 stop a run that way before reading its rewards.
+Each worker launch also leaves a record in `results/<swarm>/_workers/<worker id>/`. Read
+the run with `legion.results.load(RUN_DIR)` or `legion results RUN_DIR`
+([run results](results.md)): it gives each Trial's and agent's outcome and reward, and reports
+an agent whose worker was preempted or relaunched as such, since a relaunch can overwrite its
+Trial files ([#121](https://github.com/huggingface/legion/issues/121)).
 
 ## Job states
 

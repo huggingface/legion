@@ -8,7 +8,8 @@ With LEGION_RESULTS_DIR set (a Slurm worker: `<run dir>/results`, on the shared 
 is graded on outlives the worker's WORK_ROOT (node-local): each ended Trial's `result.json`,
 `config.json` and `verifier/` (a multi-step Trial's `steps/<name>/verifier/`) go to
 `<dir>/<swarm>/<agent>/trials/<trial>/` (adapters/harbor.py) and the resources' exports, at exit,
-to `<dir>/<swarm>/<worker id>/resources/`.
+to `<dir>/<swarm>/<worker id>/resources/`. Each worker launch also keeps an `IncarnationRecord`
+there (and in a local run's `agents/_harbor/`), which legion.results reads.
 
 Each agent is added to the resources as its Trial starts and removed when it leaves (another
 worker of the type, a spawned agent and a re-assigned one alike), and the resources' events for
@@ -26,11 +27,14 @@ import asyncio
 import logging
 import os
 import shutil
+import socket
 from collections.abc import Awaitable, Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from legion.harbor.results import write_json
 from legion.models import TypeSpec
 from legion.secrets_file import exposed, secret_env
 
@@ -62,6 +66,35 @@ def keep_results(src: Path, dest: Path, names: Iterable[str]) -> None:
                     shutil.copy2(path, target, follow_symlinks=False)
     except OSError as e:
         log.warning("results of %s not kept in %s: %s", src, dest, e)
+
+
+class IncarnationRecord:
+    """`<folder>/<incarnation>.json`, one per worker launch: its Slurm job, host, start, the
+    agents placed on it and, once it exits through `Worker.run`, `ended_at` and `exit` (drained
+    or preempted). A record without an exit is a worker that was killed or lost; two records of
+    one worker are a relaunch, whose Trials reuse their names (huggingface/legion#121). The
+    folder is `<results dir>/_workers/<worker id>` on Slurm, `<WORK_ROOT>/_harbor/_workers/
+    <worker id>` locally (legion.results). A failed write is logged: a run without its record
+    is still a run."""
+
+    def __init__(self, folder: Path | None, worker: str, incarnation: str | None) -> None:
+        self.path = folder / f"{incarnation}.json" if folder is not None and incarnation else None
+        self.doc: dict[str, Any] = {
+            "worker": worker, "job_id": os.environ.get("SLURM_JOB_ID"),
+            "host": socket.gethostname(), "started_at": datetime.now(UTC).isoformat(),
+            "ended_at": None, "exit": None, "agents": []}
+
+    def write(self, agents: Iterable[str] = (), exit: str | None = None) -> None:
+        if self.path is None:
+            return
+        self.doc["agents"] = sorted(set(self.doc["agents"]) | set(agents))
+        if exit is not None:
+            self.doc.update(exit=exit, ended_at=datetime.now(UTC).isoformat())
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            write_json(self.path, self.doc)
+        except OSError as e:
+            log.warning("incarnation record %s not written: %s", self.path, e)
 
 
 class HarborHost:

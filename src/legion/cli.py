@@ -15,7 +15,7 @@ from typing import Annotated, Any
 import typer
 from typer.core import TyperGroup
 
-from legion import ops, rundir
+from legion import ops, results, rundir
 from legion import status as legion_status
 from legion.client import Client, ClientError
 from legion.models import SwarmSpec
@@ -50,7 +50,7 @@ def _main(ctx: typer.Context, run: str = typer.Option(
         help="Run every command against RUN_DIR (`legion init`): its cluster.env and run.env as "
              "the first --env files, its controller (hosts/controller.host) and token. Also LEGION_RUN_DIR, which "
              "an exported LEGION_URL beats; --run beats LEGION_URL.")) -> None:
-    _API[:] = [] if ctx.invoked_subcommand in ("init", "world") else [
+    _API[:] = [] if ctx.invoked_subcommand in ("init", "world", "results") else [
         Client.for_run(run, need_host=ctx.invoked_subcommand not in ("launch", "serve"))]
 
 
@@ -262,6 +262,21 @@ def init(
             typer.echo(f"       {line}")
     if rep.failed:
         raise typer.Exit(1)
+
+
+@app.command(name="results")
+def results_(
+    run_dir: str = typer.Argument(..., metavar="RUN_DIR",
+                                  help="A local run bundle (.legion/<swarm>-<time>/), a folder "
+                                       "holding one, or a Slurm run directory."),
+) -> None:
+    """Print a finished run's result as JSON (docs/results.md): its outcome, each agent's and
+    Trial's outcome and reward, and the paths of Harbor's result.json and verifier files. Read a
+    Slurm run after `legion stop --release`. Offline: no controller."""
+    try:
+        typer.echo(results.load(run_dir).model_dump_json(indent=2))
+    except (OSError, ValueError) as e:
+        _fail([str(e)])
 
 
 @app.command()
