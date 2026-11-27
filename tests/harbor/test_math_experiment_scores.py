@@ -445,3 +445,77 @@ def test_proof_comparison_insufficient_samples():
     assert result["solo"]["pass_at_k_ge_6"] is None
     assert result["solo"]["max_observed_percent_of_7"] == 500 / 7
     assert result["team"]["n_runs"] == 0
+
+
+@respx.mock
+def test_selected_team_agent_with_mixed_solo_and_team(tmp_path, monkeypatch):
+    mod = module("imo-proofbench")
+    monkeypatch.setenv("TEST_JUDGE_KEY", "test")
+    solo_roots = []
+    for idx in range(2):
+        root = tmp_path / f"solo-{idx}"
+        trial(root, "pb-basic-001", "agent-001", proof="solo proof", reward=1)
+        solo_roots.append(root)
+    team_root = tmp_path / "team"
+    for idx in range(1, 5):
+        trial(team_root, "pb-basic-001", f"agent-{idx:03d}", proof="team proof", reward=1)
+    respx.post("https://judge/v1/chat/completions").mock(side_effect=[
+        openai_reply({"score": n, "reason": "ok"}) for n in (1, 2, 3, 4, 5, 6)])
+    records = mod.score([*solo_roots, team_root], proof_args(selected_agent="agent-002"))
+    teams = [r for r in records if r["type"] == "team"]
+    assert all(r["selected"] is None and r["selected_agent"] is None for r in teams[:2])
+    assert teams[2]["selected_agent"] == "agent-002"
+    assert teams[2]["selected"] == 4
+    comparison = mod.compare_proof(records)[0]
+    assert comparison["solo"]["n"] == 2 and comparison["team"]["n_runs"] == 1
+
+
+def test_proof_expected_max_unbiased_and_insufficient_samples():
+    mod = module("imo-proofbench")
+    scores = [0, 0, 0, 0, 7]
+    records = [{"type": "team", "task_id": "pb-basic-001", "n": 1, "mean": score,
+                "output_tokens": None} for score in scores]
+    comparison = mod.compare_proof(records, 4)
+    assert comparison[0]["solo"]["expected_max_at_k_percent_of_7"] == pytest.approx(80.0)
+    assert comparison[0]["solo"]["max_observed_percent_of_7"] == 100
+    assert comparison[-1]["solo_expected_max_at_k_percent_of_7"]["mean"] == pytest.approx(80.0)
+    assert mod.compare_proof(records[:3], 4)[0]["solo"]["expected_max_at_k_percent_of_7"] is None
+
+
+@pytest.mark.parametrize("name", ["imo-answerbench", "imo-proofbench", "smallmath"])
+@pytest.mark.parametrize("k", ["1", "0", "-1"])
+def test_comparison_cli_rejects_small_k(name, k):
+    import subprocess
+    import sys
+
+    command = [sys.executable, str(ROOT / name / "score.py"), "unused-results", "--k", k]
+    if name == "imo-proofbench":
+        command.extend(["--judge-model", "unused"])
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert result.returncode != 0
+    assert "--k must be >= 2" in result.stderr
+
+
+def test_comparison_helpers_reject_small_k():
+    mod = module("imo-proofbench")
+    import math_eval_common
+
+    for k in (1, 0, -1):
+        with pytest.raises(ValueError, match="k must be an integer >= 2"):
+            math_eval_common.compare_binary([], k)
+        with pytest.raises(ValueError, match="k must be an integer >= 2"):
+            mod.compare_proof([], k)
+        with pytest.raises(ValueError, match="k must be an integer >= 2"):
+            math_eval_common.pass_estimate(1, 0, k)
+
+
+@respx.mock
+def test_selected_agent_still_required_for_team(tmp_path, monkeypatch):
+    mod = module("imo-proofbench")
+    monkeypatch.setenv("TEST_JUDGE_KEY", "test")
+    for name in ("agent-001", "agent-003"):
+        trial(tmp_path, "pb-basic-001", name, proof="proof", reward=1)
+    respx.post("https://judge/v1/chat/completions").mock(
+        return_value=openai_reply({"score": 3, "reason": "ok"}))
+    with pytest.raises(ValueError, match="Selected agent agent-002 absent"):
+        mod.score([tmp_path], proof_args(selected_agent="agent-002"))

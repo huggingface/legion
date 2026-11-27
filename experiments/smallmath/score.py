@@ -71,8 +71,8 @@ def main():
     parser.add_argument("--k", type=int, default=4)
     parser.add_argument("--manifest", help="Pinned SmallMath tasks/manifest.json")
     args = parser.parse_args()
-    if args.k < 1:
-        parser.error("--k must be positive")
+    if args.k < 2:
+        parser.error("--k must be >= 2")
     print(json.dumps(score(args.runs, args.manifest, args.k), indent=2))
 
 

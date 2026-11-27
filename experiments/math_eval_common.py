@@ -136,8 +136,14 @@ def output_tokens(agent):
     return count
 
 
+def validate_k(k):
+    if type(k) is not int or k < 2:
+        raise ValueError("k must be an integer >= 2")
+
+
 def pass_estimate(n, correct, k):
     """Unbiased pass@k over all k-sized subsets of n independent samples."""
+    validate_k(k)
     if n < k:
         return None
     return 1 - (comb(n - correct, k) / comb(n, k) if n - correct >= k else 0)
@@ -145,6 +151,7 @@ def pass_estimate(n, correct, k):
 
 def compare_binary(teams, k=4):
     """Compare N=1 independent runs and N=k teams, grouped by dataset task ID."""
+    validate_k(k)
     tasks = {}
     for team in teams:
         task = tasks.setdefault(team["task_id"], {"solo": [], "teams": [],
@@ -193,6 +200,7 @@ def compare_binary(teams, k=4):
 
 def compare_proof(records, k=4):
     """Aggregate proof grades, using >=6/7 as the binary pass threshold."""
+    validate_k(k)
     tasks = {}
     for row in records:
         data = tasks.setdefault(row["task_id"], {"solo": [], "teams": []})
@@ -206,10 +214,16 @@ def compare_proof(records, k=4):
         values = [r["mean"] for r in solo]
         tokens = [r["output_tokens"] for r in solo if r["output_tokens"] is not None]
         team_tokens = [r["output_tokens"] for r in teams if r["output_tokens"] is not None]
+        expected_max = None
+        if len(values) >= k:
+            denominator = comb(len(values), k)
+            expected_max = 100 / 7 * sum(value * (comb(i, k - 1) / denominator)
+                                         for i, value in enumerate(sorted(values)) if i >= k - 1)
         out.append({"type": "comparison", "task_id": task, "k": k,
                     "solo": {"n": len(values),
                              "pass_at_1_percent_of_7": summary(100 * v / 7 for v in values),
                              "pass_at_k_ge_6": pass_estimate(len(values), sum(v >= 6 for v in values), k),
+                             "expected_max_at_k_percent_of_7": expected_max,
                              "max_observed_percent_of_7": max(values) * 100 / 7 if values else None,
                              "mean_output_tokens": summary(tokens)},
                     "team": {"n_runs": len(teams),
@@ -224,6 +238,7 @@ def compare_proof(records, k=4):
     out.append({"type": "comparison_summary", "k": k,
         "solo_pass_at_1_percent_of_7": average(r["solo"]["pass_at_1_percent_of_7"]["mean"] for r in out),
         "solo_pass_at_k_ge_6": average(r["solo"]["pass_at_k_ge_6"] for r in out),
+        "solo_expected_max_at_k_percent_of_7": average(r["solo"]["expected_max_at_k_percent_of_7"] for r in out),
         "solo_max_observed_percent_of_7": average(r["solo"]["max_observed_percent_of_7"] for r in out),
         "team_mean_percent_of_7": average(r["team"]["mean_percent_of_7"]["mean"] for r in out),
         "team_max_percent_of_7": average(r["team"]["max_percent_of_7"]["mean"] for r in out),

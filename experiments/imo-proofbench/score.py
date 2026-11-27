@@ -58,8 +58,8 @@ def score(roots, args):
                          "task": team["task"], "task_id": team["task_id"], "agent": agent["agent"], "score": value,
                          "percent_of_7": 100 * value / 7, "reason": reason, "proof": proof,
                          "output_tokens": output_tokens(agent)})
-        selected = [r for r in rows if r["agent"] == args.selected_agent]
-        if args.selected_agent and not selected:
+        selected = [r for r in rows if len(rows) > 1 and r["agent"] == args.selected_agent]
+        if len(rows) > 1 and args.selected_agent and not selected:
             raise ValueError(f"Selected agent {args.selected_agent} absent from {team['task']}")
         consensus = majority([r["proof"] for r in rows])
         # A consensus is an identical proof, not a vote over numerical grades.
@@ -71,7 +71,7 @@ def score(roots, args):
                         "max": max(r["score"] for r in rows),
                         "consensus": summary(consensus_scores)["mean"],
                         "selected": selected[0]["score"] if selected else None,
-                        "selected_agent": args.selected_agent,
+                        "selected_agent": args.selected_agent if len(rows) > 1 else None,
                         "scale_max": 7,
                         "output_tokens": (sum(r["output_tokens"] for r in rows)
                                           if all(r["output_tokens"] is not None for r in rows) else None),
@@ -94,8 +94,8 @@ def main():
     parser.add_argument("--selected-agent", help="Agent whose proof was selected before grading")
     parser.add_argument("--output", help="Write JSONL to this file instead of stdout")
     args = parser.parse_args()
-    if args.k < 1:
-        parser.error("--k must be positive")
+    if args.k < 2:
+        parser.error("--k must be >= 2")
     if not args.judge_api_key_env:
         args.judge_api_key_env = "GEMINI_API_KEY" if args.provider == "gemini" else "HF_INFERENCE_TOKEN"
     records = score(args.runs, args)

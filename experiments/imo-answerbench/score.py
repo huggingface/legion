@@ -111,8 +111,8 @@ def main():
     parser.add_argument("--judge-api-key-env", default="HF_INFERENCE_TOKEN")
     parser.add_argument("--reference-dir")
     args = parser.parse_args()
-    if args.k < 1:
-        parser.error("--k must be positive")
+    if args.k < 2:
+        parser.error("--k must be >= 2")
     if args.judge and not args.judge_model:
         parser.error("--judge requires --judge-model")
     print(json.dumps(score(args.runs, args), indent=2, ensure_ascii=False))
