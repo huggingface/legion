@@ -6,8 +6,9 @@ inference check's `GET /models`, controller/inference.py), then runs two turns, 
 harness starts: turn one asks the model to call a trivial tool; turn two sends the model's
 output back with the tool's result and must complete. A server that accepts turn one but fails
 the follow-up (some HF router providers do) fails preflight. Zero reported usage is a warning.
-Harbor's Pi speaks Chat Completions, so models are probed there, non-streamed. A tool call the
-model writes as text is no tool call: Pi takes only `tool_calls`.
+Models are probed, non-streamed, on the API Pi speaks to them (`inference.api_format`): Chat
+Completions, Responses or Anthropic Messages. A tool call the model writes as text is no tool
+call: Pi takes only the API's structured calls. A block with `preflight: false` is not probed.
 """
 
 from __future__ import annotations
@@ -21,15 +22,20 @@ from typing import Any
 
 import httpx
 
-from legion.controller.inference import InferenceError, aget, context_window
+from legion.controller.inference import (
+    InferenceError,
+    aget,
+    api_root,
+    auth_headers,
+    context_window,
+)
 from legion.models import (
-    Harness,
+    ApiFormat,
     PreflightReport,
     PreflightResult,
     ResolvedModel,
     SwarmSpec,
 )
-from legion.registry import HARNESSES
 
 DEFAULT_TIMEOUT_S = 60.0
 MAX_OUTPUT_TOKENS = 1024
@@ -67,8 +73,8 @@ class NoToolCall(ProbeError):
     """A server answered turn one without a tool call."""
 
 
-async def _chat_turn(client, url, body, headers, timeout) -> tuple[dict[str, Any], int]:
-    """One non-streamed Chat Completions call -> (assistant message, tokens reported)."""
+async def _post(client, url, body, headers, timeout) -> dict[str, Any]:
+    """One non-streamed call -> its JSON object."""
     resp = await client.post(url, json=body, headers=headers, timeout=timeout)
     if resp.status_code >= 400:
         raise ProbeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
@@ -76,11 +82,23 @@ async def _chat_turn(client, url, body, headers, timeout) -> tuple[dict[str, Any
         data = resp.json()
     except ValueError as e:
         raise ProbeError(f"not JSON: {resp.text[:200]}") from e
-    choices = data.get("choices") if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        raise ProbeError(f"not a JSON object: {resp.text[:200]}")
+    return data
+
+
+def _tokens(usage: Any, *names: str) -> int:
+    u = usage if isinstance(usage, dict) else {}
+    return sum(int(u.get(n) or 0) for n in names)
+
+
+async def _chat_turn(client, url, body, headers, timeout) -> tuple[dict[str, Any], int]:
+    """One non-streamed Chat Completions call -> (assistant message, tokens reported)."""
+    data = await _post(client, url, body, headers, timeout)
+    choices = data.get("choices")
     if not choices:
         raise ProbeError(f"no choices in the reply: {json.dumps(data)[:300]}")
-    u = data.get("usage") or {}
-    tokens = int(u.get("prompt_tokens") or 0) + int(u.get("completion_tokens") or 0)
+    tokens = _tokens(data.get("usage"), "prompt_tokens", "completion_tokens")
     return choices[0].get("message") or {}, tokens
 
 
@@ -97,15 +115,16 @@ def visible(content: Any) -> Any:
     return "" if content.lstrip().startswith("<think>") else content
 
 
-async def _probe_chat(client, r: ResolvedModel, key: str | None, result: PreflightResult,
-                      timeout: float) -> int:
-    """Two Chat Completions turns on every server; returns tokens reported. Raises ProbeError
-    (NoToolCall: a server made no tool call). With several `urls`, the error names the server
-    that failed."""
+async def _probe_all(client, r: ResolvedModel, key: str | None, result: PreflightResult,
+                     timeout: float) -> int:
+    """Two turns on every server, on the block's API; returns tokens reported. Raises
+    ProbeError (NoToolCall: a server made no tool call). With several `urls`, the error names
+    the server that failed."""
     urls, total = r.inference.endpoints, 0
+    at = PROBES[r.inference.api_format]
     for base in urls:
         try:
-            total += await _probe_chat_at(client, base, r, key, result, timeout)
+            total += await at(client, base, r, key, result, timeout)
         except ProbeError as e:
             if len(urls) == 1:
                 raise
@@ -116,7 +135,7 @@ async def _probe_chat(client, r: ResolvedModel, key: str | None, result: Preflig
 async def _probe_chat_at(client, base: str, r: ResolvedModel, key: str | None,
                          result: PreflightResult, timeout: float) -> int:
     url = f"{base}/chat/completions"
-    headers = {**r.headers, **({"Authorization": f"Bearer {key}"} if key else {})}
+    headers = {**r.headers, **auth_headers(r.inference, key)}
     body = chat_request(r)
     msg, tok1 = await _chat_turn(client, url, body, headers, timeout)
     calls = [c for c in msg.get("tool_calls") or [] if isinstance(c, dict)]
@@ -130,6 +149,93 @@ async def _probe_chat_at(client, base: str, r: ResolvedModel, key: str | None,
     return tok1 + tok2
 
 
+def responses_request(r: ResolvedModel) -> dict[str, Any]:
+    """Turn one on the Responses API: non-streamed and not stored, as Pi calls it. No
+    temperature: reasoning models refuse one."""
+    return {
+        "model": r.request_model,
+        "input": [{"role": "user", "content": PROMPT}],
+        "tools": [{"type": "function", "name": "get_time", "description": TOOL_DESCRIPTION,
+                   "parameters": TOOL_SCHEMA}],
+        "tool_choice": "auto",
+        "max_output_tokens": MAX_OUTPUT_TOKENS,
+        "store": False,
+    }
+
+
+async def _probe_responses_at(client, base: str, r: ResolvedModel, key: str | None,
+                              result: PreflightResult, timeout: float) -> int:
+    url = f"{base}/responses"
+    headers = {**r.headers, **auth_headers(r.inference, key)}
+    body = responses_request(r)
+    data = await _post(client, url, body, headers, timeout)
+    output = data.get("output")
+    if not isinstance(output, list):
+        raise ProbeError(f"no output in the reply: {json.dumps(data)[:300]}")
+    calls = [c for c in output if isinstance(c, dict) and c.get("type") == "function_call"]
+    result.tool_call_seen = bool(calls)
+    if not calls:
+        raise NoToolCall("the reply has no function call; agents on this model cannot use tools")
+    # Not stored: the calls go back by value, without the ids of items the server did not keep
+    sent = [{k: c.get(k) for k in ("type", "call_id", "name", "arguments")} for c in calls]
+    body2 = {**body, "input": [*body["input"], *sent, *(
+        {"type": "function_call_output", "call_id": c.get("call_id"), "output": TOOL_RESULT}
+        for c in calls)]}
+    data2 = await _post(client, url, body2, headers, timeout)
+    if not isinstance(data2.get("output"), list):
+        raise ProbeError(f"no output in the reply: {json.dumps(data2)[:300]}")
+    return sum(_tokens(d.get("usage"), "input_tokens", "output_tokens") for d in (data, data2))
+
+
+def messages_request(r: ResolvedModel) -> dict[str, Any]:
+    """Turn one on Anthropic's Messages API: non-streamed."""
+    return {
+        "model": r.request_model,
+        "max_tokens": MAX_OUTPUT_TOKENS,
+        "messages": [{"role": "user", "content": PROMPT}],
+        "tools": [{"name": "get_time", "description": TOOL_DESCRIPTION,
+                   "input_schema": TOOL_SCHEMA}],
+        "tool_choice": {"type": "auto"},
+    }
+
+
+async def _probe_messages_at(client, base: str, r: ResolvedModel, key: str | None,
+                             result: PreflightResult, timeout: float) -> int:
+    url = f"{api_root(r.inference, base)}/messages"
+    headers = {**r.headers, **auth_headers(r.inference, key)}
+    body = messages_request(r)
+    data = await _post(client, url, body, headers, timeout)
+    content = data.get("content")
+    if not isinstance(content, list):
+        raise ProbeError(f"no content in the reply: {json.dumps(data)[:300]}")
+    calls = [c for c in content if isinstance(c, dict) and c.get("type") == "tool_use"]
+    result.tool_call_seen = bool(calls)
+    if not calls:
+        raise NoToolCall("the reply has no tool_use block; agents on this model cannot use "
+                         "tools")
+    body2 = {**body, "messages": [*body["messages"], {"role": "assistant", "content": content},
+                                  {"role": "user", "content": [
+                                      {"type": "tool_result", "tool_use_id": c.get("id"),
+                                       "content": TOOL_RESULT} for c in calls]}]}
+    data2 = await _post(client, url, body2, headers, timeout)
+    if not isinstance(data2.get("content"), list):
+        raise ProbeError(f"no content in the reply: {json.dumps(data2)[:300]}")
+    return sum(_tokens(d.get("usage"), "input_tokens", "output_tokens") for d in (data, data2))
+
+
+# `inference.api_format` -> (the API's name in the report, one server's two turns)
+APIS: dict[ApiFormat, str] = {
+    "openai_chat_completions": "chat_completions",
+    "openai_responses": "responses",
+    "anthropic_messages": "messages",
+}
+PROBES = {
+    "openai_chat_completions": _probe_chat_at,
+    "openai_responses": _probe_responses_at,
+    "anthropic_messages": _probe_messages_at,
+}
+
+
 def hint(r: ResolvedModel) -> str:
     """The likely cause of a failed tool call, for the error."""
     if r.inference.hf_router is not None:
@@ -141,15 +247,13 @@ def hint(r: ResolvedModel) -> str:
 
 async def probe(
     client: httpx.AsyncClient, r: ResolvedModel, key: str | None, types: list[str],
-    api: str | None = None,
 ) -> PreflightResult:
     """The model check, then turn one asks for a tool call and turn two sends the call back
-    with its result, the way a harness does on its first tool use (Chat Completions, not
+    with its result, the way a harness does on its first tool use (on the block's API, not
     streamed). `key` None with a key named: not probed (unverified)."""
     p = r.inference
-    api = api or "chat_completions"
-    result = PreflightResult(model=r.qualified, provider=r.provider_name, types=types, api=api,
-                             ok=False)
+    result = PreflightResult(model=r.qualified, provider=r.provider_name, types=types,
+                             api=APIS[p.api_format], ok=False)
     if p.key_env and not key:
         result.unverified = True
         result.warning = (f"unverified: secret {p.key_env} is not set on the controller, "
@@ -159,9 +263,9 @@ async def probe(
     t0 = time.monotonic()
     tok2 = 0
     try:
-        context_window(p, r.model_id, {u: await aget(client, u, key) for u in p.endpoints},
+        context_window(p, r.model_id, {u: await aget(client, p, u, key) for u in p.endpoints},
                        r.provider_name)
-        tok1 = await _probe_chat(client, r, key, result, timeout)
+        tok1 = await _probe_all(client, r, key, result, timeout)
     except InferenceError as e:
         result.latency_ms = int((time.monotonic() - t0) * 1000)
         result.error = str(e)[:400]
@@ -189,20 +293,16 @@ async def probe(
     return result
 
 
-def api_for(harness: Harness) -> str:
-    """The wire API a type's harness speaks to its provider (both: chat completions)."""
-    return HARNESSES[harness].api
-
-
-def models_to_probe(spec: SwarmSpec) -> list[tuple[ResolvedModel, list[str], str]]:
-    """Distinct (inference block, model id, reasoning, API) in the spec, with their types and
-    the API to probe."""
-    seen: dict[tuple, tuple[ResolvedModel, list[str], str]] = {}
+def models_to_probe(spec: SwarmSpec) -> list[tuple[ResolvedModel, list[str]]]:
+    """Distinct (inference block, model id, reasoning, API) in the spec, with their types;
+    without the blocks set to `preflight: false`."""
+    seen: dict[tuple, tuple[ResolvedModel, list[str]]] = {}
     for type_name, ts in spec.types.items():
         r = ts.resolved_model
-        api = api_for(ts.harness)
-        key = (r.provider_name, r.model_id, r.reasoning, api)
-        seen.setdefault(key, (r, [], api))[1].append(type_name)
+        if r is None or not r.inference.preflight:
+            continue
+        key = (r.provider_name, r.model_id, r.reasoning, r.inference.api_format)
+        seen.setdefault(key, (r, []))[1].append(type_name)
     return list(seen.values())
 
 
@@ -211,8 +311,8 @@ async def run_preflight(
 ) -> PreflightReport:
     results = await asyncio.gather(*(
         probe(client, r, secrets.get(r.inference.key_env) if r.inference.key_env else None,
-              types, api)
-        for r, types, api in models_to_probe(spec)
+              types)
+        for r, types in models_to_probe(spec)
     ))
     return PreflightReport(swarm=spec.swarm, ok=all(x.ok or x.unverified for x in results),
                            unverified=sum(x.unverified for x in results), results=list(results))

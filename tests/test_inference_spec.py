@@ -104,6 +104,8 @@ def test_concurrent_runs_spread_their_same_named_agents():
     ({"urls": ["http://a/v1", "http://a/v1/"]}, "must not repeat a URL"),
     ({"urls": []}, "at least one URL"),
     ({"metrics": True}, "it needs urls"),
+    ({"urls": ["http://a/v1"], "metrics": True, "preflight": False}, "preflight: false keeps"),
+    ({"api_format": "google_generate_content"}, "openai_chat_completions"),
     ({"api_key_env": "hf_abc-123"}, "env var name"),
     ({"max_working": 0}, "greater than or equal to 1"),
     ({"hf_router": {"provider": "deepinfra:fast"}}, "must be a name"),

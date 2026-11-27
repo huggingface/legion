@@ -76,7 +76,8 @@ worker and CLI read nothing else, and `tests/test_registry.py` checks every entr
 
 - **Harness**: write `src/legion/worker/adapters/<name>.py` with a class implementing
   `HarnessAdapter` (`adapters/base.py`) and a `make_adapter(workdir, name, spec)` function, and
-  add a `HARNESSES` entry (its import path and the wire API preflight probes).
+  add a `HARNESSES` entry (its import path). It speaks the wire API the inference block names
+  (`api_format`), which preflight probes.
 - **Compute backend**: write `src/legion/controller/<name>.py` with a `JobsClient`
   (`controller/jobs.py`) and a `<name>_jobs_client(env, dep, data_dir)` function, and add a
   `COMPUTE` entry (`compute.kind` / `LEGION_COMPUTE` name -> that function). Every kind but
@@ -204,6 +205,9 @@ bucket's initialization or its credentials check.
 (`Inference`) says where it runs: the HF router (`hf_router`, the default; legion sends
 `<model>:<provider>`), OpenAI-compatible servers you run (`urls`, each agent calling one by
 rendezvous hashing on its swarm and name) or vLLM servers legion starts on HF Jobs (`hf_jobs`).
+`api_format` is the wire API Pi speaks to them (Chat Completions by default, Responses or
+Anthropic Messages), and `preflight: false` keeps the controller's model check and preflight off
+endpoints only a Trial reaches (a task's own model gateway).
 The swarm's block serves every type that does not set its own. For `hf_jobs` the controller
 starts one group of jobs per model before preflight (`POST /swarms/{swarm}/servers`,
 `controller/servers.py`), waits until each answers, pins their URLs into the resolved block as

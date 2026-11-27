@@ -17,6 +17,7 @@ from legion.controller.jobs import FakeJobsClient
 from legion.controller.reconcile import rebuild_from_jobs, reconcile
 from legion.controller.store import Store
 from legion.models import AgentHeartbeat, SwarmSpec, TokenUsage, WorkerHeartbeat
+from legion.ops import provider_backed, unprobed
 
 from . import fake_models
 from .conftest import HB, TOKEN
@@ -462,6 +463,40 @@ def fake_provider(tool_call: bool = True, status: int = 200, follow_up_fails: bo
         return JSONResponse({"id": "c1", "object": "chat.completion", "usage": u,
                              "choices": [{"index": 0, "message": msg, "finish_reason": "stop"}]})
 
+    @fake.post("/v1/responses")
+    async def responses(request: Request):
+        """Non-streamed Responses API: a `function_call` output item, then text."""
+        body = await request.json()
+        seen.append({"path": "responses", "auth": request.headers.get("authorization"), **body})
+        follow_up = body["input"][-1].get("type") == "function_call_output"
+        if follow_up and follow_up_fails:
+            return JSONResponse({"error": {"message": "bad tool message"}}, status_code=400)
+        out = [{"type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "It is noon UTC."}]}]
+        if tool_call and not follow_up:
+            out = [{"type": "reasoning", "id": "rs_1", "summary": []},
+                   {"type": "function_call", "id": "fc_1", "call_id": "call_1",
+                    "name": "get_time", "arguments": '{"timezone": "UTC"}'}]
+        return JSONResponse({"id": "r1", "object": "response", "output": out, "usage": usage})
+
+    @fake.post("/v1/messages")
+    async def messages(request: Request):
+        """Non-streamed Anthropic Messages: a `tool_use` block, then text."""
+        body = await request.json()
+        seen.append({"path": "messages", "auth": request.headers.get("x-api-key"),
+                     "version": request.headers.get("anthropic-version"), **body})
+        last = body["messages"][-1]["content"]
+        follow_up = isinstance(last, list) and last[0].get("type") == "tool_result"
+        if follow_up and follow_up_fails:
+            return JSONResponse({"type": "error", "error": {"message": "bad tool message"}},
+                                status_code=400)
+        content = [{"type": "text", "text": "It is noon UTC."}]
+        if tool_call and not follow_up:
+            content = [{"type": "tool_use", "id": "toolu_1", "name": "get_time",
+                        "input": {"timezone": "UTC"}}]
+        return JSONResponse({"id": "msg_1", "type": "message", "role": "assistant",
+                             "content": content, "usage": usage})
+
     return fake, seen
 
 
@@ -578,6 +613,62 @@ async def test_preflight_probes_chat_completions(preflight_client):
     m2 = chats[1]["messages"]
     assert [m["role"] for m in m2] == ["user", "assistant", "tool"]
     assert m2[2]["tool_call_id"] == "call_1" == m2[1]["tool_calls"][0]["id"]
+
+
+@pytest.mark.parametrize(("api_format", "url", "api"), [
+    ("openai_responses", "http://fake/v1", "responses"),
+    ("anthropic_messages", "http://fake", "messages"),
+])
+async def test_preflight_probes_the_blocks_api(preflight_client, api_format, url, api):
+    fake, seen = fake_provider()
+    block = {"urls": [url], "api_key_env": "ANTH_KEY", "api_format": api_format,
+             "context_window": 200000}  # Anthropic's and OpenAI's listings report no window
+    spec = pspec(block, pixel={**HB, "model": "Qwen/Small"})
+    async with await preflight_client(fake, SECRETS) as c:
+        rep = (await c.post("/swarms/p/preflight", json=spec.model_dump(mode="json"))).json()
+    [x] = rep["results"]
+    assert rep["ok"] and x["api"] == api and x["follow_up_ok"] and x["usage_reported"], x
+    turn1, turn2 = seen
+    assert {t["path"] for t in seen} == {api} and turn1["model"] == "Qwen/Small"
+    if api == "responses":
+        assert turn1["auth"] == "Bearer ak" and turn1["store"] is False
+        assert turn1["tools"][0]["name"] == "get_time" and "temperature" not in turn1
+        assert [i.get("type") for i in turn2["input"][1:]] == ["function_call",
+                                                               "function_call_output"]
+        assert "id" not in turn2["input"][1]  # not stored: no server-side item ids
+        assert turn2["input"][2]["call_id"] == "call_1"
+    else:
+        assert (turn1["auth"], turn1["version"]) == ("ak", "2023-06-01")
+        assert turn1["tools"][0]["input_schema"]["required"] == ["timezone"]
+        assert [m["role"] for m in turn2["messages"]] == ["user", "assistant", "user"]
+        assert turn2["messages"][2]["content"][0]["tool_use_id"] == "toolu_1"
+    fake, seen = fake_provider(tool_call=False)
+    async with await preflight_client(fake, SECRETS) as c:
+        [x] = (await c.post("/swarms/p/preflight", json=spec.model_dump(mode="json"))).json()["results"]
+    assert not x["ok"] and not x["tool_call_seen"] and len(seen) == 1
+
+
+async def test_preflight_false_keeps_the_controller_off_the_endpoints(store, clock):
+    """A task's own model gateway: no model check at apply, no preflight probe."""
+    seen: list[str] = []
+    app = create_app(store, TOKEN, clock=clock, secret_source=SECRETS,
+                     inference_transport=fake_models.transport(seen=seen),
+                     preflight_transport=fake_models.transport(seen=seen))
+    gateway = {"urls": ["http://model-compat:8003/v1"], "api_key_env": "ANTH_KEY",
+               "api_format": "openai_responses", "preflight": False}
+    spec = pspec(gateway, pixel={**HB, "model": "gpt-6.1-sol"},
+                 pinned={**HB, "model": "gpt-6.1-sol",
+                         "inference": {**gateway, "context_window": 400000}})
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t",
+                                 headers={"Authorization": f"Bearer {TOKEN}"}) as c:
+        rep = (await c.post("/swarms/p/preflight", json=spec.model_dump(mode="json"))).json()
+        assert rep == {"swarm": "p", "ok": True, "unverified": 0, "results": []}
+        assert (await put(c, spec)).status_code == 200
+        types = (await c.get("/swarms/p")).json()["spec"]["types"]
+    assert not seen
+    assert types["pixel"]["resolved_model"]["context_window"] is None  # Pi's default
+    assert types["pinned"]["resolved_model"]["context_window"] == 400000
+    assert not provider_backed(spec) and unprobed(spec) == []
 
 
 @pytest.mark.parametrize("namespace", ["", "huggingface"])
