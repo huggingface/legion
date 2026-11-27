@@ -157,17 +157,38 @@ Select the GPU partition when submitting the server. Check the available partiti
 ```sh
 GPU_PARTITION=hopper-b300
 sbatch -p "$GPU_PARTITION" scripts/slurm/serve-vllm.sbatch Qwen/Qwen3.5-0.8B
-# its log ends with: serving Qwen/Qwen3.5-0.8B at http://<node address>:8000/v1
+# ./vllm-<job id>.log (this directory) ends with: serving Qwen/Qwen3.5-0.8B at http://<node address>:8000/v1
 srun -p hopper-cpu -n 1 -c 8 --mem=16G --pty bash
 source .venv/bin/activate && source scripts/slurm/podman-node.sh
 SERVER_URL=http://<node address>:8000/v1 legion launch experiments/mini-swarm/urls.yaml
 legion status mini-swarm-urls
 ```
 
+The same CPU-node step as a batch job, with no terminal: `legion launch` returns while the run
+goes on in the background, and the job would end it, so the job runs the swarm in the foreground
+(`legion.controller.localrun`, docs/local.md) until its loop is over, then stops the containers.
+Submit it from the legion checkout; its log is `./mini-swarm-<job id>.log`:
+
+```sh
+sbatch -p hopper-cpu -n 1 -c 8 --mem=16G -J mini-swarm -o %x-%j.log <<'EOF'
+#!/bin/bash
+source .venv/bin/activate && source scripts/slurm/podman-node.sh || exit 2
+SERVER_URL=http://<node address>:8000/v1 python -m legion.controller.localrun \
+  experiments/mini-swarm/urls.yaml --until idle
+status=$?
+podman_node_cleanup
+exit $status
+EOF
+```
+
 [`scripts/slurm/serve-vllm.sbatch`](../scripts/slurm/serve-vllm.sbatch) is one vLLM server on
-one GPU, in Pyxis (the Slurm recipe below uses it too). Arguments after the model go to
+one GPU, in Pyxis (the Slurm recipe below uses it too). Its log, `vllm-<job id>.log`, lands in
+the directory you ran `sbatch` from (`-o` moves it). Arguments after the model go to
 `vllm serve`, e.g. `--default-chat-template-kwargs '{"enable_thinking": false}'`; `PORT` and
-`IMAGE` (a vLLM `.sqsh`) come from the environment. `podman-node.sh` and Slurm workers pull
+`IMAGE` (a vLLM `.sqsh`) come from the environment. The tool-call and reasoning parsers default
+to Qwen's (`--enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3`):
+for another model family set `VLLM_PARSER_ARGS` to its flags, or to empty for none
+(`VLLM_PARSER_ARGS= sbatch ...`). `podman-node.sh` and Slurm workers pull
 Docker Hub images through `mirror.gcr.io` ([`scripts/slurm/registries.conf`](../scripts/slurm/registries.conf)).
 
 ### Slurm

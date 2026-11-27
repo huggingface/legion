@@ -8,7 +8,11 @@
 #     --default-chat-template-kwargs '{"enable_thinking": false}'
 # MODEL may also come from the environment (sbatch --export=ALL,MODEL=...,PORT=8011); PORT
 # (default 8000) and IMAGE (a vLLM .sqsh) likewise. The weights go to the node's own disk.
-# Its log ends with: serving <model> at http://<node address>:<port>/v1
+# VLLM_PARSER_ARGS: the tool-call and reasoning flags, by default Qwen's (below); set your
+# model's, or empty (VLLM_PARSER_ARGS= sbatch ...) for none. sbatch passes the environment.
+# The log is vllm-<job id>.log (%x-%j.log: -J renames it) in the directory sbatch ran from,
+# Slurm's default working directory (-o elsewhere/%x-%j.log moves it). It ends with:
+#   serving <model> at http://<node address>:<port>/v1
 #SBATCH --job-name=vllm
 #SBATCH --gpus=1
 #SBATCH --cpus-per-task=16
@@ -20,12 +24,13 @@ MODEL=${1:-${MODEL:-Qwen/Qwen3.5-0.8B}}
 [ $# -eq 0 ] || shift  # the rest: extra `vllm serve` arguments
 PORT=${PORT:-8000}
 IMAGE=${IMAGE:-/fsx/anton/shared/images/vllm-openai-v0.32.0.sqsh}
+QWEN_PARSERS="--enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3"
+read -ra PARSER_ARGS <<< "${VLLM_PARSER_ARGS-$QWEN_PARSERS}"  # set but empty: none
 export HF_HOME=/hf
 mkdir -p "/scratch/$USER/hf"  # the weights, on the node's own disk
 srun --overlap --container-image="$IMAGE" --no-container-mount-home \
   --container-mounts="/scratch/$USER/hf:/hf" --container-env=HF_HOME \
-  vllm serve "$MODEL" --port "$PORT" \
-  --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3 "$@" &
+  vllm serve "$MODEL" --port "$PORT" ${PARSER_ARGS[@]+"${PARSER_ARGS[@]}"} "$@" &
 SRUN_PID=$!
 until curl -sf -o /dev/null "localhost:$PORT/v1/models"; do
   sleep 10
