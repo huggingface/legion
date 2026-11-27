@@ -165,7 +165,7 @@ class HubJobsClient:
         self.calls["run_job"] += 1
         group = {"network_group": self.network_group} if self.network_group else {}
         if spec.harbor and (gateway := spec.harbor.resources.get("gateway")) is not None:
-            # e2b sandboxes reach the worker's gateway (resources.gateway) on this port
+            # sandboxes (e2b, hf-sandbox) reach the worker's gateway (resources.gateway) on this port
             group["expose_public"] = [gateway.get("port", GATEWAY_PORT)]
         job = self.api.run_job(
             **self.launch_args(spec, env),

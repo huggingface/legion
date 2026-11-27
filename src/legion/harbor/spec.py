@@ -246,9 +246,9 @@ class Spec(Config):
         if backend in SANDBOXES and "spawn" in self.resources:
             raise ValueError("resources.spawn needs a mount: use backend docker or podman")
         gateway = "gateway" in self.resources
-        if gateway and (backend != "e2b" or self.compute.kind != "hf-jobs"):
-            raise ValueError("resources.gateway needs backend e2b on compute hf-jobs: sandboxes "
-                             "reach it on the worker job's public port")
+        if gateway and (backend not in SANDBOXES or self.compute.kind != "hf-jobs"):
+            raise ValueError("resources.gateway needs a sandbox backend (e2b, hf-sandbox) on compute "
+                             "hf-jobs: sandboxes reach it on the worker job's public port")
         if (self.resources.get("world") or {}).get("transport") == "gateway" and not gateway:
             raise ValueError("resources.world transport gateway needs resources.gateway")
         if (self.resources.get("world") or {}).get("env") and self.naming != "consecutive-id":

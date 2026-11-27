@@ -8,7 +8,7 @@ Harbor agents reach a world through the `world` resource and its `world.*` tools
 `resources: {world: {url, token_env}}` and `tools: [world.*]`
 (experiments/pybot/spec.yaml; `legion.harbor.builtin.resources.world`). The resource
 adds the secret and the agent's name on the worker, so no world credential enters a Trial's
-container (on hf-sandbox each agent gets its own agent token instead; on e2b, see "Gateway").
+container (on hf-sandbox each agent gets its own agent token instead; with a gateway, see "Gateway").
 
 The swarm-level `world:` block is the controller's side: it starts the world (`compute: local`)
 or connects to one already running (`url:`), and fetches and checks its manifest at every apply.
@@ -340,15 +340,15 @@ python -m legion.world set <swarm> pr.open_floor=10 --reason "hub 429s"
 
 **In any other language:** serve the three routes above. A world without hooks needs only two.
 
-## Gateway (e2b)
+## Gateway (e2b, hf-sandbox)
 
-On e2b, `resources.gateway` keeps every service key on the worker: a Trial's sandbox holds only
-a random token of its own and the gateway's URL, and the gateway adds the keys.
+On e2b and hf-sandbox, `resources.gateway` keeps every service key on the worker: a Trial's
+sandbox holds only a random token of its own and the gateway's URL, and the gateway adds the keys.
 
 ```yaml
 compute: hf-jobs
 environment:
-  backend: e2b
+  backend: e2b             # or hf-sandbox
 resources:
   gateway: {}             # port: 8790, the worker job's port the controller exposes publicly
   world:
@@ -357,7 +357,8 @@ resources:
 ```
 
 - It runs in each worker job, at `https://<job id>--8790.hf.jobs`. The spec allows it only with
-  `backend: e2b` and `compute: hf-jobs`, and `transport: gateway` only with a gateway.
+  a sandbox backend (`e2b`, `hf-sandbox`) and `compute: hf-jobs`, and `transport: gateway` only
+  with a gateway.
 - Each Trial gets a new token when it starts; its end, the next Trial's token and the agent
   leaving the worker revoke it. The gateway names the agent from the token, never from its headers. Agents
   send it as `X-World-Token` (Pi too, through its models.json headers): the jobs proxy drops

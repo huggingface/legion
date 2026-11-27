@@ -1,4 +1,4 @@
-"""The worker's gateway (docs/world.md "Gateway"): an e2b sandbox calls it instead of holding
+"""The worker's gateway (docs/world.md "Gateway"): a sandbox (e2b, hf-sandbox) calls it instead of holding
 service keys. It listens on a port of the worker job, which the controller exposes publicly
 (`https://<JOB_ID>--<port>.hf.jobs`).
 
