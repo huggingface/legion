@@ -1,4 +1,9 @@
-"""Experiment resources around ordinary concurrent Harbor trials."""
+"""Experiment resources around ordinary concurrent Harbor trials.
+
+`run_experiment` is a one-shot, in-process path used by tests and embedded callers. It has no
+CLI entry point: `legion launch` always creates the swarm through a controller, whose workers
+run each agent's Trial.
+"""
 
 import asyncio
 import importlib.metadata
