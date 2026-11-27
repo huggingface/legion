@@ -78,6 +78,15 @@ async def test_agent_hold_with_interrupt_stops_only_that_agent(sim):
     await resume(sim, agents=[A0])
 
 
+async def test_interrupt_on_an_already_held_swarm_stops_only_the_named_turns(sim):
+    await sim.apply({"prompt": "go", "every": "30s"})
+    await sim.heartbeat(working=(A0, A1))
+    await pause(sim, reason="look")  # held; the turns in flight run on
+    assert await sim.commands() == []
+    await pause(sim, agents=[A0], interrupt=True, reason="look")  # held already, by its type
+    assert [(c["kind"], c["agent"]) for c in await sim.commands()] == [("stop", A0)]  # A1 runs on
+
+
 async def test_interrupt_ends_a_worker_side_loop_before_the_stop(sim):
     await sim.apply({"prompt": "go"})  # turn_end: the worker re-prompts
     await sim.heartbeat()

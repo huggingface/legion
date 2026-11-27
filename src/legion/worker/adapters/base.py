@@ -41,17 +41,21 @@ class AdapterEvent:
     raw: Any = None
 
 
-HTTP_TRANSIENT = re.compile(r"(?:^\s*|\bhttp\s+|\bstatus(?: code)?\s*[:=]?\s*)(?:429|502|503)\b",
-                            re.IGNORECASE)
+TRANSIENT = re.compile(
+    r"(?:^\s*|\bhttp\s+|\bstatus(?: code)?\s*[:=]?\s*)(?:429|502|503|504)\b"  # not "429 tokens"
+    r"|connection.?(?:error|reset|refused|closed|lost)|network.?error|fetch failed|socket"
+    r"|other side closed|\bterminated\b|timeout|timed out|abort"
+    r"|econnreset|econnrefused|ehostunreach|enetunreach|enotfound|eai_again|etimedout",
+    re.IGNORECASE)
+# A 4xx other than 408/429 is the request's fault, whatever agent text its message quotes.
+CLIENT_ERROR = re.compile(r"\s*4(?!08|29)\d\d\b")
 
 
 def transient_error(message: str) -> bool:
-    """A model transport failure (HTTP 429/502/503, a timeout, a dropped connection): a turn
-    that ends on one is `reason: model_transport`, which the worker-side loop retries with
-    backoff instead of counting it as a failed turn."""
-    return bool(HTTP_TRANSIENT.search(message)) or any(x in message.lower() for x in (
-        "timeout", "timed out", "fetch failed", "econnreset", "connection reset",
-        "connection refused", "socket", "abort"))
+    """A model transport failure (HTTP 429/502/503/504, a timeout, a dropped or refused
+    connection): a turn that ends on one is `reason: model_transport`, which loops retry with
+    backoff instead of counting it as a failed turn. Any other 4xx counts."""
+    return bool(TRANSIENT.search(message)) and not CLIENT_ERROR.match(message)
 
 
 class ResumeError(RuntimeError):

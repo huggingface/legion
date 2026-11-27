@@ -22,7 +22,7 @@ from legion.harbor import launch, networking
 from legion.harbor.agent import LegionPi
 from legion.harbor.spec import Spec, compile_spec
 from legion.models import Inference
-from legion.worker.adapters.base import ResumeError
+from legion.worker.adapters.base import ResumeError, transient_error
 from legion.worker.adapters.harbor import HarborAdapter, make_adapter
 
 from .test_envs import compose
@@ -594,6 +594,20 @@ async def test_unmounted_sessions_reach_home_at_rollover_and_close(fakes, tmp_pa
     assert lines(a) == 3 and fakes.uploads == [(a.home / "sessions", SESSIONS)]
     await a.close()
     assert lines(a) == 4 and len(fakes.trials) == 2  # what BucketSync pushes after a drain
+
+
+@pytest.mark.parametrize("message, transient", [
+    ("Connection error.", True),
+    ("connect ECONNREFUSED 10.0.0.5:8000", True),
+    ("other side closed", True),
+    ("504 Gateway Time-out", True),
+    ("429 Too Many Requests", True),
+    ("400 Bad Request: invalid tool schema", False),
+    ("400 tool output: curl: (7) Failed to connect: Connection refused", False),  # quoted agent text
+    ("Error: Unterminated string in JSON at position 12", False),
+])
+def test_model_server_failures_are_transient(message, transient):
+    assert transient_error(message) is transient
 
 
 async def test_rate_limited_turns_do_not_end_the_trial(fakes, tmp_path):

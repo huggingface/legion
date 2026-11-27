@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import sqlite3
 from datetime import datetime, timedelta
 
 from pydantic import TypeAdapter
@@ -8,6 +9,7 @@ from pydantic import TypeAdapter
 from legion import status as fs
 from legion.controller.jobs import JobState
 from legion.controller.reconcile import (
+    FAST_END,
     LAUNCH_TIMEOUT,
     NUDGE_EVERY,
     NUDGE_MAX,
@@ -16,7 +18,7 @@ from legion.controller.reconcile import (
     reconcile,
     record_heartbeat,
 )
-from legion.controller.store import Store
+from legion.controller.store import DB_NAME, Store
 from legion.models import (
     CRASHLOOP_THRESHOLD,
     AgentHeartbeat,
@@ -194,10 +196,33 @@ def test_job_timeout_is_planned_restart(store, jobs, clock, tick):
 def test_drained_completed_is_planned_restart(store, jobs, clock, tick):
     store.put_swarm(make_spec(researcher={"replicas": 1}), 0)
     tick()
+    waits = []
+    for _ in range(2):  # drains seconds after each start: backs off instead of a restart storm
+        clock.advance(5)
+        heartbeat(store, clock, W0, [("researcher-0000", "idle", None)], draining=True)
+        jobs.set_stage(jobs.job_for(W0), "COMPLETED")
+        assert kinds(tick()) == ["planned_restart"]
+        w = store.get_worker(W0)
+        waits.append(w["next_launch_at"] - clock().timestamp())
+        clock.advance(waits[-1])
+        assert "launch" in kinds(tick())
+    assert waits == [30, 60] and w["consecutive_crashes"] == 0  # not a crash, not a crashloop
+    clock.advance(FAST_END)  # a run of normal length
     heartbeat(store, clock, W0, [("researcher-0000", "idle", None)], draining=True)
     jobs.set_stage(jobs.job_for(W0), "COMPLETED")
     actions = tick()  # draining workers are inspected even with a fresh heartbeat
     assert kinds(actions)[:2] == ["planned_restart", "launch"]
+    assert store.get_worker(W0)["fast_ends"] == 0
+
+
+def test_a_state_db_from_before_fast_ends_gets_the_column(tmp_path):
+    Store(tmp_path).close()
+    with sqlite3.connect(tmp_path / DB_NAME) as db:
+        db.execute("ALTER TABLE workers DROP COLUMN fast_ends")
+    store = Store(tmp_path)
+    store.insert_worker(W0, "demo", "researcher", 0, 0.0)
+    store.update_worker(W0, fast_ends=2)
+    assert store.get_worker(W0)["fast_ends"] == 2
 
 
 def test_drained_completed_in_a_released_swarm_ends(store, jobs, clock, tick):
@@ -536,7 +561,7 @@ def test_memory_rotation_drains_smallest_eta_within_budget(store, jobs, settings
 
     hb(w2, 2, draining=True)  # its drain ends in a planned restart
     jobs.set_stage(jobs.job_for(w2), "COMPLETED")
-    clock.advance(20)
+    clock.advance(FAST_END)  # after a run of normal length: relaunched at once
     for wid, i in ((W0, 0), (W1, 1)):
         hb(wid, i, eta=7200 if wid == W1 else None)
     assert "planned_restart" in kinds(tick())

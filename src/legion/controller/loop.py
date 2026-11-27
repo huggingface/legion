@@ -65,6 +65,10 @@ WAKE_MAX_DELAY = 10.0  # s, a wake is never held longer than this by a stream of
 STALL_AFTER = 30.0  # s idle in a worker-side loop with nothing in flight: send loop_start again
 ACK_TIMEOUT = 60.0  # s to wait for a worker's loop_stopped before the final prompt goes anyway
 ERROR_LIMIT = 3  # failed loop turns in a row (not max_turns) end an agent's loop (both sides)
+# s since the first of a run of timeout / model_transport turns during which they do not count
+# toward ERROR_LIMIT (about the worker side's retry span); after it each one counts, so a model
+# server that stays down still ends the loop
+TRANSIENT_FOR = 1800.0
 RESTOP_EVERY = 30.0  # s, hard budget stop: min gap between repeated stops to one working agent
 LOOP_KINDS = ("loop",)
 NOTICE_KEEP = 100  # pending notices kept per agent (the oldest go first)
@@ -176,7 +180,7 @@ def with_notices(text: str, line: str | None) -> str:
 def _new_agent() -> dict[str, Any]:
     return {"phase": "new", "rounds": 0, "last_sent": None,
             "wstarted": None, "stop_sent": None, "acked": False, "last_activity": None,
-            "turn_done": False, "errors": 0, "done_reason": None,
+            "turn_done": False, "errors": 0, "transient_since": None, "done_reason": None,
             "final": None, "final_sent": None,
             "wakes": 0, "wake_last": None, "wake_times": [],  # wake prompts sent (`on:`)
             "inflight": None}  # {kind, round} of a loop prompt the worker took, until its turn starts
@@ -316,8 +320,11 @@ class LoopEngine:
                     L = self._new_loop(sw["spec"], type_name, ts, now)
                 if L["state"] == "running":
                     self._stop(swarm, type_name, ts, L, "manual", final=final, now=now)
-                elif L["state"] == "final" and not final:
-                    self._finish(swarm, type_name, L, now, "final round skipped")
+                elif L["state"] == "final":  # a hand stop: a raised `until` must not reopen it
+                    L["reason"] = "manual"
+                    self.store.put_loop(swarm, type_name, L)
+                    if not final:
+                        self._finish(swarm, type_name, L, now, "final round skipped")
             else:
                 if self.store.swarm_flags(swarm).get("budget_stop"):
                     raise ValueError(f"swarm {swarm!r} is stopped by limits.budget_usd; raise it "
@@ -361,21 +368,25 @@ class LoopEngine:
                     if n not in h[key] or (not auto and h[key][n].get("auto")):
                         h[key][n] = entry
                         new[key].append(n)
-            if release and not flags.get("released"):
+            released = release and not flags.get("released")
+            if released:
                 flags["released"] = {"since": entry["since"], "reason": reason, "by": by}
                 self.store.put_control(swarm, "unsynced", {})  # this release's report starts empty
                 self._event(swarm, "released", {"reason": reason, "by": by})
-            elif not new["types"] and not new["agents"]:
+            changed = released or new["types"] or new["agents"]
+            if not changed and not interrupt:
                 return h
-            self.store.put_swarm_flags(swarm, flags)
-            self._event(swarm, "paused", {**new, "reason": reason, "by": by, "auto": auto,
-                                          "interrupt": interrupt})
+            if changed:  # already held: `interrupt` still cuts the turns below
+                self.store.put_swarm_flags(swarm, flags)
+                self._event(swarm, "paused", {**new, "reason": reason, "by": by, "auto": auto,
+                                              "interrupt": interrupt})
             if interrupt:
                 workers = {w["id"]: w for w in self.store.list_workers(swarm)}
                 loops = self.store.get_loops(swarm)
                 now = self.clock().timestamp()
                 for a in self.store.list_agents(swarm):
-                    if (a["worker"] and not a["removing"] and self.store.held(a, flags)
+                    named = a["type"] in (types or []) or a["name"] in (agents or [])
+                    if (named and a["worker"] and not a["removing"]
                             and self.turn_state(a, workers.get(a["worker"]), now)
                             == AgentState.working):
                         # a worker-side loop would re-prompt the stopped turn: end it first
@@ -465,7 +476,9 @@ class LoopEngine:
                 self._stop_success(spec)
 
     def _stop_success(self, spec: SwarmSpec) -> None:
-        self.pause(spec.swarm, interrupt=True, release=True, reason="task_success", by="controller")
+        if not self.store.swarm_flags(spec.swarm).get("released"):  # once; _keep_stopped re-stops
+            self.pause(spec.swarm, interrupt=True, release=True, reason="task_success",
+                       by="controller")
         self.store.drop_prompts(spec.swarm)
         now = self.clock().timestamp()
         for name, loop in self.store.get_loops(spec.swarm).items():
@@ -545,9 +558,15 @@ class LoopEngine:
                     if L.get("mode") == "controller" and held:
                         st["turn_done"] = True
                     elif L.get("mode") == "controller":
-                        st["errors"] = (0 if status == "completed" or max_turns else
-                                        st["errors"] if d.get("reason") in ("timeout", "model_transport")
-                                        else st["errors"] + 1)
+                        transient = d.get("reason") in ("timeout", "model_transport")
+                        if status == "completed" or max_turns:
+                            st["errors"], st["transient_since"] = 0, None
+                        elif not transient:
+                            st["errors"] += 1
+                        elif st.get("transient_since") is None:
+                            st["transient_since"] = now
+                        elif now - st["transient_since"] > TRANSIENT_FOR:
+                            st["errors"] += 1
                         if st["errors"] >= ERROR_LIMIT:
                             stop_reason = "errors"
                         st["turn_done"] = True
@@ -629,6 +648,11 @@ class LoopEngine:
                 self._updated(spec, type_name, ts, L, now)
             if L["state"] == "final" and ts.loop.final is None:  # final removed by a re-apply
                 self._finish(spec.swarm, type_name, L, now, "final removed from the spec")
+            until = ts.loop.while_.until
+            if (L["state"] == "done" and L.get("reason") == "until" and phase is None and until
+                    and now < until_deadline(until, L["started_at"])
+                    and self._can_loop(spec.swarm, type_name, ts.loop)):
+                self._reopen(spec.swarm, type_name, L)  # a re-apply moved `until` past now
             if L["state"] == "running":
                 self._run(spec, type_name, ts, L, now, budget=phase)
             if L["state"] == "final":
@@ -805,6 +829,29 @@ class LoopEngine:
                 if st and st["phase"] == "looping" and st["wstarted"]:
                     self._loop_start(spec, type_name, ts, L, a, st, now)
                     self.store.put_loop_agent(a["name"], spec.swarm, type_name, st)
+
+    def _can_loop(self, swarm: str, type_name: str, lp: LoopSpec) -> bool:
+        """Some agent of the type would loop again after a reopen: not done (a worker loop's own
+        `deadline` end aside) and below `max_rounds`. Otherwise a reopen only sends a second
+        final round."""
+        cap = lp.while_.max_rounds
+        states = self.store.loop_agents(swarm, type_name).values()
+        return not states or any((st["phase"] != "done" or st["done_reason"] == "deadline")
+                                 and (cap is None or st["rounds"] < cap) for st in states)
+
+    def _reopen(self, swarm: str, type_name: str, L: dict) -> None:
+        """A re-applied `while.until` moved past now: the loop that ended on it runs on, same run
+        (started_at and rounds kept), and gets a new final round at the new deadline. Worker
+        loops get `loop_start` from `_run` once idle."""
+        L["state"], L["stopped_at"], L["reason"], L["final_at"] = "running", None, None, None
+        self.store.put_loop(swarm, type_name, L)
+        for name, st in self.store.loop_agents(swarm, type_name).items():
+            if st["phase"] == "done" and st["done_reason"] == "deadline":  # the worker-side end
+                st["phase"], st["done_reason"] = "looping", None
+            st["final"], st["final_sent"] = None, None
+            self.store.put_loop_agent(name, swarm, type_name, st)
+        self._event(swarm, "loop_started", {"type": type_name, "mode": L["mode"], "every": L["every"],
+                                            "restart": False, "reopened": True})
 
     def _stop(self, swarm: str, type_name: str, ts: TypeSpec, L: dict, reason: str, *,
               final: bool, now: float) -> None:

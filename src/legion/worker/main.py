@@ -452,6 +452,7 @@ class Worker:
         self._drained = asyncio.Event()
         self._tasks: set[asyncio.Task] = set()
         self._wake_heartbeat = asyncio.Event()
+        self._flush_lock = asyncio.Lock()  # held while a batch taken from the outbox is sent
         self._unassigning: dict[str, asyncio.Task] = {}
         self.stale = False
         self._restoring = 0  # setups (restores) in flight; a "wave" ends when it drops to 0
@@ -739,13 +740,14 @@ class Worker:
 
     async def flush_events(self) -> bool:
         while len(self.outbox):
-            batch = self.outbox.take()
-            try:
-                await self.client.events(EventBatch(worker=self.cfg.worker_id, events=batch))
-            except httpx.HTTPError as e:
-                self.outbox.put_back(batch)
-                log.warning("event flush failed: %s", e)
-                return False
+            async with self._flush_lock:  # run() cancels the flush loop only between batches
+                batch = self.outbox.take()
+                try:
+                    await self.client.events(EventBatch(worker=self.cfg.worker_id, events=batch))
+                except httpx.HTTPError as e:
+                    self.outbox.put_back(batch)
+                    log.warning("event flush failed: %s", e)
+                    return False
         return True
 
     async def flush_loop(self) -> None:
@@ -1012,9 +1014,20 @@ class Worker:
         finally:
             for sig in handlers:
                 loop.remove_signal_handler(sig)
+            # Never cancel the flush loop mid-send: the batch it took would be lost, and events
+            # carry no id to re-send it safely. A preempted worker waits at most its budget less
+            # 2 s for the last heartbeat; a stale worker's events are dropped anyway.
+            wait = max(0.0, self._deadline - loop.time() - 2) if self.preempted else None
+            if not self.stale:
+                try:
+                    await asyncio.wait_for(self._flush_lock.acquire(), wait)
+                except TimeoutError:
+                    pass  # out of budget: the send in flight is cut
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            if self._flush_lock.locked():  # ours: the flush task has ended
+                self._flush_lock.release()
         if self.preempted:  # what is left of the budget, for events and the last heartbeat
             left = max(1.0, self._deadline - loop.time())
             try:
