@@ -1493,7 +1493,8 @@ _LOOP_SOURCE_RE = re.compile(r"^(message_board|world|artifacts)\.[A-Za-z0-9_.:*-
 class LoopWhile(BaseModel):
     """While every set condition holds, the loop goes on. Type-wide: `until` (wall time since
     the loop started), `budget_usd` (the type's cost). Per agent: `max_rounds` (loop prompts),
-    `agent_usd` (the agent's cost; a map is keyed by model alias or model id)."""
+    `agent_usd` (the agent's cost; a map is keyed by model alias or model id),
+    `agent_output_tokens` (the agent's output tokens, every model counted)."""
 
     model_config = {"extra": "forbid"}
 
@@ -1501,6 +1502,7 @@ class LoopWhile(BaseModel):
     max_rounds: int | None = None
     budget_usd: float | None = None
     agent_usd: float | dict[str, float] | None = None
+    agent_output_tokens: int | None = None
 
     @field_validator("until", mode="before")
     @classmethod
@@ -1515,7 +1517,7 @@ class LoopWhile(BaseModel):
             until_deadline(v, 0.0)
         return v
 
-    @field_validator("max_rounds")
+    @field_validator("max_rounds", "agent_output_tokens")
     @classmethod
     def _positive(cls, v: int | None) -> int | None:
         if v is not None and v < 1:

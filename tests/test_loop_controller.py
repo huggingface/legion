@@ -276,6 +276,22 @@ async def test_agent_usd_takes_an_agent_out(sim):
     assert st["per_agent"][A0]["done_reason"] == "agent_usd" and st["state"] == "running"
 
 
+async def test_agent_output_tokens_takes_an_agent_out(sim):
+    await sim.apply({"prompt": "p", "every": "5s", "while": {"agent_output_tokens": 25_000}})
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    for a in (A0, A1):
+        await sim.turn(a, got[a])
+    sim.cost[A0] = 25_000  # output tokens
+    await sim.heartbeat()
+    sim.tick(5)
+    got = prompts(await sim.commands())
+    assert list(got) == [A1]  # A0 reached agent_output_tokens
+    st = (await sim.c.get("/swarms/demo/loop")).json()[0]
+    assert st["per_agent"][A0]["done_reason"] == "agent_output_tokens" and st["state"] == "running"
+
+
 async def test_budget_thresholds_final_reserve_then_hard_stop(sim):
     # $1 budget, $0.20 held for the final round: loops stop at $0.80, everything at $1
     await sim.apply({"prompt": "p", "every": "5s", "final": {"prompt": "fin", "reserve_usd": 0.2}},

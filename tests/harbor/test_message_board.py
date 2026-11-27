@@ -62,6 +62,27 @@ async def test_agent_created_channels_permissions_retry_and_export(
     assert all(secret not in serialized for secret in board.secrets)
 
 
+async def test_post_from_a_file_and_unread_compact_reads(board, tmp_path, monkeypatch):
+    monkeypatch.setattr(board_tools, "UNREAD_DIR", tmp_path / "unread")
+    a, b = board.provision(["agent-001", "agent-002"])
+    monkeypatch.setenv("MSGBOARD_TOKEN", a["token"])
+    message = tmp_path / "msg.txt"
+    message.write_text("x = $a'b$ and \\frac{1}{2}, \"quoted\"\n")
+    first = board_tools.post(path=str(message))
+    assert first["body"] == "x = $a'b$ and \\frac{1}{2}, \"quoted\""
+    with pytest.raises(ValueError, match="exactly one of text or path"):
+        board_tools.post("both", path=str(message))
+
+    monkeypatch.setenv("MSGBOARD_TOKEN", b["token"])
+    assert board_tools.read(unread=True, compact=True) == {
+        "messages": [f"#{first['id']} agent-001: {first['body']}"]}
+    assert board_tools.read(unread=True)["messages"] == []  # its place is kept
+    mine = board_tools.post("I get 7", reply_to=first["id"])
+    assert board_tools.wait(timeout=0, unread=True, compact=True) == {
+        "messages": [f"#{mine['id']} agent-002 (you) (reply to #{first['id']}): I get 7"]}
+    assert len(board_tools.read()["messages"]) == 2  # the default read is unchanged
+
+
 def extract_bundle(tmp_path, names):
     bundle = build_tool_bundle(TOOLS_DIR, names, tmp_path / "tools.tar.gz")
     directory = tmp_path / "bundle"
