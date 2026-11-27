@@ -13,6 +13,7 @@ worker side and rendering), `cli.py` (`legion stop --final`, `legion status`).
 loop:                          # a Harbor spec's run loop; a role's own `agents.roles.<r>.loop` replaces it
   prompt: "Round {round}: claim and paint. Repeat until the result says you are done."
   # or prompt_file: prompts/round.md (read by `legion launch`, relative to the spec)
+  start_prompt: "Read the task, then claim and paint."   # optional: round 1's prompt instead
   every: turn_end            # turn_end (default) | a duration: 30s, 2m
   on: [message_board.mention]        # wake-ups from the board resource (see "Wake queue")
   wake:                      # how wake-ups spend rounds (all optional; these are the defaults)
@@ -22,6 +23,8 @@ loop:                          # a Harbor spec's run loop; a role's own `agents.
     counts_as_round: false   # true: a wake prompt is a round and counts toward max_rounds
   while:                     # all set conditions must hold
     until: 2h                # wall time since the loop started (type-wide); or a clock time: 2026-10-28T20:00Z
+    until_from: launch       # launch (default) | first_turn: count a duration `until` from the type's first turn
+    quiet: 45s               # stop once every agent has been idle, nothing pending, this long (type-wide)
     max_rounds: 400          # loop prompts per agent
     budget_usd: 12           # the type's total cost (type-wide)
     agent_usd: 0.05          # per agent; alternatively use a mapping by model id (see below)
@@ -37,13 +40,16 @@ limits:
 | field | meaning |
 |---|---|
 | `prompt` / `prompt_file` | the loop prompt, a template rendered on the worker (placeholders below); one is required |
+| `start_prompt` | optional: each agent's round 1 of a run of the loop (same placeholders), when it must differ from later rounds' `prompt`. Also any wake prompt before round 1; a round 1 that was deferred or dropped goes again with it. Unset: round 1 is `prompt` |
 | `every` | `turn_end`: the next loop prompt as soon as the agent's turn completes. A duration: an idle agent gets the next one that long after its previous loop prompt was sent |
 | `on` | wake sources (`message_board.mention`, ...: the board resource's events): a wake queues the loop prompt early (2 s debounce). `world.*` needs a world. Write it plain: `legion launch` reads specs with YAML 1.2 booleans (only `true`/`false`), so `on:` stays a key |
 | `wake.min_gap` | per agent: at least this long between two wake prompts (default `30s`; `0s` turns it off). Wakes that arrive in the gap are coalesced into one prompt when it ends |
 | `wake.max`, `wake.window` | per agent: at most `max` wake prompts (default 10) per run of the loop, or per `window` when set; `null` for no cap. Past it, wakes are ignored (`wake()` returns false) |
 | `wake.counts_as_round` | default `false`: a wake prompt is not a round. It carries the current `{round}`, does not advance it and does not count toward `max_rounds`; `wake.max` caps it instead. `true`: a wake prompt is the next round |
 | `notices` | default `false`. `true`: the round prompts name the board notifications since the agent's last round in one line after the rendered prompt (see "Notices") |
-| `while.until`, `while.budget_usd` | type-wide: when either fails the loop stops for every agent of the type |
+| `while.until`, `while.budget_usd`, `while.quiet` | type-wide: when one fails the loop stops for every agent of the type, then the final round |
+| `while.until_from` | `launch` (default): a duration `until` counts from the loop's start. `first_turn`: from the type's first turn (see "Stopping"); needs `until` as a duration |
+| `while.quiet` | a duration: the loop stops (reason `quiet`) once every agent of the type has been idle with nothing pending that long (see "Stopping") |
 | `while.max_rounds`, `while.agent_usd`, `while.agent_output_tokens` | per agent: the agent leaves the loop; when every agent has left, the loop stops. `agent_output_tokens` caps the agent's output tokens without a price (e.g. a self-hosted model). It counts provider-reported usage only: a model server that reports none never reaches the cap, so pair it with `max_rounds` or `until` |
 | `final.prompt` / `prompt_file` | sent once to every live agent when the loop stops (any reason except a stop with `final: false` (`POST /swarms/{swarm}/loop`) and the hard budget stop) |
 | `final.reserve_usd` | subtracted from `limits.budget_usd` to get the point where loops stop; summed over the types that have a final round |
@@ -57,7 +63,7 @@ The worker fills these in `prompt` and `final.prompt`, at send time:
 | placeholder | value |
 |---|---|
 | `{round}` | this prompt's round (1, 2, ...; the final prompt carries the last round) |
-| `{elapsed}` | minutes since the loop started, rounded |
+| `{elapsed}` | minutes since the loop started (`until_from: first_turn`: since the first turn; 0 before it), rounded |
 | `{wall}` | `while.until` in minutes, or `none` |
 | `{spend}` | the agent's cost so far in USD, 3 decimals (worker-side, same price table as the controller) |
 | `{cap}` | the agent's `while.agent_usd`, 2 decimals, or `none` |
@@ -104,7 +110,7 @@ round is never dropped. When the controller does drop undelivered loop prompts (
 handover to the workers, the budget stop) their rounds are taken back: only delivered prompts
 count.
 
-**Stopping.** The loop stops when a type-wide condition fails (`until`, `budget_usd`, the
+**Stopping.** The loop stops when a type-wide condition fails (`until`, `budget_usd`, `quiet`, the
 budget threshold), when every agent has left it (`max_rounds`, `agent_usd`, `agent_output_tokens`,
 `errors`; the reason is theirs if they agree, else `agents_done`), on `legion stop --final`, or
 when `loop:` is removed from the spec (no final round then). Stopping drops the type's
@@ -114,6 +120,24 @@ undelivered loop prompts and sends `loop_stop` to worker-side loops.
 (`until: 2026-10-28T20:00Z`, or with an offset like `+02:00`; no zone means UTC). A clock time
 ends the loop when `now >= until` whatever the start time, so the final round can be scheduled
 for a wall-clock moment. `{wall}` is then the minutes from the loop start to that time.
+
+`until_from: first_turn` counts a duration `until` from the type's first turn instead of the
+loop's start, so a worker that waits in a queue (Slurm, a busy machine) does not eat the team's
+time. The first turn is the first `turn_started` the controller receives from any agent of the
+type in this run of the loop, whatever prompted it (round 1, a resume prompt, a hand prompt);
+a team's clock starts with its first agent, not its last. Until then `until` cannot end the
+loop, the worker-side loops get no deadline (the controller's stop ends them) and `{elapsed}`
+is 0. A new run of the loop (`POST /swarms/{swarm}/loop` start) waits for a new first turn.
+`limits.run_timeout_seconds` still counts from the launch. `GET /swarms/{s}/loop` shows the
+time as `first_turn_at` (also with `launch`), and the swarm stream gets `loop_first_turn`.
+
+`quiet` stops the loop (reason `quiet`, then the final round) once every agent of the type has
+been quiet for that long: idle, with no undelivered prompt, no queued wake and no hold, and no
+loop activity (a loop prompt sent or taken, a turn's end, a `loop_start`) in the window. An
+agent that is working, not placed yet, unknown or dead keeps the loop going, so does a held
+one (a pause never ends a loop). Agents already out of the loop (`max_rounds`, ...) count as
+quiet when idle. Typical use: a board-driven team (`every: 24h`, `on: [message_board.*]`)
+that has stopped talking.
 
 **Undelivered prompts.** A worker that takes a loop prompt and then defers it (draining,
 stopping) reports `prompt_deferred` with the prompt's `{kind, round}`: the controller undoes
@@ -254,7 +278,8 @@ something), `loop_updated {type}`, `loop_stopped {type, reason, rounds_total, dr
 sent: `reason` the wake sources, `events` the wakes folded into it, `coalesced = events - 1`,
 `wakes` the agent's wake prompts so far; also in the agent's stream),
 `loop_max_turns {type, agent, kind: loop|final, round, calls}` (a turn ended at
-`max_turns`; also in the agent's stream).
+`max_turns`; also in the agent's stream), `loop_first_turn {type, agent, after_s}` (only with
+`until_from: first_turn`: the type's first turn, `after_s` after the loop started).
 
 Agent stream (from the worker): `loop_prompt {kind: loop|final, round, why}`
 right before the turn it starts, `loop_stopped {reason, round, active}` when a worker-side loop
@@ -266,8 +291,11 @@ prompt outside the round count has `counted: false` in its `loop_prompt`. The co
 - `PromptCommand.loop: LoopMeta` (optional, omitted from the wire when unset): `text` is a
   template; `LoopMeta {kind, type, round, started_at, wall_s, cap_usd, why, counted, wake}` is what
   the worker renders it with. `round: null` lets the worker number it.
-- `LoopStartCommand {agent, text, meta, max_rounds, deadline, run}` and `LoopStopCommand {agent,
-  reason}`: worker-side `turn_end`. `run` names one run of the loop: a new run (after `legion
+- `LoopStartCommand {agent, text, start_text, meta, max_rounds, deadline, run}` and
+  `LoopStopCommand {agent, reason}`: worker-side `turn_end`. `start_text` (`loop.start_prompt`)
+  is sent instead of `text` while the worker's round count for the run is 0. Workers never
+  see the spec's `start_prompt`, `while.quiet` or `while.until_from` (`worker_type_spec`), so
+  an older worker still takes the spec (it then ignores `start_text`). `run` names one run of the loop: a new run (after `legion
   loop --start`) resets the worker's round counter, a repeat of the same run keeps it. Deploy the worker wheel with the controller.
 - `GET /swarms/{s}/loop`: `LoopStatus` per type with per-agent detail (`rounds_total` counts rounds, `wakes_total` wake
 prompts, so wakes and cadence rounds are apart; the same fields are in `run.json` `loops`); `POST /swarms/{s}/loop

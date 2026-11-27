@@ -641,7 +641,9 @@ class AgentRuntime:
         if lp.deadline is not None and utcnow() >= lp.deadline:
             self._loop_end("deadline")
             return
-        await self.prompt(lp.text, loop=lp.meta.model_copy(update={"round": None, "why": why}))
+        # `loop.start_prompt`: the agent's first round of this run (again if that one was deferred)
+        text = lp.start_text if lp.start_text is not None and self.state.loop_round == 0 else lp.text
+        await self.prompt(text, loop=lp.meta.model_copy(update={"round": None, "why": why}))
 
     # ------------------------------------------------------------------ control
     @property

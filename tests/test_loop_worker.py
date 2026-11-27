@@ -108,6 +108,15 @@ async def test_max_turns_is_not_a_failed_loop_turn(tmp_path, data):
     await rt.stop()
 
 
+async def test_start_text_is_the_first_round_of_a_run(tmp_path):
+    rt, ad = runtime(tmp_path, idle_grace="5s")
+    await rt.setup(restore=False)
+    rt.start_loop(start("again", start_text="begin", max_rounds=3))
+    await until(lambda: custom(rt, "loop_stopped"), timeout=5)
+    assert ad.sent == ["begin", "again", "again"]
+    await rt.stop()
+
+
 async def test_deadline_ends_the_worker_loop(tmp_path):
     rt, ad = runtime(tmp_path, idle_grace="5s")
     await rt.setup(restore=False)
