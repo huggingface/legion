@@ -21,6 +21,7 @@ from harbor.trial.trial import Trial
 from legion.models import NO_KEY_ENV, loopback_url
 
 from .config import PI_VERSION, SANDBOXES, Config
+from .envs import ENVIRONMENTS
 from .harnesses.pi import attach_pi_setup, terminal_pi_error
 from .instructions import build_agent_instructions
 from .networking import TrialNetworks
@@ -32,6 +33,8 @@ from .tools.setup import TOOLS_MANIFEST, attach_tool_setup
 
 
 def environment_config(config):
+    """The Trial's environment, on legion's subclass of Harbor's (`ENVIRONMENTS`): standalone
+    Trials too get podman's `-T` and no secret in an argv."""
     backend = config.environment.backend
     if backend == "hf-sandbox":
         # The sandbox's idle timeout doesn't count a running foreground command as
@@ -39,6 +42,7 @@ def environment_config(config):
         # delete=True kills the sandbox (an HF Job) when the trial ends.
         return EnvironmentConfig(
             type=backend,
+            import_path=ENVIRONMENTS[backend],
             kwargs={
                 "flavor": config.environment.flavor,
                 "job_timeout": math.ceil(config.limits.run_timeout_seconds) + 60,
@@ -49,12 +53,14 @@ def environment_config(config):
         # E2B's timeout is the sandbox's whole lifetime; stop kills it when the trial ends.
         return EnvironmentConfig(
             type=backend,
+            import_path=ENVIRONMENTS[backend],
             kwargs={"sandbox_timeout_secs": math.ceil(config.limits.run_timeout_seconds) + 60},
             delete=True,
         )
     # Podman Compose force-removes shared images with `down --rmi local`.
     # delete=False still removes trial containers; job cleanup owns images.
-    return EnvironmentConfig(type=backend, delete=backend != "podman")
+    return EnvironmentConfig(type=backend, import_path=ENVIRONMENTS[backend],
+                             delete=backend != "podman")
 
 
 # Where a podman container reaches the machine it runs on: podman puts the name in every

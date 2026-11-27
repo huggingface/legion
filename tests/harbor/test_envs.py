@@ -7,6 +7,7 @@ import asyncio
 import collections
 import importlib.metadata
 import re
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -19,8 +20,11 @@ from harbor.models.trial.config import EnvironmentConfig as TrialEnvironmentConf
 from harbor.models.trial.paths import TrialPaths
 
 from legion import secrets_file
-from legion.harbor import envs
+from legion.harbor import envs, launch
+from legion.harbor.config import Config
 from legion.harbor.envs import E2B, ENVIRONMENTS, HFSandbox, sandbox_name
+
+EXAMPLES = Path(__file__).parent / "examples"
 
 
 @pytest.mark.parametrize("kwargs, namespace, file_token, token", [
@@ -104,9 +108,9 @@ def test_the_copied_start_matches_the_pinned_harbor():
     assert importlib.metadata.version("harbor") == "0.25.0"
 
 
-def compose(monkeypatch, tmp_path, backend, secret_names, **env_kwargs):
-    """legion's docker or podman environment, as a Trial builds it, on a fake subprocess; the
-    list gets each compose call's (argv, env)."""
+def compose(monkeypatch, tmp_path, backend, secret_names, config=None, **env_kwargs):
+    """legion's docker or podman environment, as a worker's Trial builds it (or from `config`),
+    on a fake subprocess; the list gets each compose call's (argv, env)."""
     runs = []
 
     async def spawn(*argv, env=None, **kw):
@@ -122,8 +126,8 @@ def compose(monkeypatch, tmp_path, backend, secret_names, **env_kwargs):
     monkeypatch.setattr(docker.DockerEnvironment, "_collect_streamed_output", collect)
     (tmp_path / "environment").mkdir()
     return runs, EnvironmentFactory.create_environment_from_config(
-        TrialEnvironmentConfig(type=backend, import_path=ENVIRONMENTS[backend],
-                               kwargs={"secret_names": secret_names}),
+        config or TrialEnvironmentConfig(type=backend, import_path=ENVIRONMENTS[backend],
+                                         kwargs={"secret_names": secret_names}),
         environment_dir=tmp_path / "environment", environment_name="t", session_id="s",
         trial_paths=TrialPaths(tmp_path / "trial"),
         task_env_config=EnvironmentConfig(docker_image="python:3.12"), **env_kwargs)
@@ -154,14 +158,21 @@ async def test_no_secret_value_in_any_argv(monkeypatch, tmp_path, backend):
     assert "-e" in b and "PLAIN" not in env_b and "HF_TOKEN" not in env_ps
 
 
+@pytest.mark.parametrize("standalone", [False, True], ids=["worker", "standalone"])
 @pytest.mark.parametrize("backend, flag", [("docker", "--no-TTY"), ("podman", "-T")])
-async def test_network_policy_exec_flag(monkeypatch, tmp_path, backend, flag):
+async def test_network_policy_exec_flag(monkeypatch, tmp_path, backend, flag, standalone):
     """Harbor's `compose exec --no-TTY` (a non-public network policy, set on the egress sidecar)
-    reaches podman-compose, which rejects `--no-TTY`, as `-T`; docker keeps `--no-TTY`."""
+    reaches podman-compose, which rejects `--no-TTY`, as `-T`; docker keeps `--no-TTY`. Both for
+    a worker's Trial and a standalone one (launch.environment_config: `run_experiment`)."""
     # the probe runs a container on the engine's kernel
     monkeypatch.setattr(docker.DockerEnvironment, "_egress_control_kernel_support",
                         classmethod(lambda cls: True))
-    runs, env = compose(monkeypatch, tmp_path, backend, [],
+    config = None
+    if standalone:
+        spec = Config.load(EXAMPLES / "pi-hf.yaml")
+        spec.environment.backend = backend
+        config = launch.environment_config(spec)
+    runs, env = compose(monkeypatch, tmp_path, backend, [], config,
                         network_policy=NetworkPolicy(network_mode=NetworkMode.NO_NETWORK))
     await env.set_network_policy(NetworkPolicy(network_mode=NetworkMode.ALLOWLIST,
                                                allowed_hosts=["example.com"]))
