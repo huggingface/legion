@@ -1,12 +1,10 @@
 """Message-board operations; connection settings come from the agent environment."""
 
 import os
-import re
-import time
 from pathlib import Path
 
 import httpx
-from msgboard.client import BoardError, Client
+from msgboard.client import Client
 
 DEPENDENCIES = ["httpx"]
 REQUIRES = ["message_board"]
@@ -26,8 +24,6 @@ def _client(max_retries=10):
 # read/wait with unread=True keep, per channel, the last message the agent was shown: one container per
 # agent, and each tool call is its own process, so the place lives in a file.
 UNREAD_DIR = Path("/tmp/legion-board")
-# A post refused by min_post_gap is retried once when the board asks to wait at most this long.
-POST_GAP_RETRY_S = 30
 
 
 def _last_seen(channel_id: int) -> int:
@@ -105,15 +101,9 @@ def post(
     if path is not None:
         text = Path(path).read_text().strip()
     with _client() as board:
-        channel_id = board.channel_id(channel)
-        try:
-            return board.post(channel_id, text, reply_to=reply_to, request_id=request_id)
-        except BoardError as e:  # min_post_gap: wait it out once instead of making the agent retry
-            gap = re.match(r"refused: wait (\d+) s \(min_post_gap", e.message)
-            if not gap or int(gap.group(1)) > POST_GAP_RETRY_S:
-                raise
-            time.sleep(int(gap.group(1)))
-            return board.post(channel_id, text, reply_to=reply_to, request_id=request_id)
+        return board.post(
+            board.channel_id(channel), text, reply_to=reply_to, request_id=request_id
+        )
 
 
 def channels() -> dict:

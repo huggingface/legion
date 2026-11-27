@@ -159,20 +159,6 @@ async def test_rule_proxy_checks_posts_and_opens_only_the_board_tools_routes(
     assert not Path(mount["source"]).exists()
 
 
-async def test_a_post_refused_by_a_short_min_post_gap_is_retried_once(fake, tmp_path, monkeypatch):
-    resource = await started(fake, tmp_path, rules={"min_post_gap": "1s"})
-    try:
-        await resource.add(["x-0"])
-        bound = resource.bind("x-0")
-        for key, value in {**bound["env"], "MSGBOARD_SOCKET": bound["mounts"][0]["source"]}.items():
-            monkeypatch.setenv(key, value)
-        board_tools.post("first", "legion-test")
-        board_tools.post("second", "legion-test")  # refused ("wait 1 s"), waited out, posted
-        assert [m["body"] for m in fake.msgs] == ["first", "second"]
-    finally:
-        await resource.stop()
-
-
 async def test_a_url_board_fails_the_run_only_after_the_outage_grace(tmp_path, monkeypatch):
     """`url` (a board that is up) is watched as the upstream Space board: health checks every
     HEALTH_CHECK_SECONDS, an error only once it has been unreachable for the grace."""
