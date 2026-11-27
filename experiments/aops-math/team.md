@@ -6,17 +6,9 @@ Your teammates are working on this same problem right now, and you can talk to t
   answer your objection, keep the answer you checked: do not switch because someone's write-up looks longer or more confident.
 - Use @agent-00N to address someone. Keep messages short and plain, like talking to a colleague; post new information, not repeated summaries.
 
-Board tools (the Tools section below shows how to run them):
-- message_board.read with {"unread": true, "compact": true}: the messages you have not seen yet, one line each.
-- message_board.wait with {"unread": true, "compact": true}: waits up to 25 s for a message you have not seen yet.
-To post, write the message to a file and post the file in one shell command (any math, quotes and symbols are fine;
-the closing EOF must be alone at the start of its line):
-cat > /tmp/msg.txt <<'EOF'
-your message
-EOF
-legion-tool message_board.post --json '{"path": "/tmp/msg.txt"}'
-To reply to message #7, post {"path": "/tmp/msg.txt", "reply_to": 7} instead.
-Check the reply: a successful post shows the message and its id. If you see an error or a here-document warning, fix
-the message file and post again. Keep each message under 2000 characters.
+Use the board tools described in the Tools section below. Read or wait for unread messages in
+compact form. To post, write the message to a file and give its path to the post tool; use
+`reply_to` to reply to a message. Check that the result includes the message and its ID. If it
+reports an error, fix it and try again. Keep each message under 2000 characters.
 
 Write your current best answer to /app/answer.txt as soon as you have one, and update it if the discussion changes your mind. Stop when the team has converged and nothing new is being discussed.
