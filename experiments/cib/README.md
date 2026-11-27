@@ -7,10 +7,11 @@ The Harbor task runs the other teammates and judges in separate containers.
 **Setup:** follow the [dataset quickstart](https://huggingface.co/datasets/HuggingFaceSwarms/collaborative-intelligence-benchmark#setup)
 to clone `cib-harbor` beside this Legion checkout and configure credentials: the evaluated model's key and
 the team's (partner and judge keys and a Qwen3-14B endpoint), which are needed even for a solo episode.
-You need Linux, Docker with Compose (or rootless Podman), and access to the dataset.
+You need Linux, rootless Podman (`config.yaml` uses `environment.backend: podman`), and access to the dataset.
 Inference is paid, including partner and judge calls.
-On the HF cluster (no Docker on compute nodes), set `environment.backend: podman` in `config.yaml` and follow the
-dataset's [Podman setup](https://huggingface.co/datasets/HuggingFaceSwarms/collaborative-intelligence-benchmark/blob/main/adapter/README.md#podman).
+On the HF cluster, run it on a hopper-cpu node and follow the dataset's
+[Podman setup](https://huggingface.co/datasets/HuggingFaceSwarms/collaborative-intelligence-benchmark/blob/main/adapter/README.md#podman).
+On a local machine that runs dockerd, `environment.backend: docker` works too ([Local runs](../README.md#local-runs)).
 
 **Run one Gemini solo episode** from the Legion checkout. To check the setup first without model calls,
 run `collab-intel-harbor-sweep` with the same config, `--dataset-root ../cib-harbor --output results/cib/plan --plan-only`.

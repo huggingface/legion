@@ -100,8 +100,9 @@ or commit them in the spec.
 
 ## Choose a compatible environment
 
-- `environment.backend: docker` or `podman` runs task containers on the worker's
-  machine. Install the corresponding container runtime and Compose support.
+- `environment.backend: podman` (the default) runs task containers in rootless podman on the
+  worker's machine; it is the one engine on Slurm and the HF cluster. `docker` does the same for
+  `compute: local` on a machine that already runs dockerd ([Local runs](local.md#local-runs)).
 - `environment.backend: hf-sandbox` needs a prebuilt public `docker_image` in the
   task configuration. Local mounts and multi-container Compose tasks are not
   supported. Use a Space or existing HTTP board rather than a local socket board.
@@ -160,7 +161,7 @@ the parallel-exploration task of [s³](https://arxiv.org/abs/2611.08615): each o
 searches its own copy of one tree of rooms for the exit with `maze look` and `maze move ROOM`,
 on a budget of 210 moves that one agent rarely finds it in, and the board lets the team split
 the search. Each agent's Trial is a compose stack, its container and a `maze` service that alone
-holds the tree, so it runs on docker or podman, not HF Sandboxes. The
+holds the tree, so it runs on podman, not HF Sandboxes. The
 [example](../experiments/s3-maze/spec.yaml) runs one team (`TREE`, default `maze-t01`, and `N`,
 default 4) on the HF cluster: one Slurm worker on hopper-cpu in rootless podman, with a local
 board, and `stop_on_success` with the service's `success_check`, so the first agent out ends

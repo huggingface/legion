@@ -314,8 +314,8 @@ The ladder acts on the whole worker. For Harbor agents that means: no single Tri
 and restarted for memory (the worker cannot tell which one grows: a Trial's agent runs in its
 own container, so its memory is not in the worker's process tree). Relief is a drain or a
 preemption of the whole worker; every agent's Trial stops, its Pi sessions go to the bucket and
-the agents resume on the relaunched worker. On docker and podman a Trial's container memory
-counts against the worker's job only when the engine puts its containers inside the job's
+the agents resume on the relaunched worker. On podman a Trial's container memory
+counts against the worker's job only when podman puts its containers inside the job's
 cgroup; on hf-sandbox it does not count at all. `worker_lifetime` stays the
 backstop.
 
@@ -360,7 +360,7 @@ the agent's env (its inference key, resource tokens) and sensitive-looking names
 `*_API_KEY`, `*SECRET*`, `*PASSWORD*`) by name only. A task's `[verifier.env]` value taken from
 a secret must have such a name, or it stays on the command line.
 The pinned task is trusted with the host's container engine: its compose file and its
-`[environment.env]` reach podman (or docker) as written, and legion only keeps secret values out
+`[environment.env]` reach podman as written, and legion only keeps secret values out
 of `ps`. Run a task you do not trust on `hf-sandbox`.
 
 A private task repo is pinned on the operator's machine too (`legion init` and `legion launch` run
