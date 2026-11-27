@@ -17,7 +17,9 @@ runs the other teammates, the judges and a model gateway (`model-compat`) in its
 
 ### Prerequisites
 
-The dataset's runtime tarballs use Git LFS; install and configure Git LFS and fetch the objects
+The dataset's runtime tarballs use Git LFS. Ensure `git-lfs` is on `PATH` and Git has its
+`filter.lfs.process`, `filter.lfs.smudge`, `filter.lfs.clean` and `filter.lfs.required` settings.
+For example, run `git lfs install` in the environment used by the job, and fetch the objects
 before running. Until [the sparse checkout issue](https://github.com/huggingface/legion/issues/174)
 is fixed, after cloning and checking out the dataset as below, set Git's attributes file for the
 launching shell and its workers to that pinned clone's root `.gitattributes`. This preserves any
@@ -51,6 +53,13 @@ the task's services. The spec only names them.
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` | partner models and judges |
 | `HARNESS_VLLM_ENDPOINTS` + `HARNESS_VLLM_API_KEY`, or `HARNESS_OPENAI_COMPAT` + `CI_PARTNER_QWEN14_API_KEY` | the Qwen3-14B partner ([dataset README](https://huggingface.co/datasets/HuggingFaceSwarms/collaborative-intelligence-benchmark#setup)) |
 | `ANTHROPIC_WORKSPACE_ID` | only if your Anthropic key requires it |
+
+For an OpenAI-compatible Qwen partner endpoint, the mapping is JSON keyed by the partner's
+model name; `api_key_env` names the variable holding the credential:
+
+```sh
+export HARNESS_OPENAI_COMPAT='{"Qwen/Qwen3-14B":{"base_url":"https://<endpoint>/v1","api_key_env":"CI_PARTNER_QWEN14_API_KEY","model":"<provider-model-id>"}}'
+```
 
 ## Run one case
 
