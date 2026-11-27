@@ -501,13 +501,21 @@ def test_slurm(tiny, slurm, hub, tmp_path, monkeypatch):
         + "naming: consecutive-id\n")
     (failed / "attempt.json").write_text(json.dumps(
         {"phase": "infrastructure_failure", "failure": "worker_crash", "note": None}))
-    f = results.load(failed)
+    f = results.load(failed)  # one launch: the crashed worker was lost, not replaced
     assert (f.run_id, f.attempt_id, f.attempt) == ("sweep-ab12-cell", failed.name, 0)
+    assert (f.outcome, f.reasons) == (Outcome.WORKER_LOST, [
+        "attempt.json: infrastructure_failure, worker_crash",
+        "agent-001: worker_lost, no Trials; see attempt.json"]), f
+    assert [(a.name, a.outcome, a.reward, a.trials) for a in f.agents] == [
+        ("agent-001", Outcome.WORKER_LOST, None, [])]
+    (failed / "launch").mkdir()  # a second launch of the worker: it was replaced
+    for incarnation in ("a" * 32, "b" * 32):
+        (failed / "launch" / f"{w}-{incarnation}.env").write_text(f"WORKER_ID={w}\n")
+    f = results.load(failed)
     assert (f.outcome, f.reasons) == (Outcome.WORKER_REPLACED, [
+        f"worker {w}: worker_replaced (2 launches), agents unknown",
         "attempt.json: infrastructure_failure, worker_crash",
         "agent-001: worker_replaced, no Trials; see attempt.json"]), f
-    assert [(a.name, a.outcome, a.reward, a.trials) for a in f.agents] == [
-        ("agent-001", Outcome.WORKER_REPLACED, None, [])]
 
 
 def test_hf_jobs(tiny, hub, tmp_path, monkeypatch):

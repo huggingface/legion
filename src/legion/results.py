@@ -74,7 +74,7 @@ _ORDER = list(Outcome)
 # A sweep receipt's `failure` (legion sweep's attempt.json) as an outcome. Its `phase` and
 # `failure` stay in `reasons` as written; a failure not listed here is `unknown`.
 RECEIPT_FAILURES = {
-    "worker_crash": Outcome.WORKER_REPLACED,  # a crashed worker is relaunched
+    "worker_crash": Outcome.WORKER_LOST,  # worker_replaced if a worker launched twice (_receipt)
     "worker_replacement": Outcome.WORKER_REPLACED,
     "worker_launch_refused": Outcome.WORKER_LOST,
     "worker_unavailable": Outcome.WORKER_LOST,
@@ -289,8 +289,10 @@ def _agent(name: str, trials: list[TrialResult], workers: list[WorkerResult]) ->
                        reward=last.reward if last and last.outcome.completed else None)
 
 
-def _receipt(root: Path) -> tuple[Outcome, str] | None:
-    """What a sweep attempt's receipt says went wrong, in its own words; None: nothing."""
+def _receipt(root: Path, workers: list[WorkerResult]) -> tuple[Outcome, str] | None:
+    """What a sweep attempt's receipt says went wrong, in its own words; None: nothing. A
+    crash is a relaunch only where a worker shows another incarnation (a second launch or
+    record, a counted crash)."""
     receipt = _read(root / RECEIPT)
     if not isinstance(receipt, dict) or receipt.get("phase") == "completed":
         return None
@@ -298,6 +300,8 @@ def _receipt(root: Path) -> tuple[Outcome, str] | None:
     why = f"{RECEIPT}: {phase}" + (f", {failure}" if failure else "")
     if isinstance(receipt.get("note"), str) and receipt["note"]:
         why += f" ({receipt['note']})"
+    if failure == "worker_crash" and any(len(w.incarnations) > 1 or w.crashes for w in workers):
+        return Outcome.WORKER_REPLACED, why
     if failure:
         return RECEIPT_FAILURES.get(str(failure), Outcome.UNKNOWN), why
     # no failure code: a setup that failed (legion init, the launch), or an attempt not settled
@@ -308,7 +312,7 @@ def _settle(result: RunResult, run_reasons: list[tuple[Outcome, str]]) -> RunRes
     """The run's outcome: completed only when every agent is and nothing else is wrong. A sweep
     receipt's failure is evidence too: an agent without any of its own takes it."""
     reasons = list(run_reasons)
-    if (receipt := _receipt(result.root)) is not None:
+    if (receipt := _receipt(result.root, result.workers)) is not None:
         reasons.append(receipt)
         for a in result.agents:
             if a.outcome is Outcome.UNKNOWN:

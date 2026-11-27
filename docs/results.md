@@ -65,8 +65,8 @@ such as no Trials or an unverified one, takes the receipt's outcome instead of `
 
 | receipt `failure` | outcome |
 |---|---|
-| `worker_crash`, `worker_replacement` | `worker_replaced` |
-| `worker_launch_refused`, `worker_unavailable`, `released_before_completion`, `unsynced_workers`, `worker_accounting_failed` | `worker_lost` |
+| `worker_replacement`, or `worker_crash` where a worker shows another incarnation (a second launch or record) | `worker_replaced` |
+| `worker_crash` with one launch per worker, `worker_launch_refused`, `worker_unavailable`, `released_before_completion`, `unsynced_workers`, `worker_accounting_failed` | `worker_lost` |
 | `run_timeout` | `timeout` |
 | `agent_execution_error` | `harness_error` |
 | none, phase `setup_failed` | `harness_error` |
