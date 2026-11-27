@@ -274,8 +274,25 @@ def shipped_folders(spec_file: Path) -> list[Path]:
     return [Path(str(data[f"{k}_dir"])) for k in ("tools", "resources") if data.get(f"{k}_dir")]
 
 
+def copy_experiment_tree(src: Path, dst: Path, *, exclude: Path | None = None,
+                         symlinks: bool = False) -> None:
+    """Copy inputs, checking excluded file identities even below linked directories."""
+    excluded = exclude.stat() if exclude is not None else None
+
+    def ignore(directory: str, names: list[str]) -> set[str]:
+        ignored = {"__pycache__"}
+        if excluded is not None:
+            for name in names:
+                path = Path(directory) / name
+                if path.exists() and os.path.samestat(path.stat(), excluded):
+                    ignored.add(name)
+        return ignored
+
+    shutil.copytree(src, dst, symlinks=symlinks, dirs_exist_ok=True, ignore=ignore)
+
+
 def copy_experiment(src: Path | None, dst: Path, rep: InitReport,
-                    need: str | None = "spec.yaml") -> None:
+                    need: str | None = "spec.yaml", *, exclude: Path | None = None) -> None:
     """Copy the experiment folder (links followed; any folder holding `need`) into an absent or
     empty `dst`; else report how the copy differs from `src`, and change nothing."""
     if dst.is_dir() and any(dst.iterdir()):
@@ -302,8 +319,7 @@ def copy_experiment(src: Path | None, dst: Path, rep: InitReport,
     if links:
         rep.checks.append(Check("links", True, "copied as files from outside the folder (check "
                                 "none is a secret)", [f"{p} -> {t}" for p, t in links], warn=True))
-    shutil.copytree(src, dst, symlinks=False, dirs_exist_ok=True,
-                    ignore=shutil.ignore_patterns("__pycache__"))
+    copy_experiment_tree(src, dst, exclude=exclude)
     rep.created.append(f"{dst} (copy of {src})")
 
 

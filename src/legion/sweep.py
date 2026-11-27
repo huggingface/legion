@@ -11,11 +11,13 @@ import math
 import os
 import re
 import secrets
+import shutil
 import tempfile
 import time
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event, Lock
 from typing import Any, Literal
@@ -56,6 +58,8 @@ class Cell:
     raw: dict
     spec: Spec
     fingerprint: str
+    dependencies: dict[Path, Path]
+    dependency_hash: str
 
     @property
     def agents(self) -> int:
@@ -73,6 +77,8 @@ class Plan:
     source: Path
     cells: list[Cell]
     fingerprint: str
+    source_hash: str
+    credentials: tuple[str, ...] = field(repr=False)
 
 
 def _digest(data: Any) -> str:
@@ -103,30 +109,103 @@ def _yaml(path: Path) -> dict:
     return data
 
 
+def _tree_hash(root: Path) -> str:
+    """Hash the staged paths and contents, including links that packaging can reject."""
+    return _digest({
+        str(path.relative_to(root)): (
+            ["link", os.readlink(path)] if path.is_symlink()
+            else ["file", path.stat().st_mode & 0o111, hashlib.sha256(path.read_bytes()).hexdigest()]
+        )
+        for path in root.rglob("*")
+        if "__pycache__" not in path.parts and (path.is_symlink() or path.is_file())
+    })
+
+
+def _bind_dependencies(raw: dict, spec: Spec, source: Path, secrets_file: Path | None
+                       ) -> dict[Path, Path]:
+    """Keep spec dependencies relative to the staged run, including absolute inputs."""
+    outside: dict[Path, Path] = {}
+
+    def bind(mapping: dict, name: str, original: str | Path | None) -> None:
+        if original is None:
+            return
+        path = source / Path(original).expanduser()
+        target = path.resolve()
+        if secrets_file is not None and target.is_file() and target.samefile(secrets_file):
+            raise ValueError("a sweep spec input points to its secrets file")
+        if path.is_relative_to(source) and ".." not in path.parts:
+            relative = path.relative_to(source)
+        else:
+            relative = Path(".sweep-inputs") / _digest(str(target)) / target.name
+            outside[relative] = target
+        mapping[name] = relative.as_posix()
+
+    for name in ("tools_dir", "resources_dir"):
+        if name in spec.model_fields_set:
+            bind(raw, name, getattr(spec, name))
+    bind(raw, "team_file", spec.team_file)
+    loops = [(raw, spec.loop)]
+    for name, role in (spec.agents.roles or {}).items():
+        data = raw["agents"]["roles"][name]
+        bind(data, "role_file", role.role_file)
+        loops.append((data, role.loop))
+    for data, loop in loops:
+        if loop is not None:
+            bind(data["loop"], "prompt_file", loop.prompt_file)
+            if loop.final is not None:
+                bind(data["loop"]["final"], "prompt_file", loop.final.prompt_file)
+    return outside
+
+
+def _copy_dependencies(dependencies: dict[Path, Path], root: Path,
+                       secrets_file: Path | None) -> None:
+    for relative, source in dependencies.items():
+        dst = root / relative
+        if source.is_dir():
+            rundir.copy_experiment_tree(source, dst, exclude=secrets_file, symlinks=True)
+        elif source.is_file():
+            if secrets_file is not None and source.samefile(secrets_file):
+                raise ValueError("a sweep spec input points to its secrets file")
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, dst)
+
+
 def make_plan(path: Path, *, profile: Path | None = None, secrets_file: Path | None = None) -> Plan:
     """Expand and validate a matrix without contacting a controller, Hub or scheduler."""
-    config = SweepConfig.model_validate(_yaml(path))
-    source = (path.parent / config.spec).resolve()
-    base = _overlay(_yaml(source), config.overrides)
     env = dict(os.environ)
     if profile is not None:
         env.update(read_env_file(profile))
+    credentials: tuple[str, ...] = ()
     if secrets_file is not None:
         try:
-            env.update(read_file(secrets_file))
+            file_values = read_file(secrets_file)
         except SecretsFileError as exc:
             raise ValueError(str(exc)) from None
-    inputs = {
-        str(file.relative_to(source.parent)): hashlib.sha256(file.read_bytes()).hexdigest()
-        for file in rundir._files(source.parent).values()
-        if secrets_file is None or file.resolve() != secrets_file.resolve()
-    }
+        credentials = tuple(file_values.values())
+        env.update(file_values)
+    try:
+        return _plan(path, profile, secrets_file, env, credentials)
+    except (OSError, TypeError, ValueError) as exc:
+        raise ValueError(safe_error(exc, credentials)) from None
+
+
+def _plan(path: Path, profile: Path | None, secrets_file: Path | None,
+          env: dict[str, str], credentials: tuple[str, ...]) -> Plan:
+    config = SweepConfig.model_validate(_yaml(path))
+    source = (path.parent / config.spec).resolve()
+    base = _overlay(_yaml(source), config.overrides)
+    with tempfile.TemporaryDirectory() as temporary:
+        stage = Path(temporary) / "experiment"
+        rundir.copy_experiment(source.parent, stage, rundir.InitReport(),
+                               need=source.name, exclude=secrets_file)
+        source_hash = _tree_hash(stage)
     axes = sorted(config.matrix)
     for axis in axes:
         choices = config.matrix[axis]
         if not choices or any(not _LABEL.fullmatch(label) for label in (axis, *choices)):
             raise ValueError(f"matrix axis {axis!r} needs choices with simple labels")
     cells = []
+    hashes: dict[tuple, str] = {}
     for values in itertools.product(*(sorted(config.matrix[axis]) for axis in axes)):
         labels = dict(zip(axes, values, strict=True))
         key = _digest(labels)[:12]
@@ -134,8 +213,19 @@ def make_plan(path: Path, *, profile: Path | None = None, secrets_file: Path | N
         for axis, label in labels.items():
             raw = _overlay(raw, config.matrix[axis][label])
         # The actual attempt gets its own name, independent of any name in the base spec.
-        raw = {**raw, "name": f"sweep-{key}"}
+        raw = deepcopy({**raw, "name": f"sweep-{key}"})
         spec = Spec.model_validate(substitute(raw, env))
+        dependencies = _bind_dependencies(raw, spec, source.parent, secrets_file)
+        spec = Spec.model_validate(substitute(raw, env))
+        if dependencies:
+            paths = tuple(sorted(dependencies.items()))
+            if paths not in hashes:
+                with tempfile.TemporaryDirectory() as temporary:
+                    _copy_dependencies(dependencies, Path(temporary), secrets_file)
+                    hashes[paths] = _tree_hash(Path(temporary))
+            dependency_hash = hashes[paths]
+        else:
+            dependency_hash = _digest({})
         roles = spec.roles()
         if (spec.compute.kind != "slurm" or spec.spawn or spec.stop_on_success
                 or any(role.ramp is not None or role.count == 0 for role in roles.values())):
@@ -145,7 +235,8 @@ def make_plan(path: Path, *, profile: Path | None = None, secrets_file: Path | N
             raise ValueError(f"{labels}: provide existing inference endpoints for a sweep")
         if spec.type_loops().keys() != roles.keys() or not re.fullmatch(r"[0-9a-f]{40}", spec.task.revision):
             raise ValueError(f"{labels}: configure a loop and pin task.revision to a commit SHA")
-        cell = Cell(key, labels, raw, spec, _digest([labels, spec.model_dump(mode="json"), inputs]))
+        fingerprint = _digest([labels, spec.model_dump(mode="json"), source_hash, dependency_hash])
+        cell = Cell(key, labels, raw, spec, fingerprint, dependencies, dependency_hash)
         if cell.agents < 1 or (config.max_agents is not None and cell.agents > config.max_agents):
             raise ValueError(f"{labels}: {cell.agents} agents do not fit the sweep's capacity")
         cells.append(cell)
@@ -153,7 +244,7 @@ def make_plan(path: Path, *, profile: Path | None = None, secrets_file: Path | N
         raise ValueError("matrix cell keys collide")
     fingerprint = _digest([config.model_dump(), [c.fingerprint for c in cells],
                            hashlib.sha256(profile.read_bytes()).hexdigest() if profile else None])
-    return Plan(config, source, cells, fingerprint)
+    return Plan(config, source, cells, fingerprint, source_hash, credentials)
 
 
 class Attempt(BaseModel):
@@ -164,6 +255,7 @@ class Attempt(BaseModel):
     agents: list[str] = Field(default_factory=list)
     failure: str | None = None
     note: str | None = None
+    input_hash: str | None = None
 
 
 class _Paused(Exception):
@@ -183,20 +275,31 @@ def _check_stop(stop: Event, delay: float = 0) -> None:
         raise _Paused("driver stopped; resume this sweep to continue watching the attempt")
 
 
-def _prepare(plan: Plan, cell: Cell, run: Path, profile: Path | None, secrets_file: Path | None) -> None:
-    if not (run / rundir.EXPERIMENT).is_dir():
-        with tempfile.TemporaryDirectory(dir=run) as temporary:
-            stage = Path(temporary) / rundir.EXPERIMENT
-            rundir.copy_experiment(plan.source.parent, stage, rundir.InitReport(), need=plan.source.name)
-            if secrets_file is not None:
-                for relative, source in rundir._files(plan.source.parent).items():
-                    if source.resolve() == secrets_file.resolve():
-                        (stage / relative).unlink(missing_ok=True)
-            (stage / "spec.yaml").write_text(yaml.safe_dump({**cell.raw, "name": run.name}, sort_keys=False))
-            stage.rename(run / rundir.EXPERIMENT)
+def _prepare(plan: Plan, cell: Cell, run: Path, profile: Path | None, secrets_file: Path | None) -> str:
+    target = run / rundir.EXPERIMENT
+    with tempfile.TemporaryDirectory(dir=run) as temporary:
+        stage = Path(temporary) / rundir.EXPERIMENT
+        rundir.copy_experiment(plan.source.parent, stage, rundir.InitReport(),
+                               need=plan.source.name, exclude=secrets_file)
+        if _tree_hash(stage) != plan.source_hash:
+            raise ValueError("experiment files changed since the sweep was planned")
+        staged_deps = Path(temporary) / "dependencies"
+        _copy_dependencies(cell.dependencies, staged_deps, secrets_file)
+        if _tree_hash(staged_deps) != cell.dependency_hash:
+            raise ValueError("external experiment files changed since the sweep was planned")
+        if staged_deps.is_dir():
+            shutil.copytree(staged_deps, stage, symlinks=True, dirs_exist_ok=True)
+        (stage / "spec.yaml").write_text(yaml.safe_dump({**cell.raw, "name": run.name}, sort_keys=False))
+        input_hash = _tree_hash(stage)
+        if target.exists():
+            if _tree_hash(target) != input_hash:
+                raise ValueError("the staged experiment files changed since preparation")
+        else:
+            stage.rename(target)
     report = rundir.init(run, profile=profile, secrets_file=secrets_file)
     if report.failed:
         raise ValueError("legion init failed: " + ", ".join(c.name for c in report.checks if c.ok is False))
+    return input_hash
 
 
 def _jobs_active(names: list[str]) -> bool:
@@ -224,7 +327,17 @@ def _status(api: Client, run: Path) -> dict | None:
         return None
 
 
-def _launch(cell: Cell, run: Path, api: Client, fresh: bool, stop: Event) -> None:
+def _running_status(api: Client, run: Path) -> dict:
+    status = _status(api, run)
+    if status is None:
+        raise _Paused("the running controller is unreachable; resume to reconcile its jobs")
+    if status.get("generation", 1) != 1:
+        raise _Paused("the running swarm has been edited outside the sweep")
+    return status
+
+
+def _launch(cell: Cell, run: Path, api: Client, fresh: bool, stop: Event,
+            input_hash: str | None) -> None:
     """Reattach if the swarm exists. Retry create only on the same live controller."""
     if _status(api, run) is not None:
         return
@@ -242,6 +355,8 @@ def _launch(cell: Cell, run: Path, api: Client, fresh: bool, stop: Event) -> Non
             raise _Paused("the original controller is no longer running; launch outcome unknown")
     _check_stop(stop)
     path = run / rundir.EXPERIMENT / "spec.yaml"
+    if input_hash is None or _tree_hash(path.parent) != input_hash:
+        raise _Paused("the staged experiment files changed since preparation")
     effective = Spec.model_validate(substitute(_yaml(path), ops.environment(api, api.env_files)))
     if effective.model_dump(exclude={"name"}) != cell.spec.model_dump(exclude={"name"}):
         raise _Paused("the attempt's resolved spec differs from the sweep plan")
@@ -326,18 +441,30 @@ def _account_workers(run: Path, attempt: Attempt, stop: Event) -> bool:
 
 def _results_present(run: Path, agents: list[str], expected: int) -> bool:
     root = run / "results" / run.name
-    files = sorted(root.glob("*/trials/*/result.json"))
-    if len(files) != expected or sorted(p.parents[2].name for p in files) != agents:
+    trials: dict[str, list[Path]] = {}
+    for path in root.glob("*/trials/*"):
+        if path.is_dir():
+            trials.setdefault(path.parents[1].name, []).append(path)
+    if len(trials) != expected or sorted(trials) != agents:
         return False
-    for path in files:
+
+    def trial_number(path: Path) -> int:
+        match = re.search(r"(?:^|-)t(\d+)$", path.name)
+        return int(match[1]) if match else 0
+
+    for paths in trials.values():
+        path = max(paths, key=trial_number) / "result.json"
         try:
             row = json.loads(path.read_text())
         except (OSError, ValueError):
             return False
         verifier = row.get("verifier_result") if isinstance(row, dict) else None
         rewards = verifier.get("rewards") if isinstance(verifier, dict) else None
+        steps = (row.get("step_results") or []) if isinstance(row, dict) else []
         if (not isinstance(rewards, dict) or not rewards or row.get("exception_info")
-                or any(not isinstance(v, (int, float)) or not math.isfinite(v) for v in rewards.values())):
+                or not isinstance(steps, list)
+                or any(not isinstance(step, dict) or step.get("exception_info") for step in steps)
+                or any(type(v) not in (int, float) or not math.isfinite(v) for v in rewards.values())):
             return False
     return True
 
@@ -353,27 +480,23 @@ def _run_attempt(plan: Plan, cell: Cell, run: Path, profile: Path | None, secret
             try:
                 with init_lock:
                     _check_stop(stop)
-                    _prepare(plan, cell, run, profile, secrets_file)
+                    attempt.input_hash = _prepare(plan, cell, run, profile, secrets_file)
             except (OSError, TypeError, ValueError, ops.SpecError) as exc:
                 attempt.phase = "setup_failed"
-                attempt.note = safe_error(exc)
+                attempt.note = safe_error(exc, plan.credentials)
                 _save(run, attempt)
                 return True
             attempt.phase = "launching"
             attempt.started = time.time()
             _save(run, attempt)
         if attempt.phase == "launching":
-            _launch(cell, run, _client(run), fresh, stop)
+            _launch(cell, run, _client(run), fresh, stop, attempt.input_hash)
             attempt.phase = "running"
             _save(run, attempt)
         while attempt.phase == "running":
             _check_stop(stop)
             api = _client(run)
-            status = _status(api, run)
-            if status is None:
-                raise _Paused("the running controller is unreachable; resume to reconcile its jobs")
-            if status.get("generation", 1) != 1:
-                raise _Paused("the running swarm has been edited outside the sweep")
+            status = _running_status(api, run)
             _remember(run, attempt, api)
             finished = _finished(status, cell.agents)
             if any(t["health"] == "launch_refused" for t in status["types"].values()):
@@ -408,7 +531,7 @@ def _run_attempt(plan: Plan, cell: Cell, run: Path, profile: Path | None, secret
         _save(run, attempt)
         return True
     except (_Paused, ClientError, ops.SpecError, OSError, TypeError, ValueError) as exc:
-        attempt.note = safe_error(exc)
+        attempt.note = safe_error(exc, plan.credentials)
         _save(run, attempt)
         return False
 
@@ -460,6 +583,28 @@ def _pending(root: Path, plan: Plan) -> list[tuple[Cell, Path | None, int]]:
     return open_runs + new_runs
 
 
+def _reconcile(plan: Plan, cell: Cell, run: Path, stop: Event) -> str | None:
+    """Check resumed receipts without admitting another job or waiting for them to finish."""
+    attempt = _load(run)
+    if attempt.phase == "preparing":
+        return None  # This receipt was saved before any submission.
+    try:
+        api = _client(run)
+        if attempt.phase == "launching":
+            _launch(cell, run, api, False, stop, attempt.input_hash)
+            attempt.phase = "running"
+        if attempt.phase == "running":
+            _running_status(_client(run), run)
+        if (attempt.phase == "draining" and _status(api, run) is None
+                and _jobs_active(_control_jobs(run))):
+            raise _Paused("controller or world is still live; resume when its API is reachable")
+        attempt.note = None
+    except (_Paused, ClientError, ops.SpecError, OSError, TypeError, ValueError) as exc:
+        attempt.note = safe_error(exc, plan.credentials)
+    _save(run, attempt)
+    return attempt.note
+
+
 def execute(plan: Plan, root: Path, *, profile: Path | None = None, secrets_file: Path | None = None,
             say: Callable[[str], None] = print) -> list[dict]:
     """Resume in-flight attempts before spending slots on new ones."""
@@ -489,6 +634,12 @@ def _schedule(plan: Plan, root: Path, sweep_id: str, profile: Path | None, secre
     stop, init_lock = Event(), Lock()
     active = {}
     pending = _pending(root, plan)
+    for cell, run, _ in pending:
+        if run is None:
+            break
+        if note := _reconcile(plan, cell, run, stop):
+            say(f"{run.name}: {note}")
+            return _write_rows(root, plan)
     with ThreadPoolExecutor(max_workers=plan.config.max_runs) as pool:
         try:
             while active or (pending and not stop.is_set()):
