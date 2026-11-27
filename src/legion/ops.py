@@ -540,7 +540,7 @@ def update(api: Client, spec: SwarmSpec, spec_file: str, *, env_files=(),
             raise SpecError([f"servers: error {e.status}: {e.detail}"]) from None
     if preflight is None:  # --check probes every model; an update the ones it adds or moves
         preflight = (bool(probe_targets(spec) - probe_targets(old))
-                     or ((check or strict) and bool(unprobed(spec))))
+                     or (check and bool(unprobed(spec))))
     probed: list[str] = []
     if preflight:
         try:
@@ -553,7 +553,9 @@ def update(api: Client, spec: SwarmSpec, spec_file: str, *, env_files=(),
         if bad:
             raise SpecError([*bad, ("preflight failed: not updating (fix the provider or pass "
                                     "--skip-preflight)")])
-    elif strict and unprobed(spec):
+    elif strict and ((check and unprobed(spec)) or any(
+            (r := ts.resolved_model) is not None and not r.inference.preflight
+            for ts in spec.types.values())):
         raise SpecError(["--strict: not updating unverified models"])
     spec.tools_version = None
     names: tuple[list[str], list[str]] | None = None
