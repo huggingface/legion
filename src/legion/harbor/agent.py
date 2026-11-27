@@ -161,7 +161,8 @@ def claude_turn(path):
         message = event.get("message")
         if event.get("type") == "assistant" and isinstance(message, dict):
             messages.append({"role": "assistant", "content": [
-                {"type": "toolCall", "name": b.get("name")} if b.get("type") == "tool_use" else b
+                {"type": "toolCall", "name": b.get("name"), "arguments": b.get("input")}
+                if b.get("type") == "tool_use" else b
                 for b in message.get("content") or [] if isinstance(b, dict)]})
         elif event.get("type") == "result":
             u = event.get("usage") or {}

@@ -187,7 +187,7 @@ class FakeEnv:
             out, session = "claude-code.txt", "sessions/projects/-app/s.jsonl"
             events = [{"type": "assistant", "message": {"content": [
                           {"type": "text", "text": f"reply-{n}"},
-                          {"type": "tool_use", "name": "Bash", "input": {}}]}},
+                          {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}]}},
                       {"type": "result", "is_error": False, "usage": {
                           "input_tokens": 1000, "cache_read_input_tokens": 500,
                           "output_tokens": 100}}]
@@ -406,7 +406,8 @@ async def test_codex_and_claude_code_turns_resume_their_sessions(
     assert evs[0].kind == "turn_started" and [e.kind for e in evs[-2:]] == ["usage", "turn_ended"]
     messages = [e.message for e in evs if e.kind == "message"]  # in legion's (Pi's) shape
     assert messages[0]["content"][0]["text"] == "reply-1" and evs[-1].status == "completed"
-    assert any(b.get("type") == "toolCall" for m in messages for b in m["content"])
+    calls = [b for m in messages for b in m["content"] if b.get("type") == "toolCall"]
+    assert calls and (harness == "codex" or calls[0]["arguments"] == {"command": "ls"})
     u = evs[-2].usage
     assert (evs[-2].model, u.input, u.cache_read, u.output) == ("native-model", 1000, 500, 100)
     await a.send("Second.")
