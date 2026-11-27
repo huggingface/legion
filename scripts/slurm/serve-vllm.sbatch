@@ -26,15 +26,48 @@ PORT=${PORT:-8000}
 IMAGE=${IMAGE:-/fsx/anton/shared/images/vllm-openai-v0.32.0.sqsh}
 QWEN_PARSERS="--enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3"
 read -ra PARSER_ARGS <<< "${VLLM_PARSER_ARGS-$QWEN_PARSERS}"  # set but empty: none
+# vLLM uses the first --served-model-name as the API model ID, or MODEL by default.
+SERVED_MODEL=$MODEL
+args=("$@")
+for ((i=0; i<${#args[@]}; i++)); do
+  case ${args[i]} in
+    --served-model-name) SERVED_MODEL=${args[i+1]:-$MODEL}; break;;
+    --served-model-name=*) SERVED_MODEL=${args[i]#*=}; break;;
+  esac
+done
+# Do not mistake a pre-existing server for this job's server, even when it serves the same ID.
+python3 - "$PORT" <<'PYPORT' || exit 1
+import socket, sys
+try:
+    with socket.socket() as sock:
+        sock.bind(("0.0.0.0", int(sys.argv[1])))
+except OSError as exc:
+    print(f"Cannot start vLLM on port {sys.argv[1]}: {exc}", file=sys.stderr)
+    sys.exit(1)
+PYPORT
 export HF_HOME=/hf
 mkdir -p "/scratch/$USER/hf"  # the weights, on the node's own disk
 srun --overlap --container-image="$IMAGE" --no-container-mount-home \
   --container-mounts="/scratch/$USER/hf:/hf" --container-env=HF_HOME \
   vllm serve "$MODEL" --port "$PORT" ${PARSER_ARGS[@]+"${PARSER_ARGS[@]}"} "$@" &
 SRUN_PID=$!
-until curl -sf -o /dev/null "localhost:$PORT/v1/models"; do
-  sleep 10
-  kill -0 "$SRUN_PID" 2>/dev/null || { echo "vLLM exited during startup"; exit 1; }
+while :; do
+  kill -0 "$SRUN_PID" 2>/dev/null || { echo "vLLM exited during startup (srun PID $SRUN_PID)" >&2; exit 1; }
+  if curl -sf --max-time 5 "localhost:$PORT/v1/models" | python3 -c '
+import json, sys
+try:
+    sys.exit(0 if any(m.get("id") == sys.argv[1] for m in json.load(sys.stdin)["data"]) else 1)
+except (ValueError, KeyError, TypeError, AttributeError):
+    sys.exit(1)
+' "$SERVED_MODEL"; then
+    kill -0 "$SRUN_PID" 2>/dev/null || { echo "vLLM exited during startup (srun PID $SRUN_PID)" >&2; exit 1; }
+    break
+  fi
+  # Check for a failed launch each second while keeping probes ten seconds apart.
+  for _ in {1..10}; do
+    sleep 1
+    kill -0 "$SRUN_PID" 2>/dev/null || { echo "vLLM exited during startup (srun PID $SRUN_PID)" >&2; exit 1; }
+  done
 done
 echo "serving $MODEL at http://$(hostname -I | awk '{print $1}'):$PORT/v1"
 wait "$SRUN_PID"  # the job fails when vLLM does
