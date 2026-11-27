@@ -62,6 +62,12 @@ def result(case: Path, identity: dict, gateway: dict) -> Path | None:
     metadata = (envelope.get("configuration") or {}).get("agent") or {}
     if metadata.get("runner") != RUNNER or metadata.get("model_gateway") != gateway:
         raise ValueError(f"{path}: gateway configuration differs from this run")
+    # The pinned scorer classifies these envelopes as unavailable, even when Harbor
+    # recorded a completed Trial. Keep them retryable rather than reusing them forever.
+    if envelope.get("status") == "infrastructure_error" or (
+            envelope.get("status") == "abandoned" and envelope.get("terminal_reason") in {
+                "unanswered_request_timeout", "episode_timeout"}):
+        return None
     return path
 
 
