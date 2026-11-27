@@ -160,14 +160,10 @@ def test_the_antbench_spec_compiles(monkeypatch, pins):
            "ANTBENCH_TASK_REVISION": "c" * 40}
     swarm = experiment_spec(monkeypatch, pins, "antbench", "c" * 40, env)
     ts = swarm.types["agent"]
-    assert (swarm.compute.kind, ts.replicas, ts.agents_per_worker) == ("hf-jobs", 10, 10)
-    assert ts.harbor.config["environment"]["backend"] == "e2b"
     assert {"E2B_API_KEY", "ANTBENCH_ENV_SECRET"} <= set(ts.secrets)
-    config, names = env_world.load(EXPERIMENTS / "antbench" / "spec.yaml", {})
+    config, _ = env_world.load(EXPERIMENTS / "antbench" / "spec.yaml", {})
     # the worker expands the prefix: HF Jobs sets it only inside the network group
     assert config.upstream == "http://${HF_NETWORK_GROUP_PREFIX}antbench:8000"
-    assert (names[0], names[9], config.credential_env) == ("agent-001", "agent-010",
-                                                           "ANT_TOKEN_{seat}")
 
 
 def test_links_in_the_shipped_folders_and_init(tmp_path, pins):

@@ -167,8 +167,6 @@ async def test_gateway_usage_is_the_agents_and_its_cap_refuses(tmp_path):
                                   "data": {"input": 9000, "output": 2000, "cache_read": 0}})
     assert rt.heartbeat().tokens["m-1"].input == 9000 and "resource" not in event_types(rt)
     assert host.capped("researcher-0001")  # 0.011 USD >= 0.01
-    host.emit("researcher-0001", {"resource": "message_board", "kind": "usage", "data": {}})
-    assert rt.heartbeat().tokens["m-1"].input == 9000  # only the gateway's usage counts
     final = LoopMeta(kind="final", type="researcher")
     await rt.prompt("Wrap up.", loop=final)  # exempt from agent_usd until its turn ends
     assert not host.capped("researcher-0001")

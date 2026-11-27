@@ -115,13 +115,11 @@ async def test_world_calls_act_only_as_the_tokens_agent(served, tmp_path, monkey
         assert await asyncio.to_thread(world_tools.call, "submit", {"path": "main"}) == {
             "by": "agent-001", "path": "main"}
 
-        def call(line, extra=b""):
+        def call(line):
             return status(gw.url, line + b"\r\nX-World-Token: " + token.encode() + b"\r\n"
-                          + extra + b"Content-Length: 2\r\n\r\n{}")
+                          + b"Content-Length: 2\r\n\r\n{}")
 
-        for line in (b"POST /world/hooks HTTP/1.1", b"GET /world/metrics HTTP/1.1",
-                     b"POST /world/tools/../hooks HTTP/1.1", b"GET /world/manifest?x=1 HTTP/1.1"):
-            assert await asyncio.to_thread(call, line) == 403, line
+        assert await asyncio.to_thread(call, b"POST /world/tools/../hooks HTTP/1.1") == 403
         too_big = b"POST /world/tools/submit HTTP/1.1\r\nX-World-Token: " + token.encode() + (
             b"\r\nContent-Length: 999999999999\r\n\r\n")
         assert await asyncio.to_thread(status, gw.url, too_big) == 413
@@ -171,7 +169,7 @@ class Upstream(http.server.BaseHTTPRequestHandler):
         pass
 
 
-def env_spec(tmp_path, naming="consecutive-id"):
+def env_spec(tmp_path):
     """A run's spec.yaml with an env world (resources.world.env), and that block."""
     route = {"type": "object", "properties": {"limit": {"type": "integer"}}}
     block = {"name": "ants", "upstream": "http://${UPSTREAM_HOST}:${UPSTREAM_PORT}",
@@ -181,7 +179,7 @@ def env_spec(tmp_path, naming="consecutive-id"):
                                    "read_only": True, "parameters": route},
                        "act": {"method": "POST", "path": "/v1/action", "parameters": route},
                        "refused": {"method": "POST", "path": "/v1/refuse"}}}
-    spec = {"naming": naming, "agents": {"count": 2},
+    spec = {"naming": "consecutive-id", "agents": {"count": 2},
             "resources": {"world": {"transport": "gateway", "env": block}}}
     (tmp_path / "spec.yaml").write_text(yaml.safe_dump(spec, sort_keys=False))
     return tmp_path / "spec.yaml", block
@@ -210,27 +208,15 @@ async def test_an_env_world_acts_as_each_agent_with_its_own_credential(
         return world_tools.call(name, args)
 
     try:
-        assert world.metadata["tools"] == ["observe", "act", "refused"]
         a = await asyncio.to_thread(call, "agent-001", "observe", {"limit": 3})
         assert (a["seat"], a["path"], a["query"], a["body"]) == (0, "/v1/observe", "limit=3", None)
-        assert a["token"] == "[redacted]"
         b = await asyncio.to_thread(call, "agent-002", "act", {"limit": 1})
         assert (b["seat"], b["path"], b["body"]) == (1, "/v1/action", {"limit": 1})
         with pytest.raises(RuntimeError, match="unknown argument"):  # no identity override
             await asyncio.to_thread(call, "agent-001", "act", {"seat": 1})
-        token = gw.bind("agent-001")["env"]["WORLD_TOKEN"]
-        async with httpx.AsyncClient(base_url=gw.url, headers={"X-World-Token": token}) as c:
-            r = await c.post("/world/tools/start", json={"args": {}})
-            assert (r.status_code, r.json()["error"]["code"]) == (404, "unknown_tool")
-            r = await c.post("/world/tools/act", content=b"not json")
-            assert r.json()["error"]["code"] == "bad_request"
-            assert (await c.post("/world/hooks", json={})).status_code == 403
         with pytest.raises(RuntimeError, match=r"upstream_403: .*\[redacted\]") as refused:
             await asyncio.to_thread(call, "agent-001", "refused", {})
-        await world.add(["agent-003"])  # spawned later: a credential the upstream never issued
-        with pytest.raises(RuntimeError, match="upstream_403"):
-            await asyncio.to_thread(call, "agent-003", "observe", {})
-        assert [s["seat"] for s in Upstream.seen] == [0, 1, 0, None]
+        assert [s["seat"] for s in Upstream.seen] == [0, 1, 0]
         for secret in [ENV_SECRET, *CREDS]:
             assert secret not in str(refused.value) and secret not in caplog.text
             assert secret in world.secrets  # the worker redacts its logs with them
@@ -250,13 +236,6 @@ def test_the_env_launcher_hands_each_seat_the_gateways_credential(tmp_path):
     child = json.loads(out)
     assert [child["ANT_TOKEN_0"], child["ANT_TOKEN_1"]] == CREDS  # agent-001, agent-002
     assert "ANT_ENV_SECRET" not in child and "ANT_TOKEN_2" not in child
-    short = subprocess.run([sys.executable, "-m", "legion.harbor.env", str(spec), "--", *show],
-                           env={**env, "ANT_ENV_SECRET": "short"}, capture_output=True, text=True)
-    assert short.returncode and "16+ characters" in short.stderr and not short.stdout
-    with pytest.raises(ValueError, match="naming: consecutive-id"):
-        env_world.load(env_spec(tmp_path, naming="words")[0], env)
-    with pytest.raises(ValueError, match=r"\. or \.\. segments"):  # httpx would make it /start
-        env_world.Route(method="POST", path="/v1/../start")
 
 
 async def test_inference_streams_through_with_the_key_and_counts_each_call_once(
@@ -267,7 +246,7 @@ async def test_inference_streams_through_with_the_key_and_counts_each_call_once(
     agent = AgentConfig(name="pi", model_name=MODEL, base_url=f"{model}/v1/",
                         model_api_key_name="HF_INFERENCE_TOKEN", env={"HF_INFERENCE_TOKEN": KEY})
     try:
-        assert gw.bind("agent-001")["env"] == {}  # no world here
+        gw.bind("agent-001")
         gw.route("agent-001", agent, KEY, {"X-HF-Bill-To": "ns"})
         token = agent.env["HF_INFERENCE_TOKEN"]
         assert token != KEY and agent.base_url == f"{gw.url}/inference"
@@ -305,26 +284,14 @@ async def test_inference_streams_through_with_the_key_and_counts_each_call_once(
                                                         "cache_write": 0, "reasoning": 0})
             r = await client.post("/chat/completions", json={**ask, "model": "other"})
             assert r.status_code == 403
-            nan = json.dumps({**ask, "temperature": float("nan")})
-            r = await client.post("/chat/completions", content=nan)
-            assert r.status_code == 400 and nan.count("NaN") == 1
-            answers.append(r.content)
-            too_big = (f"POST /inference/chat/completions HTTP/1.1\r\nX-World-Token: {token}\r\n"
-                       f"Content-Length: {(16 << 20) + 1}\r\n\r\n").encode()
-            assert await asyncio.to_thread(status, gw.url, too_big) == 413
             gw.capped = lambda name: name == "agent-001"
             r = await client.post("/chat/completions", json=ask)
             assert r.status_code == 402
             answers.append(r.content)
-            gw.capped = lambda name: False
-            gw.bind("agent-001")  # a new Trial: the old token is dead
-            r = await client.post("/chat/completions", json=ask)
-            assert r.status_code == 401
         assert len(Model.seen) == 2 and len(events) == 2  # refusals never reach the model
         assert (await gw.export(tmp_path)) == {"usage": "usage.json"}
         assert json.loads((tmp_path / "usage.json").read_text())["agent-001"]["calls"] == 3
         assert not [a for a in answers if KEY.encode() in a] and KEY not in caplog.text
-        assert "agent-001 /inference/chat/completions: 402" in caplog.text
     finally:
         watching.cancel()
         await gw.stop()

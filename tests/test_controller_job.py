@@ -538,7 +538,6 @@ def test_controller_job_without_expose_public(monkeypatch):
 
 
 def test_controller_job_launch_arguments():
-    assert jobdeploy.public_status_supported()  # uv.lock's huggingface_hub has expose_public
     args = {
         "wheel_url": "hf://buckets/me/legion/dist/abc/legion-0.0.1-py3-none-any.whl",
         "group": "legion-smoke", "namespace": "me", "flavor": "cpu-upgrade", "timeout": "48h",

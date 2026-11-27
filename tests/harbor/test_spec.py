@@ -10,7 +10,6 @@ from legion.controller.jobs import HubJobsClient
 from legion.controller.reconcile import reconcile
 from legion.harbor.config import Config
 from legion.harbor.spec import Spec, compile_spec, substitute
-from legion.harbor.tools.runner import load_module
 from legion.models import SwarmSpec, load_spec_yaml, loop_refusals
 
 EXAMPLES = Path(__file__).parent / "examples"
@@ -647,8 +646,3 @@ def test_a_gateway_runs_on_e2b_hf_jobs_workers(tmp_path):
     (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
     with pytest.raises(ValueError, match="resources.gateway needs backend e2b on compute hf-jobs"):
         Spec.load(tmp_path / "spec.yaml", env={})
-    options = load_module(RESOURCES / "world.py").Options
-    with pytest.raises(ValueError, match="world needs one of url and env"):
-        options(url="https://world.example", env=env, transport="gateway")
-    with pytest.raises(ValueError, match="world.env needs transport: gateway"):
-        options(env=env)

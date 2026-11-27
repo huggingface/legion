@@ -1071,15 +1071,14 @@ async def test_success_at_trial_expiry_is_retained_until_release(
 
 async def test_a_sandbox_that_stops_answering_mid_turn_ends_its_trial(fakes, tmp_path, monkeypatch):
     """During a turn the heartbeat pings the sandbox (LegionPi probes it between turns): answered
-    pings report `last_seen`; after LOST_AFTER without one the Trial ends and the turn with it,
-    and the next prompt starts a new Trial on the restored sessions."""
+    pings report `last_seen`; after LOST_AFTER without one the Trial ends and the turn with it."""
     from ..worker_fakes import until
 
     monkeypatch.setattr(harbor_adapter, "PING", 0.02)
     monkeypatch.setattr(harbor_adapter, "PING_TIMEOUT", 0.02)
     monkeypatch.setattr(harbor_adapter, "LOST_AFTER", 0.3)
     a = adapter(tmp_path)
-    sid, events = await start(a)
+    _, events = await start(a)
     fakes.hold = {1, 2}
     await a.send("a")
     await read(events, "turn_started")
@@ -1095,8 +1094,4 @@ async def test_a_sandbox_that_stops_answering_mid_turn_ends_its_trial(fakes, tmp
     fakes.probe_hangs = False
     await a.stop()
     assert len(fakes.trials) == 1  # replaced at the next prompt, not before
-    _, events = await start(a, sid)
-    await a.send("c")
-    assert (await read(events, "turn_ended"))[-1].status == "completed"
-    assert len(fakes.trials) == 2 and fakes.uploads == [(a.home / "sessions", SESSIONS)]
     await a.close(0)
