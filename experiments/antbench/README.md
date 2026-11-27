@@ -7,8 +7,9 @@ short text signals (`ANT_COMMS=text`), seen by nearby ants; sandboxes keep open 
 this is the only in-world channel, not an enforced one. One episode per world job: about 7 minutes of world
 time once every ant is ready.
 
-The Harbor task `antbench-ant` and the world job's script, `world-job.sh`, live in the dataset
-`HuggingFaceSwarms/antbench` (private), pinned by commit in `run.env` (`ANTBENCH_TASK_REVISION`).
+The Harbor task `antbench-ant` (`tasks/`) and the world job's script (`world/world-job.sh`)
+live in the dataset `HuggingFaceSwarms/antbench` (private), pinned by commit in `run.env`
+(`ANTBENCH_TASK_REVISION`). The task text names no harness: legion adds how to call the tools.
 Each agent is a Trial of `antbench-ant` in its own
 E2B sandbox (`python:3.12-slim`), with one worker and the controller on HF Jobs
 (`compute: hf-jobs`). Agents never hold an ant's credential or a key: their sandboxes call the
@@ -84,7 +85,7 @@ hf jobs run --detach --name antbench-world --flavor cpu-basic --timeout 3h \
   -v hf://spaces/HuggingFaceSwarms/AntBench@5c3ce1ee2827cbbb4a8eede633c375020a62645c:/antbench \
   -v "${W%/*}:/wheel:ro" -v runs/antbench-1/experiment:/spec \
   -v "hf://buckets/$BUCKET_ID/antbench:/out:rw" \
-  python:3.12-slim bash /job/world-job.sh
+  python:3.12-slim bash /job/world/world-job.sh
 # 3. the swarm, in the same group: a controller job starts too (docs/deploy-job.md)
 export LEGION_RUN_DIR=$PWD/runs/antbench-1 LEGION_WHEEL_URL=$W
 uv run legion launch runs/antbench-1/experiment
