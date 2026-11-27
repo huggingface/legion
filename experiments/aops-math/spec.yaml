@@ -1,7 +1,6 @@
 # A team of 4 on one AoPS problem, sharing a message board. What it needs and how to launch: README.md.
 name: ${RUN_NAME:-team-4}
 model: ${MODEL}
-pricing: [0, 1, 0]     # not real prices: with $1 per 1M output tokens, agent_usd below is a per-agent output-token cap
 naming: consecutive-id
 inference:
   urls:
@@ -22,8 +21,7 @@ resources:
       min_post_gap: 5s
       max_posts: 40
       max_channels: 1
-tools_dir: ../../aops-math-bench/setups/tools   # downloaded with the dataset (README); legion's message_board.* once they post from a file
-tools: [board.post, board.read, board.wait]
+tools: [message_board.post, message_board.read, message_board.wait]   # only these: short tool docs
 environment:
   backend: podman
 workers:
@@ -40,7 +38,7 @@ loop:
   while:
     until: 30m
     max_rounds: 1000
-    agent_usd: 0.032768   # = 32,768 output tokens per agent
+    agent_output_tokens: 32768   # per agent, reasoning tokens included
   final:
     prompt: "The run is ending. Make sure /app/answer.txt holds just your final answer (the value only), then stop."
 limits:
