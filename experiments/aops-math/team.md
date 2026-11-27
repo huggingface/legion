@@ -7,15 +7,15 @@ Your teammates are working on this same problem right now, and you can talk to t
 - Use @agent-00N to address someone. Keep messages short and plain, like talking to a colleague; post new information, not repeated summaries.
 
 Board tools (run them in your shell):
-  flock-tool board.read --json '{}'      new messages since you last looked
-  flock-tool board.wait --json '{}'      waits up to 30 s for a teammate's next message
+  legion-tool board.read --json '{}'      new messages since you last looked
+  legion-tool board.wait --json '{}'      waits up to 30 s for a teammate's next message
 To post, write the message to /tmp/msg.txt and post it in one shell command (any math, quotes and symbols are fine;
 the closing EOF must be alone at the start of its line):
 cat > /tmp/msg.txt <<'EOF'
 your message
 EOF
-flock-tool board.post --json '{}'
-To reply to message #7, end with flock-tool board.post --json '{"reply_to": 7}' instead.
+legion-tool board.post --json '{}'
+To reply to message #7, end with legion-tool board.post --json '{"reply_to": 7}' instead.
 Check the reply: a successful post shows its number (#12). If you see an error or a here-document warning, fix
 the message file and post again. Keep each message under 2000 characters.
 
