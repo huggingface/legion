@@ -45,18 +45,19 @@ def reference(task, directory):
 
 
 def normalize(answer):
-    # Preserve all internal text: QED extraction and the judge see line breaks,
-    # spacing and Unicode exactly as cleaned. This is independent of reward.
-    return answer.strip()
+    # Keep raw leading and internal text: it affects both the offline verifier
+    # and QED cleanup. Ignore terminal line breaks but treat whitespace-only as blank.
+    return answer.rstrip("\r\n") if answer.strip() else ""
 
 
 def equivalent(answer, gold, problem, args):
     # QED-Nano extracts a final box, falling back to the last five lines.
-    # The caller cleans once; repeating cleanup could change an indented heading.
-    student = find_last_boxed_content(answer)
+    # Clean the raw submission exactly once; repeating cleanup can change an indented heading.
+    cleaned = remove_self_evaluation(answer)
+    student = find_last_boxed_content(cleaned)
     if not student:
-        lines = answer.split("\n")
-        student = "..." + "\n".join(lines[-5:]) if len(lines) >= 5 else answer
+        lines = cleaned.split("\n")
+        student = "..." + "\n".join(lines[-5:]) if len(lines) >= 5 else cleaned
     template = (Path(__file__).resolve().parents[1] / "qed-nano-prompts/answerbench.txt").read_text()
     prompt = template.format(problem_statement=problem, student_answer=student, gold_answer=gold)
     return parse_answer_verdict(judge_text(prompt, args.judge_model, args.judge_base_url,
@@ -71,7 +72,7 @@ def score(roots, args):
         ref = None
         problem = None
         for agent in team["agents"]:
-            submission = remove_self_evaluation(read_text(agent["verifier"] / "answer.txt"))
+            submission = read_text(agent["verifier"] / "answer.txt")
             answer = normalize(submission)
             correct = offline_reward(agent)
             stage2 = False

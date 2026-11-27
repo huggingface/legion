@@ -663,7 +663,7 @@ def test_answer_voting_preserves_qed_box_line_boundaries(tmp_path, monkeypatch):
 
 
 @respx.mock
-def test_answer_self_evaluation_cleaning_shared_by_votes_and_judge(tmp_path, monkeypatch):
+def test_answer_self_evaluation_indented_heading_keeps_distinct_raw_votes(tmp_path, monkeypatch):
     mod = module("imo-answerbench")
     monkeypatch.setenv("TEST_JUDGE_KEY", "test")
     task = "imo-bench-algebra-002"
@@ -673,12 +673,64 @@ def test_answer_self_evaluation_cleaning_shared_by_votes_and_judge(tmp_path, mon
     refs.mkdir()
     (refs / f"{task}.json").write_text(json.dumps({"kind": "literal", "answer": "42"}))
     (refs / f"{task}.md").write_text("Problem statement")
-    route = respx.post("https://judge/v1/chat/completions").mock(
-        return_value=openai_reply(r"<thinking>Matches.</thinking> \boxed{Correct}"))
+    route = respx.post("https://judge/v1/chat/completions").mock(side_effect=[
+        openai_reply(r"<thinking>No answer.</thinking> \boxed{Incorrect}"),
+        openai_reply(r"<thinking>Matches.</thinking> \boxed{Correct}"),
+    ])
     result = mod.score([tmp_path], answer_args(judge=True, reference_dir=str(refs)))
     rows = result["teams"][0]["agents"]
-    assert [row["answer"] for row in rows] == ["", "## Evaluation\n\\boxed{42}"]
+    assert [row["answer"] for row in rows] == ["## Evaluation\n\\boxed{42}",
+                                               " ## Evaluation\n\\boxed{42}"]
     assert [row["correct"] for row in rows] == [0, 1]
-    assert route.call_count == 1
-    prompt = json.loads(route.calls[0].request.content)["messages"][0]["content"]
-    assert "Model Solution: 42\n" in prompt
+    assert route.call_count == 2
+    prompts = [json.loads(call.request.content)["messages"][0]["content"] for call in route.calls]
+    assert "Model Solution: \n" in prompts[0]
+    assert "Model Solution: 42\n" in prompts[1]
+
+
+def test_answer_offline_votes_keep_evaluation_suffix_distinct(tmp_path):
+    mod = module("imo-answerbench")
+    task = "imo-bench-algebra-002"
+    gold = r"$\left\lfloor \log_{2}a\right\rfloor +1$."
+    trial(tmp_path, task, "a", gold, 1)
+    trial(tmp_path, task, "b", gold + "\n## Evaluation\nI deserve 7", 0)
+    team = mod.score([tmp_path], answer_args())["teams"][0]
+    assert [row["correct"] for row in team["agents"]] == [1, 0]
+    assert [row["answer"] for row in team["agents"]] == [gold, gold + "\n## Evaluation\nI deserve 7"]
+    assert team["majority_answer"] is None and team["maj_at_n"] == 0
+
+
+@respx.mock
+def test_numeric_judge_preserves_offline_votes_and_accepted_box(tmp_path):
+    mod = module("imo-answerbench")
+    task = "imo-bench-algebra-001"
+    pair = tmp_path / "pair"
+    trial(pair, task, "a", "3", 1)
+    trial(pair, task, "b", "3\n## Evaluation\nI deserve 7", 0)
+    single = tmp_path / "single"
+    accepted = "## Evaluation\n\\boxed{3}"
+    trial(single, task, "a", accepted, 1)
+    refs = tmp_path / "references"
+    refs.mkdir()
+    (refs / f"{task}.json").write_text(json.dumps({"kind": "number", "answer": "3"}))
+    route = respx.post("https://judge/v1/chat/completions").mock(
+        return_value=openai_reply(r"\boxed{Correct}"))
+    results = mod.score([pair, single], answer_args(judge=True, reference_dir=str(refs)))
+    first, second = results["teams"]
+    assert [row["answer"] for row in first["agents"]] == ["3", "3\n## Evaluation\nI deserve 7"]
+    assert [row["correct"] for row in first["agents"]] == [1, 0]
+    assert first["majority_answer"] is None and first["maj_at_n"] == 0
+    assert second["agents"][0]["answer"] == accepted
+    assert second["agents"][0]["correct"] == second["maj_at_n"] == 1
+    assert route.call_count == 0
+
+
+def test_answer_vote_terminal_newlines_and_cleanup_consistency():
+    mod = module("imo-answerbench")
+    from math_eval_common import remove_self_evaluation
+
+    for text in ("3", " ## Evaluation\n\\boxed{42}", "## Evaluation\n\\boxed{42}"):
+        assert mod.normalize(text) == mod.normalize(text + "\r\n\n")
+        assert remove_self_evaluation(text) == remove_self_evaluation(text + "\r\n\n")
+    assert mod.normalize(" ## Evaluation\n\\boxed{42}") != mod.normalize("## Evaluation\n\\boxed{42}")
+    assert mod.normalize(" \t\n") == ""
