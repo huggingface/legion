@@ -276,8 +276,8 @@ prompts, so wakes and cadence rounds are apart; the same fields are in `run.json
 
 In a local run's `run.json`, top-level `stop_reason: "idle"` describes why the local run
 process exited: the swarm settled and passed the idle check. The `reason` inside a type's
-`loops` entry describes why that loop stopped; for example `"quiet"` can be an operator-supplied
-stop reason. These are independent, so both can appear in the same run.
+`loops` entry describes why that loop stopped; for example `"manual"` records an operator stop.
+These are independent, so both can appear in the same run.
 
 ### CLI
 
