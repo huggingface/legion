@@ -76,7 +76,8 @@ resources:
             is east whichever way the ant faces (observations are in the ant's own frame, and
             compass_goal shows east there); [0, 0] stands still. mode walk moves (and lets go of the load),
             lift attaches to the load within reach and carries, push pushes on contact.
-            action_seq must grow with every new command (1, 2, ...).
+            action_seq must grow with every new command (1, 2, ...); retry a failed call with the
+            same one. accepted means queued: it applies at the next world tick.
           parameters:
             type: object
             properties:
@@ -98,7 +99,7 @@ resources:
           description: >-
             Show a short text (up to 256 characters) to the ants near you, in their
             observations, until you replace it; an empty text clears it. signal_seq must grow
-            with every new text (1, 2, ...).
+            with every new text (1, 2, ...); retry a failed call with the same one.
           parameters:
             type: object
             properties:

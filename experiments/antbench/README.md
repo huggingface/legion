@@ -2,8 +2,9 @@
 
 Ten agents each control one ant of an [AntBench](https://huggingface.co/spaces/HuggingFaceSwarms/AntBench)
 world (private Space): together the ants must carry a load through two walls. The world runs in
-real time and does not wait for the agents; they talk only through AntBench's short text signals
-(`ANT_COMMS=text`), seen by nearby ants. One episode per world job: about 7 minutes of world
+real time and does not wait for the agents. Inside the world, they talk only through AntBench's
+short text signals (`ANT_COMMS=text`), seen by nearby ants; sandboxes keep open web access, so
+this is the only in-world channel, not an enforced one. One episode per world job: about 7 minutes of world
 time once every ant is ready.
 
 Each agent is a Trial of the Harbor task `antbench-ant` (`task/tasks/antbench-ant`) in its own
@@ -15,21 +16,24 @@ port, so only the workers reach it. `agent-001` plays ant 0, `agent-002` ant 1, 
 Each credential is derived from `ANTBENCH_ENV_SECRET` and the agent's name, by the gateway and
 by the world job's launcher (`python -m legion.harbor.env`) alike. The transcript stays in the
 world job; at the episode's end it logs AntBench's result and copies the transcript to
-`$BUCKET_ID` under `antbench/<RUN_NAME>/`. The job script is `world-job.sh`; the job ends when
-AntBench exits.
+`$BUCKET_ID` under `antbench/<RUN_NAME>/`. The job script is `world-job.sh`. AntBench keeps
+serving after the episode, so late agents can still read `done`; `ANT_DRAIN_S` (120) seconds
+after the transcript is saved, the job stops AntBench and ends.
 
 The world's clock starts once all ten ants called `ready`. The world job readies the ants still
-missing 300 s after the first one did (once): sandboxes start together once the worker has
-built the template (once, behind a lock), so the spread is Pi's install and the first model
-turns, a minute or three. The clock is stopped while waiting, so a longer wait costs only idle
-tokens; a seat filled in stands still until its agent's first command, which may still come.
+missing about 300 s after the first one did (once; it checks every 15 s, `ANT_DEADLINE_S`
+sets the 300): sandboxes start together once the worker has built the template (once, behind a
+lock), so the spread is Pi's install and the first model turns, a minute or three. The clock is
+stopped while waiting, so a longer wait costs only idle tokens. An ant readied this way stands
+still until its agent's first command, unless one is already queued: commands and texts sent
+before the clock starts apply when it starts.
 
 **Needs**
 
 - `HF_TOKEN`: Jobs permission and bucket create/write access in your personal account, read
   access to the task dataset and the AntBench Space (it starts the jobs; the world job mounts
   the Space with it).
-- `HF_INFERENCE_TOKEN`: inference only; every sandbox holds it.
+- `HF_INFERENCE_TOKEN`: inference only; only the workers' gateways hold it, never a sandbox.
 - `E2B_API_KEY`: your E2B key; the worker starts the sandboxes with it.
 - `ANTBENCH_ENV_SECRET`: the run's secret, new for each run (`openssl rand -hex 24`); the
   worker and the world job get it as a job secret.

@@ -31,8 +31,14 @@ You act in the world through its tools, called with `world.call` (`world.tools` 
   load, `lift` attaches to the load within reach and carries it, `push` pushes on contact and
   cannot pull. `action_seq` grows with every new command: 1, 2, 3, ...
 - `advertise` (`run_id`, `signal_seq`, `advertisement`): a short text, up to 256 characters,
-  that ants near you see until you replace it. It is the only way to reach the other ants.
-  `signal_seq` grows like `action_seq`.
+  that ants near you see until you replace it. It is the only way to reach the other ants in
+  the world. `signal_seq` grows like `action_seq`.
+
+An `accepted` answer means your command or text is queued: it takes effect at the next world
+tick, not at once. If a call fails or times out, send it again with the same sequence number
+and the same content; only a new command or text takes a larger one. If you lose track (a
+restart, for example), `observe` shows the last numbers accepted (`command.accepted_seq`,
+`signal.accepted_seq`): continue above them, never from 1 again.
 
 For example:
 

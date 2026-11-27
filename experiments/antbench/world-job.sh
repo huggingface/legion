@@ -4,7 +4,8 @@
 # exposed). legion's launcher starts it with each ant's credential in ANT_TOKEN_<i>, derived from
 # ANTBENCH_ENV_SECRET as the gateways derive them; the secret itself stays out of AntBench. The
 # transcript stays in /trusted; once the episode ends, its result goes to the log and the
-# transcript to /out/$RUN_NAME. The job ends when AntBench exits.
+# transcript to /out/$RUN_NAME. ANT_DRAIN_S (120) later the job stops AntBench and ends; it also
+# ends if AntBench exits.
 # Mounts: /antbench (the AntBench Space), /spec (the run's experiment folder), /wheel (legion's
 # wheel and harbor-deps.tar, scripts/publish-wheel.sh), /out (a bucket folder, read-write).
 # Env: ANTBENCH_ENV_SECRET (secret), RUN_NAME.
@@ -81,6 +82,8 @@ print("antbench result:", json.dumps(call("/v1/result", TOKENS[0])))
 PY
   mkdir -p "/out/$RUN_NAME" &&
   cp /trusted/episode.jsonl "/out/$RUN_NAME/" &&
-  echo "transcript: /out/$RUN_NAME/episode.jsonl"
+  echo "transcript: /out/$RUN_NAME/episode.jsonl" &&
+  # AntBench serves on after done: give late agents time to read it, then end the job
+  sleep "${ANT_DRAIN_S:-120}" && touch /trusted/drained && kill "$ant"
 } || echo "antbench result: not saved (above)" &  # in the background: AntBench keeps serving
-wait "$ant"  # serve until the job is cancelled or times out, or AntBench exits
+wait "$ant" || [ -e /trusted/drained ]  # until drained, cancelled or timed out, or AntBench exits
