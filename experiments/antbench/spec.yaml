@@ -1,0 +1,132 @@
+# Ten agents each control one ant of an AntBench world, on HF Jobs: each agent a Trial of the task
+# antbench-ant (task/) in its own E2B sandbox. AntBench runs in one trusted job you start first,
+# in the run's network group; agents reach it through the world.* tools via the worker's gateway,
+# which adds each ant's credential, and talk only through AntBench's text signals. Needs, cost,
+# launch: README.md.
+# `legion init` writes every ${VAR} below into run.env.
+name: ${RUN_NAME:-antbench-1}
+bucket_id: ${BUCKET_ID}                              # <namespace>/<name>: the world job mounts it too
+compute: hf-jobs
+harness: pi
+naming: consecutive-id                               # agent-00K plays ant K-1 (the world's seats)
+model: deepseek-ai/DeepSeek-V4.1-Flash-1017
+# [input, output, cached] USD per 1M tokens (router fireworks-ai, input/output as on 2026-11-26):
+# re-read the router's /v1/models before a run, Harbor reports no cost for router models
+pricing: [0.30, 1.20, 0.30]
+inference:
+  hf_router:
+    provider: fireworks-ai
+  api_key_env: HF_INFERENCE_TOKEN             # inference only: never the workers' HF_TOKEN
+  reasoning_effort: medium
+task:
+  repo: https://huggingface.co/datasets/${ANTBENCH_TASK_REPO}   # task/ uploaded there (README.md)
+  selector: antbench-ant
+  revision: '${ANTBENCH_TASK_REVISION}'       # that upload's commit SHA
+agents:
+  count: 10                                   # AntBench gets one ant per agent (world-job.sh)
+resources:
+  gateway: {}                                 # sandboxes hold only a gateway token, never a key
+  world:
+    transport: gateway
+    env:                                      # the world job (world-job.sh) reads it from this file too
+      name: ant-transport
+      description: You control one ant of a team that must carry a load past two walls together.
+      upstream: 'http://$${HF_NETWORK_GROUP_PREFIX}antbench:8000'   # the world job, in the group
+      secret_env: ANTBENCH_ENV_SECRET         # seeds every ant's credential; a new one per run
+      credential_env: 'ANT_TOKEN_{seat}'      # AntBench reads ant i's credential from ANT_TOKEN_i
+      headers:
+        Authorization: Bearer {credential}
+      tools:
+        observe:
+          method: GET
+          path: /v1/observe
+          query: [run_id, after_seq, limit]
+          read_only: true
+          description: >-
+            Your ant's latest sampled observation, with the episode's run_id, phase (waiting,
+            running, done), your current command and timing. With no arguments: the latest
+            sample. With run_id and after_seq (-1 at first, then the answer's next_cursor):
+            your own samples since then, up to limit (1-128, default 32); gap=true means
+            samples were lost.
+          parameters:
+            type: object
+            properties:
+              run_id:
+                type: string
+              after_seq:
+                type: integer
+              limit:
+                type: integer
+        ready:
+          method: POST
+          path: /v1/ready
+          description: Say your ant is ready. The world's clock starts once every ant is.
+          parameters:
+            type: object
+            properties:
+              run_id:
+                type: string
+            required: [run_id]
+        action:
+          method: POST
+          path: /v1/action
+          description: >-
+            Replace your ant's command; it holds until you replace it. direction is a compass
+            direction [x, y], x toward east and y to the left of east, each -1, 0 or 1: [1, 0]
+            is east whichever way the ant faces (observations are in the ant's own frame, and
+            compass_goal shows east there); [0, 0] stands still. mode walk moves (and lets go of the load),
+            lift attaches to the load within reach and carries, push pushes on contact.
+            action_seq must grow with every new command (1, 2, ...).
+          parameters:
+            type: object
+            properties:
+              run_id:
+                type: string
+              action_seq:
+                type: integer
+              direction:
+                type: array
+                items:
+                  type: integer
+              mode:
+                type: string
+                enum: [walk, lift, push]
+            required: [run_id, action_seq, direction, mode]
+        advertise:
+          method: POST
+          path: /v1/advertise
+          description: >-
+            Show a short text (up to 256 characters) to the ants near you, in their
+            observations, until you replace it; an empty text clears it. signal_seq must grow
+            with every new text (1, 2, ...).
+          parameters:
+            type: object
+            properties:
+              run_id:
+                type: string
+              signal_seq:
+                type: integer
+              advertisement:
+                type: string
+            required: [run_id, signal_seq, advertisement]
+tools:
+  - world.*
+environment:
+  backend: e2b                                # billed to E2B_API_KEY's account
+workers:
+  agents_per_worker: 10                       # one worker: it builds the sandbox template once
+  flavor: cpu-basic
+  turn_timeout: 30m
+loop:
+  prompt: >-
+    Keep controlling your ant until observe says done. If it already says done, reply with one
+    line and stop.
+  every: turn_end
+  while:
+    until: 45m
+    max_rounds: 8                             # rounds after done cost tokens: tune after a first run
+limits:
+  run_timeout_seconds: 3600
+  agent_max_turns: 300                        # per round: one game is ~7 min of world time
+  budget_usd: 50                              # the whole run (README.md, "Cost")
+  trial_hours: 1

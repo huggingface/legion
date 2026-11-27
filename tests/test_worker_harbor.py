@@ -10,7 +10,7 @@ import time
 import pytest
 
 from legion.controller import local
-from legion.models import AssignCommand, Harness, PromptCommand
+from legion.models import AssignCommand, Harness, LoopMeta, PromptCommand
 from legion.worker.adapters.harbor import HarborAdapter
 from legion.worker.agents import VERIFY_WAIT, AgentRuntime
 from legion.worker.events import Outbox
@@ -146,3 +146,44 @@ def test_a_local_harbor_worker_gets_time_to_stop_its_trials(tmp_path, monkeypatc
         jobs.kill_all(grace=0.1)
         codes[harness.value] = jobs.procs[job].popen.returncode
     assert codes == {"harbor": 3}
+
+
+async def test_gateway_usage_is_the_agents_and_its_cap_refuses(tmp_path):
+    """resources.gateway's per-call usage (the host's emit) goes into the agent's tokens, which
+    the heartbeat reports; its cap check is the agent's `loop.while.agent_usd`."""
+    ctrl = FakeController()
+    ts = spec(**HARBOR, pricing=[1.0, 1.0, 0.5],
+              loop={"prompt": "go", "while": {"agent_usd": 0.01}})
+    ctrl.batches = [[AssignCommand(agent="researcher-0001", type="researcher", spec=ts,
+                                   restore=False)]]
+    worker, _ = make_worker(tmp_path, ctrl)
+    worker.adapter_factory = lambda name, sp: TrialAdapter(tmp_path / "home" / name, turn_time=0.5)
+    run = asyncio.create_task(worker.run())
+    await until(lambda: "researcher-0001" in worker.agents)
+    rt = worker.agents["researcher-0001"]
+    host = worker.harbor
+    assert not host.capped("researcher-0001") and host.capped("researcher-0009")  # not here
+    host.emit("researcher-0001", {"resource": "gateway", "kind": "usage",
+                                  "data": {"input": 9000, "output": 2000, "cache_read": 0}})
+    assert rt.heartbeat().tokens["m-1"].input == 9000 and "resource" not in event_types(rt)
+    assert host.capped("researcher-0001")  # 0.011 USD >= 0.01
+    host.emit("researcher-0001", {"resource": "message_board", "kind": "usage", "data": {}})
+    assert rt.heartbeat().tokens["m-1"].input == 9000  # only the gateway's usage counts
+    final = LoopMeta(kind="final", type="researcher")
+    await rt.prompt("Wrap up.", loop=final)  # exempt from agent_usd until its turn ends
+    assert not host.capped("researcher-0001")
+    await until(lambda: rt.turn_id is not None)
+    assert not host.capped("researcher-0001")
+    await until(lambda: rt.state.turns == 1)
+    assert host.capped("researcher-0001")
+
+    async def broken(*args, **kw):
+        raise RuntimeError("no sandbox")
+
+    await until(lambda: rt.phase == "none")  # the burst ended (idle_grace)
+    rt.adapter.start = broken  # the final prompt's burst fails: it exempts no later turn
+    await rt.prompt("Wrap up.", loop=final)
+    await until(lambda: "error" in event_types(rt) and rt.phase == "none")
+    assert host.capped("researcher-0001")
+    await worker.drain("test")
+    await asyncio.wait_for(run, 5)

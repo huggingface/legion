@@ -17,7 +17,9 @@ On docker and podman each Trial gets its own network, as the upstream launch giv
 participant one (TrialNetworks), removed when the next Trial starts or at `close`.
 A Trial that fails (an idle probe, 3 failed turns in a row, a crash) is reported as `error`
 and `exited`, after a failed turn for any prompt queued for it; the next prompt starts a new
-one. When its first turn on restored sessions failed, the next `start` of that session raises
+one. During a turn (LegionPi probes between turns) the sandbox is pinged every
+HEARTBEAT_INTERVAL; after DEAD_AFTER without an answer the Trial ends in the same way. When
+its first turn on restored sessions failed, the next `start` of that session raises
 ResumeError (the runtime then starts a fresh session).
 
 The session files live in `home/sessions` (LegionPi copies them there after each turn and the
@@ -32,15 +34,17 @@ import json
 import logging
 import math
 import os
+import random
 import shlex
 import shutil
+import time
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from legion.models import TypeSpec, parse_duration
+from legion.models import DEAD_AFTER, HEARTBEAT_INTERVAL, TypeSpec, parse_duration
 from legion.secrets_file import exposed
 from legion.worker.adapters.base import AdapterEvent, EventQueue, ResumeError
 from legion.worker.harbor import TRIAL_RESULTS, keep_results, results_dir
@@ -51,6 +55,9 @@ CHECK_START = "\nLEGION_CHECK_START\n"
 CHECK_END = "\nLEGION_CHECK_END\n"
 
 CANCEL_WAIT = 60.0  # s close() waits for a cancelled Trial's environment to stop
+# The sandbox heartbeat mirrors the worker's: a ping every HEARTBEAT_INTERVAL, the Trial ended
+# after DEAD_AFTER without an answer. Harbor's E2B exec has no timeout of its own: bound each ping.
+PING, PING_TIMEOUT, LOST_AFTER = HEARTBEAT_INTERVAL.total_seconds(), 10, DEAD_AFTER.total_seconds()
 
 
 class HarborAdapter:
@@ -71,6 +78,8 @@ class HarborAdapter:
         self._success: dict[str, Any] | None = None
         self._success_error: str | None = None
         self._success_watcher: asyncio.Task | None = None
+        self._pinger: asyncio.Task | None = None  # the latest Trial's sandbox heartbeat
+        self._last_seen: datetime | None = None  # its sandbox's last answer
         self.result: Any = None  # the last ended Trial's TrialResult
         self._run: asyncio.Task | None = None
         self._starting: asyncio.Task | None = None  # a Trial started by send() or a rollover
@@ -121,7 +130,8 @@ class HarborAdapter:
         """The heartbeat's `trial`: the agent's latest Trial here, if any."""
         if self.trial is None:
             return None
-        status = {"id": self.trial.config.trial_name, "attempt": self.attempt, "alive": self.alive()}
+        status = {"id": self.trial.config.trial_name, "attempt": self.attempt, "alive": self.alive(),
+                  "last_seen": self._last_seen.isoformat() if self._last_seen else None}
         if self.spec.harbor.config.get("success_check"):
             status.update(success=self._success, success_check_error=self._success_error)
         return status
@@ -182,9 +192,10 @@ class HarborAdapter:
         wait). A Trial still starting is cancelled at once, and no Trial starts after a close
         (the worker never reuses a closed adapter)."""
         self._closes += 1
-        if self._success_watcher is not None:
-            self._success_watcher.cancel()
-            await asyncio.gather(self._success_watcher, return_exceptions=True)
+        for task in (self._success_watcher, self._pinger):
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
         starting = self._starting
         if starting is not None and not starting.done():
             starting.cancel()
@@ -324,8 +335,9 @@ class HarborAdapter:
         inference = self.spec.resolved_model.inference  # the type spec's, not the config's
         swarm = os.environ.get("SWARM")  # the worker's run: with the agent's name, its server
         with exposed():  # the inference key from os.environ; a Slurm worker has a file
+            key = inference_key(inference)
             tc = launch.build_trial_config(config, task, self.root, self.agent,
-                                           self._instructions(), inference_key(inference),
+                                           self._instructions(), key,
                                            inference=inference, run=swarm or "")
         # Harbor's compose project is `<trial_name>__env` and its start runs `compose down` on
         # it: the swarm (the worker's SWARM) keeps another run's <agent>-t1 on this host
@@ -348,12 +360,15 @@ class HarborAdapter:
                 math.ceil(tc.agent.override_timeout_sec) + E2B_SETUP_S)
         # legion's subclasses: no secret in an argv (docker, podman); hf-sandbox's namespace
         tc.environment.import_path = ENVIRONMENTS[config.environment.backend]
+        gateway = self.resources.providers.get("gateway") if self.resources is not None else None
         if self.resources is not None:
             await self.resources.add([self.agent])  # joins here (again: after a move)
             if self._closes:  # a close during the add removed the agent before it was added
                 await self.resources.remove([self.agent])
                 raise RuntimeError("agent closed")
             bound = self.resources.bind(self.agent, tc)
+            if gateway is not None:  # the inference key stays on this worker
+                gateway.route(self.agent, tc.agent, key, self.spec.resolved_model.headers)
             if tc.environment.mounts and config.environment.backend in SANDBOXES:
                 raise RuntimeError(f"{config.environment.backend} has no mounts: use the "
                                    "resources' http transport")
@@ -385,7 +400,8 @@ class HarborAdapter:
                 launch.attach_tool_setup(trial, self.bundle)
             channel = Channel(emit=self._emit, prompts=self._prompts, home=self.home,
                               model=self.spec.harness_model, trial_seconds=trial_seconds,
-                              max_turns=config.limits.agent_max_turns, restore=restore)
+                              max_turns=config.limits.agent_max_turns, restore=restore,
+                              metered=gateway is not None)
             self._endpoint(channel, tc.agent.base_url)
             trial.agent.channel = channel
             self.trial = trial
@@ -401,6 +417,9 @@ class HarborAdapter:
             raise
         finally:
             ready.cancel()
+        if channel.ready.is_set():
+            self._last_seen = datetime.now(UTC)  # it just ran LegionPi's setup
+            self._pinger = asyncio.create_task(self._heartbeat(trial, run))
         if channel.ready.is_set() and config.success_check is not None:
             self._success = None
             self._success_error = None
@@ -452,6 +471,35 @@ class HarborAdapter:
                 self._success_error = error
             await asyncio.sleep(30)
 
+    async def _heartbeat(self, trial: Any, run: asyncio.Task) -> None:
+        """Ping the Trial's sandbox during turns (jittered, so a worker's pings do not burst);
+        after LOST_AFTER without an answer, cancel the Trial: `_ended` reports it, and the next
+        prompt starts a new one. Between turns LegionPi probes it, and after its run() Harbor
+        stops it for the verifier."""
+        seen = time.monotonic()
+        while True:
+            await asyncio.sleep(PING * random.uniform(0.8, 1.2))
+            if trial is not self.trial or run.done():
+                return
+            if not trial.agent.busy:
+                seen = time.monotonic()
+                continue
+            try:
+                async with asyncio.timeout(PING_TIMEOUT):
+                    result = await trial.agent_environment.exec("true", timeout_sec=PING_TIMEOUT)
+                if result.return_code == 0:
+                    seen, self._last_seen = time.monotonic(), datetime.now(UTC)
+                    continue
+            except Exception:  # noqa: BLE001, S110 - a missed ping; LOST_AFTER decides
+                pass
+            if time.monotonic() - seen >= LOST_AFTER and not run.done() and not self._closing:
+                trial.agent.why = f"sandbox not answering for {LOST_AFTER:.0f} s"
+                log.warning("%s: Trial %s: %s", self.agent, trial.config.trial_name, trial.agent.why)
+                run.cancel()  # a turn in flight ends with it (`exited`: the runtime interrupts it)
+                await asyncio.wait({run}, timeout=CANCEL_WAIT)
+                run.cancel()  # Harbor's output recovery may hang on it too; its stop is shielded
+                return
+
     async def _drop_network(self, networks: Any) -> None:
         """Remove a Trial's network once its environment has stopped."""
         if networks is None:
@@ -476,6 +524,9 @@ class HarborAdapter:
         (now, or at the next burst). Its results go to the results dir too, when there is
         one (legion.worker.harbor)."""
         self.result = _result(task)
+        if self.resources is not None and (gw := self.resources.providers.get("gateway")):
+            agent = trial.config.agent
+            gw.end(agent.env.get(agent.model_api_key_name))  # its gateway token (gateway.route)
         if (results := results_dir()) is not None:
             name = trial.config.trial_name
             keep_results(trial.config.trials_dir / name, results / self.agent / "trials" / name,
@@ -506,8 +557,8 @@ def _result(task: asyncio.Task) -> Any:
 
 def _why(trial: Any, task: asyncio.Task) -> str:
     """Why a Trial's run() ended: LegionPi's reason, else Harbor's error."""
-    if task.cancelled():
-        return "cancelled"
+    if task.cancelled():  # the heartbeat says why when it cancelled the Trial
+        return getattr(trial.agent, "why", None) or "cancelled"
     if task.exception() is not None:
         return f"{type(task.exception()).__name__}: {task.exception()}"
     info = task.result().exception_info

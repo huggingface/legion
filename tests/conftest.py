@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
+import httpx2
 import pytest
 import yaml
 from fastapi.testclient import TestClient
@@ -47,6 +48,18 @@ SHA = "0" * 40
 HARBOR = {"task": {"registry_commit": SHA, "task": {"git_commit_id": SHA}},
           "config": {"task": {}}}  # pinned, as the compile step writes it
 HB = {"harness": "harbor", "harbor": HARBOR}  # a placeholder harbor type: {**HB, "model": ...}
+
+
+@pytest.fixture
+def respx_mock(respx_mock, monkeypatch):
+    """respx patches httpx only; huggingface_hub sends through httpx2: route it to respx too."""
+    def handle(_transport, request):
+        r = respx_mock.handler(httpx.Request(request.method, str(request.url),
+                                             headers=request.headers.raw, content=request.read()))
+        return httpx2.Response(r.status_code, headers=r.headers.raw, content=r.read())
+
+    monkeypatch.setattr(httpx2.HTTPTransport, "handle_request", handle)
+    return respx_mock
 
 
 PRICED = "priced-model"  # $4 input, $20 output per 1M tokens (the `priced` fixture)

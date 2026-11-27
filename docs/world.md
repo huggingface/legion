@@ -8,7 +8,7 @@ Harbor agents reach a world through the `world` resource and its `world.*` tools
 `resources: {world: {url, token_env}}` and `tools: [world.*]`
 (experiments/pybot/spec.yaml; `legion.harbor.builtin.resources.world`). The resource
 adds the secret and the agent's name on the worker, so no world credential enters a Trial's
-container (on hf-sandbox each agent gets its own agent token instead).
+container (on hf-sandbox each agent gets its own agent token instead; on e2b, see "Gateway").
 
 The swarm-level `world:` block is the controller's side: it starts the world (`compute: local`)
 or connects to one already running (`url:`), and fetches and checks its manifest at every apply.
@@ -339,6 +339,111 @@ python -m legion.world set <swarm> pr.open_floor=10 --reason "hub 429s"
 ```
 
 **In any other language:** serve the three routes above. A world without hooks needs only two.
+
+## Gateway (e2b)
+
+On e2b, `resources.gateway` keeps every service key on the worker: a Trial's sandbox holds only
+a random token of its own and the gateway's URL, and the gateway adds the keys.
+
+```yaml
+compute: hf-jobs
+environment:
+  backend: e2b
+resources:
+  gateway: {}             # port: 8790, the worker job's port the controller exposes publicly
+  world:
+    url: '${WORLD_URL}'
+    transport: gateway    # or an env world ("Env worlds" below)
+```
+
+- It runs in each worker job, at `https://<job id>--8790.hf.jobs`. The spec allows it only with
+  `backend: e2b` and `compute: hf-jobs`, and `transport: gateway` only with a gateway.
+- Each Trial gets a new token when it starts; its end, the next Trial's token and the agent
+  leaving the worker revoke it. The gateway names the agent from the token, never from its headers. Agents
+  send it as `X-World-Token` (Pi too, through its models.json headers): the jobs proxy drops
+  `Authorization` on public ports (docs/open-models.md).
+- `POST /inference/chat/completions` goes to the agent's own endpoint (`inference`) with its key
+  and the router's bill-to header. Only the agent's model is allowed (403), in at most 16 MiB
+  (413). The answer streams through; the gateway asks for usage on the last chunk and counts each call into the agent's
+  tokens as it ends, so `legion status` and `limits.budget_usd` see a turn's cost while it runs
+  (Pi's turn-end usage is then not counted again); a call the agent drops (a killed turn) ends
+  upstream too, its usage unknown. Once the agent's cost reaches its
+  `loop.while.agent_usd`, further calls get 402, except in its final round.
+- `GET /world/manifest` and `POST /world/tools/<name>` go to the world with the world secret and
+  the agent's name, after the socket proxy's checks (no `/hooks`, `/metrics`, `/admin`, dot
+  segments or queries; the same size cap), or to an env world ("Env worlds" below).
+- Any other path is 404, a call without a live token 401, a ninth call in flight 429. One log
+  line per call (refusals at WARNING); the export `resources/gateway/usage.json` has each agent's
+  calls and tokens.
+- Sandboxes keep the open web. No board route: the board stays on `transport: http`.
+
+### Env worlds
+
+An upstream HTTP API that gives each player its own credential (a game, a simulator) can be the
+world without code: the world resource's `env` block, in place of `url`, turns each route it
+names into a tool, and the gateway forwards an agent's call with that agent's own credential.
+There is no world server; agents keep the `world.*` tools.
+
+```yaml
+naming: consecutive-id                     # agent-001 has seat 0, agent-002 seat 1, ...
+resources:
+  gateway: {}
+  world:
+    transport: gateway
+    env:
+      name: antbench
+      description: You control one ant of a swarm that must carry a load past two walls together.
+      upstream: 'http://$${HF_NETWORK_GROUP_PREFIX}antbench:8000'   # in the run's network group
+      secret_env: ANTBENCH_ENV_SECRET      # the run's secret, a new one per run
+      credential_env: 'ANT_TOKEN_{seat}'   # how the launcher hands each seat its credential
+      headers:
+        Authorization: Bearer {credential}
+      tools:
+        observe:
+          method: GET
+          path: /v1/observe
+          query: [run_id, after_seq, limit]  # the rest of the arguments go in a JSON body
+          read_only: true
+          description: Your ant's latest observation, phase and run_id ...
+          parameters:
+            type: object
+            properties:
+              run_id:
+                type: string
+              after_seq:
+                type: integer
+              limit:
+                type: integer
+        # ready, action, advertise: the same shape
+```
+
+You run the env process (the upstream) yourself, through legion's launcher:
+
+```sh
+ANTBENCH_ENV_SECRET=... python -m legion.harbor.env spec.yaml -- python ant_service.py
+```
+
+- Credentials: an agent's is an HMAC of the run's secret (`secret_env`) and its name. Each
+  gateway derives it when needed. The launcher reads the env block and the roster from the spec,
+  sets `credential_env` for each seat (`{seat}` 0, 1, ...), drops the secret from the command's
+  environment and runs it. Workers get the secret as a job secret; give it to the env process
+  and nothing else. Use a new secret per run: the same secret and name give the same credential.
+  An agent spawned later has a credential the env never got, so its calls fail upstream.
+- The env must not be public. On HF Jobs, run it in the run's network group
+  (`--network-group $LEGION_NETWORK_GROUP --network-alias <alias>`, no exposed port) and point
+  `upstream` at `http://$${HF_NETWORK_GROUP_PREFIX}<alias>:<port>`: `$${` keeps the `${...}`
+  through `legion launch`, and the worker fills it from its own environment.
+- Each header value may hold `{credential}`; one must. Paths are fixed: agents choose only the
+  arguments their schema lists, never the route, a header or the seat. Routes the block does not
+  name (for example a control route) are not reachable. Arguments are checked against the
+  schema (`bad_args`), other tools are `unknown_tool`, and a body is at most 1 MiB.
+- A 2xx answer is the tool's result as the upstream sent it (JSON, else text). Any other status
+  is the error `upstream_<status>` with the upstream's body; `Retry-After` becomes
+  `retry_after_s`. The secret and the worker's agents' credentials are redacted from results
+  and errors, and none is logged.
+- The manifest's version is a hash of the tools, so it changes when they do. An env world has
+  no health check, metrics or hooks; anything else the env needs (a start deadline, saving a
+  result) is the env job's own, as in experiments/antbench/world-job.sh.
 
 ## Checklist for world authors
 

@@ -245,6 +245,15 @@ class Spec(Config):
                              "(consecutive-id names are agent-001, ...)")
         if backend in SANDBOXES and "spawn" in self.resources:
             raise ValueError("resources.spawn needs a mount: use backend docker or podman")
+        gateway = "gateway" in self.resources
+        if gateway and (backend != "e2b" or self.compute.kind != "hf-jobs"):
+            raise ValueError("resources.gateway needs backend e2b on compute hf-jobs: sandboxes "
+                             "reach it on the worker job's public port")
+        if (self.resources.get("world") or {}).get("transport") == "gateway" and not gateway:
+            raise ValueError("resources.world transport gateway needs resources.gateway")
+        if (self.resources.get("world") or {}).get("env") and self.naming != "consecutive-id":
+            raise ValueError("resources.world.env needs naming: consecutive-id (agent i of the "
+                             "roster has the env's seat i-1)")
         if backend in SANDBOXES and (self.resources.get("message_board") or {}).get("rules"):
             # no mounts, no rule proxy: the board runs its rules unenforced and warns
             self.resources["message_board"].setdefault("transport", "http")
@@ -463,7 +472,8 @@ def pack_folders(tools_dir, resources_dir):
 def resource_secrets(spec: Spec) -> list[str]:
     """The env names resources read a token from on the worker: a plugin's `token_env` (its
     default too) when it connects to a `url` or `repo_id`, HF_TOKEN when it deploys
-    a Space (`space_id`). Missing modules are refused before workers or sandboxes start."""
+    a Space (`space_id`), an env world's `secret_env`. Missing modules are refused before
+    workers or sandboxes start."""
     from .resources import load_module
 
     names = []
@@ -478,6 +488,8 @@ def resource_secrets(spec: Spec) -> list[str]:
             names.append(settings.token_env)
         if getattr(settings, "space_id", None):
             names.append("HF_TOKEN")
+        if getattr(settings, "env", None) is not None:  # resources.world.env: the run's secret
+            names.append(settings.env.secret_env)
     return names
 
 

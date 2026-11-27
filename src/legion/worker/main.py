@@ -59,11 +59,13 @@ from legion.models import (
     PromptCommand,
     RestoreProgress,
     StopCommand,
+    TokenUsage,
     TypeSpec,
     UnassignCommand,
     WorkerHeartbeat,
     WorkerKnobs,
     WorkerMem,
+    agent_cap,
     parse_duration,
     type_spec_rev,
 )
@@ -71,7 +73,7 @@ from legion.registry import HARNESSES, load
 from legion.secrets_file import load as load_secrets
 from legion.secrets_file import secret_env
 from legion.worker import sync as sync_mod
-from legion.worker.adapters.base import HarnessAdapter
+from legion.worker.adapters.base import AdapterEvent, HarnessAdapter
 from legion.worker.agents import AgentRuntime
 from legion.worker.cgroup import TMPFS_TYPES, CgroupMem, MemThresholds, fs_type
 from legion.worker.events import Outbox, parse_iso, utcnow
@@ -442,7 +444,8 @@ class Worker:
         self.tools = tools or ToolsManager(tools_root(cfg.work_root), fetch=self._fetch_tools)
         # harness harbor: what its agents' Trials share on this worker (legion.worker.harbor)
         self.harbor = HarborHost(cfg.work_root / "_harbor" / "_worker", emit=self._resource_event,
-                                 folders=self.tools.folder, controller=self.controller_call)
+                                 folders=self.tools.folder, controller=self.controller_call,
+                                 capped=self._capped)
         self.adapter_factory = adapter_factory or default_adapter_factory(cfg, self.harbor)
         self.sync = sync
         self.outbox = Outbox()
@@ -542,9 +545,25 @@ class Worker:
 
     def _resource_event(self, agent: str, event: dict) -> None:
         """A harbor resource's event for one of this worker's agents (a board mention): the
-        agent's `resource` event, which the controller turns into `<resource>.<kind>` wakes."""
-        if (rt := self.agents.get(agent)) is not None:
+        agent's `resource` event, which the controller turns into `<resource>.<kind>` wakes.
+        A `usage` event (resources.gateway: one inference call) is the agent's usage instead."""
+        if (rt := self.agents.get(agent)) is None:
+            return
+        if event["kind"] == "usage" and event["resource"] == "gateway":
+            rt.on_adapter_event(AdapterEvent("usage", model=rt.spec.harness_model,
+                                             usage=TokenUsage(**event["data"])))
+        else:
             rt.emit("resource", event)
+
+    def _capped(self, agent: str) -> bool:
+        """The agent's cost reached its `loop.while.agent_usd` outside a final round
+        (resources.gateway then refuses its inference calls); an agent not on this worker counts
+        as capped."""
+        rt = self.agents.get(agent)
+        if rt is None:
+            return True
+        cap = agent_cap(rt.spec)
+        return cap is not None and rt.spend_usd() >= cap and not rt.in_final()
 
     def working_count(self) -> int:
         return sum(1 for a in self.agents.values() if a.live)

@@ -160,6 +160,7 @@ class AgentRuntime:
         self._turn_summary: str | None = None  # `done`'s summary this turn
         self._turn_text: str | None = None  # last assistant text this turn
         self._loop_inflight: LoopMeta | None = None  # a loop prompt taken, its turn not started
+        self._turn_final = False  # the running turn is a final-round prompt's
 
     # ------------------------------------------------------------------ paths and state
     def purge(self) -> None:
@@ -366,6 +367,7 @@ class AgentRuntime:
             log.exception("%s: burst failed", self.name)
             self.emit("error", {"error": f"{type(e).__name__}: {e}", "dropped_prompts": len(self.buffer)})
             self.buffer.clear()
+            self._loop_inflight = None  # a dropped final prompt exempts no later turn
         finally:
             self.phase = "stopping"
             await self.adapter.stop()
@@ -483,6 +485,7 @@ class AgentRuntime:
         self._turn_tokens = {}
         self._turn_tool_calls, self._turn_summary, self._turn_text = 0, None, None
         self._turn_call_names = []
+        self._turn_final = getattr(self._loop_inflight, "kind", None) == "final"
         self._loop_inflight = None
         self._turn_pids, self._pids = self._pids, []
         self.emit("turn_started", {**data, **self._pid_fields()})
@@ -494,6 +497,7 @@ class AgentRuntime:
 
     def _end_turn(self) -> None:
         self._turn_pids = []
+        self._turn_final = False
         self.state.turns += 1
         self.turn_id = None
         self.awaiting = False
@@ -535,6 +539,10 @@ class AgentRuntime:
             self._turn_summary = text
         elif text:
             self._turn_text = text
+
+    def in_final(self) -> bool:
+        """A final-round prompt is taken or its turn runs: exempt from `agent_usd` (docs/loop.md)."""
+        return self._turn_final or getattr(self._loop_inflight, "kind", None) == "final"
 
     def spend_usd(self) -> float:
         from legion.controller.prices import cost_usd, type_price_table

@@ -19,6 +19,7 @@ import hashlib
 import hmac
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -146,6 +147,16 @@ class WorldManifest(BaseModel):
 
     def get(self, name: str) -> WorldTool | None:
         return next((t for t in self.tools if t.name == name), None)
+
+
+def base_url(value: str, what: str) -> str:
+    """`value` without its trailing slash, if it is an HTTP(S) URL without embedded credentials,
+    query or fragment; else ValueError naming `what`."""
+    url = urlsplit(value)
+    if url.scheme not in ("http", "https") or not url.hostname or url.username \
+            or url.password or url.query or url.fragment:
+        raise ValueError(f"{what} must be HTTP(S) without embedded credentials, query or fragment")
+    return value.rstrip("/")
 
 
 def agent_token(secret: str, agent: str) -> str:

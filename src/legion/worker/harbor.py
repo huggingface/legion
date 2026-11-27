@@ -15,6 +15,9 @@ worker of the type, a spawned agent and a re-assigned one alike), and the resour
 an agent (the board's mentions) go to `emit(agent, event)`, which the worker forwards as the
 agent's `resource` event. A resource with a `controller` attribute (resources.spawn) gets
 `controller`, the worker's call to the controller as one of its agents (that agent's token).
+The gateway (resources.gateway) gets `world` (resources.world, when there is one) and `capped`,
+the worker's check whether an agent's cost reached its cap; its `usage` events are the agent's
+usage (worker/main.py).
 """
 
 from __future__ import annotations
@@ -64,13 +67,15 @@ def keep_results(src: Path, dest: Path, names: Iterable[str]) -> None:
 class HarborHost:
     def __init__(self, root: Path, emit: Callable[[str, dict], None] | None = None,
                  folders: Callable[[str], Awaitable[Path]] | None = None,
-                 controller: Callable[[str, str, dict], Awaitable[Any]] | None = None) -> None:
+                 controller: Callable[[str, str, dict], Awaitable[Any]] | None = None,
+                 capped: Callable[[str], bool] | None = None) -> None:
         self.root = Path(root)  # bundle, sources, resource state and exports
         self.emit = emit  # (agent, {"resource", "kind", "data"}): a resource's event
         # version -> the run's tools and resources folders unpacked here (ToolsManager.folder)
         self.folders = folders
         # the worker's controller_call(agent, entry, args): a call as that agent (its own token)
         self.controller = controller
+        self.capped = capped  # the worker's: an agent's cost reached loop.while.agent_usd
         self.resources: Any = None  # legion.harbor Resources, started; None until prepared
         self.bundle: Any = None  # the vendored ToolBundle; None: the run has no tools
         self.task_path: Path | None = None  # the pinned task, downloaded for every agent here
@@ -135,6 +140,10 @@ class HarborHost:
             for provider in resources.providers.values():
                 if hasattr(provider, "controller"):  # resources.spawn: calls as one agent
                     provider.controller = self.controller
+                if hasattr(provider, "capped"):  # resources.gateway
+                    provider.world = resources.providers.get("world")
+                    if self.capped is not None:
+                        provider.capped = self.capped
             try:
                 await resources.start()
             except BaseException:

@@ -22,6 +22,7 @@ from legion.harbor import launch, networking
 from legion.harbor.agent import LegionPi
 from legion.harbor.spec import Spec, compile_spec
 from legion.models import Inference
+from legion.worker.adapters import harbor as harbor_adapter
 from legion.worker.adapters.base import ResumeError
 from legion.worker.adapters.harbor import HarborAdapter, make_adapter
 
@@ -48,6 +49,7 @@ class Fakes:
         self.success_calls = []
         self.pi_env = []  # each `pi --print` exec's env
         self.probe_ok, self.upload_fails, self.kill_fails = True, False, False
+        self.probe_hangs = False  # `true` (a probe or ping) never answers: a hung sandbox
         self.fail = None  # pi call number -> "exit" | "provider"
         self.hold = set()  # pi call numbers that wait for release(n) or a kill
         self.gates = {}
@@ -112,6 +114,8 @@ class FakeEnv:
     async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
         f = self.fakes
         if command == "true":
+            if f.probe_hangs:
+                await asyncio.Event().wait()
             return ExecResult(return_code=0 if f.probe_ok else 1)
         if user == "root":
             f.root.append(command)
@@ -1063,3 +1067,36 @@ async def test_success_at_trial_expiry_is_retained_until_release(
         assert any(p.name == "result.json" for p in a.artifact_files())
     finally:
         await a.close(0)
+
+
+async def test_a_sandbox_that_stops_answering_mid_turn_ends_its_trial(fakes, tmp_path, monkeypatch):
+    """During a turn the heartbeat pings the sandbox (LegionPi probes it between turns): answered
+    pings report `last_seen`; after LOST_AFTER without one the Trial ends and the turn with it,
+    and the next prompt starts a new Trial on the restored sessions."""
+    from ..worker_fakes import until
+
+    monkeypatch.setattr(harbor_adapter, "PING", 0.02)
+    monkeypatch.setattr(harbor_adapter, "PING_TIMEOUT", 0.02)
+    monkeypatch.setattr(harbor_adapter, "LOST_AFTER", 0.3)
+    a = adapter(tmp_path)
+    sid, events = await start(a)
+    fakes.hold = {1, 2}
+    await a.send("a")
+    await read(events, "turn_started")
+    seen = a.trial_status()["last_seen"]
+    await until(lambda: a.trial_status()["last_seen"] > seen)  # answered pings
+    fakes.release(1)
+    await read(events, "turn_ended")
+    fakes.probe_hangs = True
+    await a.send("b")
+    evs = await read(events, "exited")
+    assert [e.kind for e in evs] == ["turn_started", "error", "exited"]
+    assert "sandbox not answering" in evs[1].error and fakes.trials[0].cancelled
+    fakes.probe_hangs = False
+    await a.stop()
+    assert len(fakes.trials) == 1  # replaced at the next prompt, not before
+    _, events = await start(a, sid)
+    await a.send("c")
+    assert (await read(events, "turn_ended"))[-1].status == "completed"
+    assert len(fakes.trials) == 2 and fakes.uploads == [(a.home / "sessions", SESSIONS)]
+    await a.close(0)

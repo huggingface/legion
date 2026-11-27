@@ -5,6 +5,7 @@ the public status port, and the launch arguments of scripts/deploy-job.sh."""
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import shutil
@@ -16,6 +17,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from huggingface_hub import HfApi
 
 from legion.client import ClientError, auth_headers
 from legion.controller import jobdeploy
@@ -155,7 +157,12 @@ def test_hub_client_sends_network_group_only_when_set(monkeypatch):
         c.api = Api()
         c.launch("w0", make_spec().types["researcher"], {}, {}, {}, 60, namespace="ns")
     assert seen[0]["network_group"] == "legion-smoke"
-    assert "network_group" not in seen[1]
+    assert "network_group" not in seen[1] and "expose_public" not in seen[1]
+    gateway = make_spec(researcher={"harness": "harbor", "harbor": {
+        "task": {}, "config": {}, "resources": {"gateway": {}}}}).types["researcher"]
+    c.launch("w0", gateway, {}, {}, {}, 60, namespace="ns")  # its sandboxes reach the worker
+    assert seen[2]["expose_public"] == [8790]
+    inspect.signature(HfApi.run_job).bind(HfApi(), **seen[2])  # the locked hub takes the call
 
 
 # --------------------------------------------------------------------------- worker side
@@ -530,14 +537,16 @@ def test_controller_job_without_expose_public(monkeypatch):
     assert "expose_public" not in kw and kw["expose"] == [7860]
 
 
-def test_controller_job_launch_arguments(monkeypatch):
-    monkeypatch.setattr(jobdeploy, "public_status_supported", lambda: True)
-    kw = jobdeploy.run_job_args(
-        wheel_url="hf://buckets/me/legion/dist/abc/legion-0.0.1-py3-none-any.whl",
-        group="legion-smoke", namespace="me", flavor="cpu-upgrade", timeout="48h",
-        state_url="hf://buckets/me/legion/controller/legion-smoke",
-        job_labels="experiment=legion-m1", secrets={"LEGION_TOKEN": "f", "HF_TOKEN": "h"},
-    )
+def test_controller_job_launch_arguments():
+    assert jobdeploy.public_status_supported()  # uv.lock's huggingface_hub has expose_public
+    args = {
+        "wheel_url": "hf://buckets/me/legion/dist/abc/legion-0.0.1-py3-none-any.whl",
+        "group": "legion-smoke", "namespace": "me", "flavor": "cpu-upgrade", "timeout": "48h",
+        "state_url": "hf://buckets/me/legion/controller/legion-smoke",
+        "job_labels": "experiment=legion-m1", "secrets": {"LEGION_TOKEN": "f", "HF_TOKEN": "h"},
+    }
+    assert "expose_public" not in jobdeploy.run_job_args(**args)  # private unless asked
+    kw = jobdeploy.run_job_args(**args, public_status=True)
     assert kw["network_group"] == "legion-smoke" and kw["network_aliases"] == ["controller"]
     assert kw["expose"] == [7860] and kw["expose_public"] == [7861]
     assert kw["env"]["LEGION_MODE"] == "job" and kw["env"]["LEGION_NAMESPACE"] == "me"

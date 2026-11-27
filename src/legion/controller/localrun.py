@@ -441,7 +441,7 @@ def _log_to(path: Path) -> logging.Handler:
     root.addHandler(handler)
     if root.level > logging.INFO or root.level == logging.NOTSET:
         root.setLevel(logging.INFO)
-    for name in ("httpx", "httpcore", "uvicorn.access"):
+    for name in ("httpx", "httpx2", "httpcore", "uvicorn.access"):
         logging.getLogger(name).setLevel(logging.WARNING)
     return handler
 

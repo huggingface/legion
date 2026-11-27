@@ -14,7 +14,7 @@ group, so worker traffic never crosses an edge or a proxy.
 ```
               humans, legion CLI, leaders outside the group
                  │  https://<job>--7860.hf.jobs  (HF token, jobs proxy)
-                 │  https://<job>--7861.hf.jobs  (public, read-only)
+                 │  https://<job>--7861.hf.jobs  (public, read-only; opt-in)
 ┌────────────────▼───────── network group <group> (one namespace) ─┐
 │  controller job (cpu-upgrade), alias "controller"                │
 │     7860  full API      7861  `/` and `/healthz` only            │
@@ -52,7 +52,7 @@ uv run hf buckets create "<your-username>/legion" --private  # once, for wheels 
 W=$(uv run scripts/publish-wheel.sh "hf://buckets/<your-username>/legion/dist")
 scripts/deploy-job.sh "$W" --group my-run [--flavor cpu-upgrade] [--timeout 48h] \
     [--secret OPENAI_API_KEY ...] [--dry-run]
-# controller job: 6ad7...   API: https://6ad7...--7860.hf.jobs   status: https://6ad7...--7861.hf.jobs
+# controller job: 6ad7...   API: https://6ad7...--7860.hf.jobs   status: not public (--public-status)
 export LEGION_URL=https://6ad7...--7860.hf.jobs
 uv run legion launch spec.yaml          # omit namespace to use HF_TOKEN's personal account
 ```
@@ -72,7 +72,7 @@ same wheel and tar. The job gets:
 | | value |
 |---|---|
 | network | `--network-group <group> --network-alias controller` |
-| ports | `--expose 7860` (API, HF token), `--expose-public 7861` (status; needs a huggingface_hub whose `run_job` has `expose_public`, otherwise only the API is exposed and the launch says so) |
+| ports | `--expose 7860` (API, HF token), `--expose-public 7861` (status; opt-in: `--public-status`, or `LEGION_PUBLIC_STATUS=1` for `legion launch`; off, or with a huggingface_hub without `expose_public`, only the API is exposed and the launch says so) |
 | secrets | `LEGION_TOKEN`, `HF_TOKEN`, each `--secret NAME` (spec secrets such as `OPENAI_API_KEY`, `MSGBOARD_INVITE_*`) |
 | env | `LEGION_MODE=job`, `LEGION_NETWORK_GROUP`, `LEGION_NAMESPACE`, `LEGION_STATE_URL`, `LEGION_WHEEL_URL`, `LEGION_WORKER_BOOTSTRAP=1`, `LEGION_JOB_LABELS` (from `JOB_LABELS`) |
 | labels | `legion-role=controller`, `legion-group=<group>` (no `swarm` label, so it is never adopted as a worker) |
@@ -111,7 +111,7 @@ spec, model credentials, status commands, and results.
 |---|---|---|
 | workers, agents inside the group | `http://${HF_NETWORK_GROUP_PREFIX}controller:7860` | `Authorization: Bearer <legion or agent token>` (direct, no proxy) |
 | humans, CLI, anything outside the group | `https://<job>--7860.hf.jobs` | `Authorization: Bearer <HF token>` for the proxy **and** `X-Legion-Token: <legion token>` |
-| anyone | `https://<job>--7861.hf.jobs` | none; `GET /` (status page) and `/healthz`, everything else 404 |
+| anyone, with `--public-status` or `LEGION_PUBLIC_STATUS=1` | `https://<job>--7861.hf.jobs` | none; `GET /` (status page) and `/healthz`, everything else 404 |
 
 The jobs proxy consumes `Authorization` and returns 401 without a valid HF token. The API therefore takes the legion token, or an agent
 token, from `X-Legion-Token` first, then from `Authorization: Bearer`. The `legion` CLI always sends `X-Legion-Token`. When `LEGION_URL`
