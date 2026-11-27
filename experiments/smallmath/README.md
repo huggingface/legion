@@ -6,7 +6,7 @@ Adapted from [MathArena/smallmath](https://huggingface.co/datasets/MathArena/sma
 
 ## Network backend
 
-The pinned Harbor tasks require `network_mode = "allowlist"` for both the agent and verifier. Until HF Sandbox enforces allowlists ([huggingface/legion#140](https://github.com/huggingface/legion/issues/140)), use a network-enforcing backend: `ENV_BACKEND=podman` on Slurm or local compute, or `ENV_BACKEND=docker` for local compute. The standalone `hf-jobs-*.yaml` examples currently select `hf-sandbox` and cannot enforce this task requirement; use the URL specs with a compatible backend and a reachable model server instead.
+The pinned Harbor tasks require `network_mode = "allowlist"` for both the agent and verifier. Until HF Sandbox enforces allowlists ([huggingface/legion#140](https://github.com/huggingface/legion/issues/140)), use the URL specs with their default `podman` backend on Slurm or local compute, or set `ENV_BACKEND=docker` for local compute. The standalone `hf-jobs-*.yaml` examples currently select `hf-sandbox` and cannot enforce this task requirement; use the URL specs with a compatible backend and a reachable model server instead.
 
 ## Prerequisites and cost
 
@@ -18,7 +18,7 @@ Each team run uses four task environments and a board; each solo uses one enviro
 
 The [Qwen3.8 chat template](https://huggingface.co/Qwen/Qwen3.8-27B/blob/37561816e66b5b9153b1b64c10968c18c1e6f4a0/chat_template.jinja#L47-L50) accepts `xhigh`, `medium`, or `low` for thinking; it rejects `high`. The thinking examples use `xhigh`.
 
-Choose a task, unique run and public board name. Set an absolute results directory accessible to local workers; this preserves the verifier outputs used by the scorer. For Slurm, Legion writes `<run dir>/results` on the shared disk instead. See [environment choices](../README.md#where-agents-run) and [Slurm](../../docs/slurm.md). These commands launch paid resources; run only after budget approval.
+Choose a task and a unique run name. The standalone team variants also require a unique public board name; the URL team spec uses an in-worker board. Set an absolute results directory accessible to local workers; this preserves the verifier outputs used by the scorer. For Slurm, Legion writes `<run dir>/results` on the shared disk instead. See [environment choices](../README.md#where-agents-run) and [Slurm](../../docs/slurm.md). These commands launch paid resources; run only after budget approval.
 
 ```sh
 export TASK_ID=smallmath-0015
@@ -32,7 +32,7 @@ uv run legion launch experiments/smallmath/hf-jobs-thinking.yaml
 uv run legion status "$RUN_NAME"
 ```
 
-The `hf_jobs` specs start and stop their own model server. To share one server across multiple tasks, start one of those server specs with `legion serve`; use the printed `/v1` URL with `spec.yaml` for each independent run. For thinking, set `REASONING_EFFORT=xhigh`; for the no-thinking server leave it `off`. Select the corresponding server configuration, and give each run a fresh `RUN_NAME`, `BOARD_SPACE`, `RESULTS_DIR`, and `TASK_ID`.
+The `hf_jobs` specs start and stop their own model server. To share one server across multiple tasks, start one of those server specs with `legion serve`; use the printed `/v1` URL with `spec.yaml` for each independent run. For thinking, set `REASONING_EFFORT=xhigh`; for the no-thinking server leave it `off`. Select the corresponding server configuration, and give each run a fresh `RUN_NAME`, `RESULTS_DIR`, and `TASK_ID`. The URL team spec uses a local board, and the solo spec uses none; neither requires `BOARD_SPACE`. The server spec still requires it to load, although `legion serve` does not deploy the board.
 
 ```sh
 # BOARD_SPACE and TASK_ID must be set. Choose one server mode:
@@ -48,13 +48,13 @@ uv run legion launch experiments/smallmath/spec.yaml
 RUN_NAME="$SERVER_RUN_NAME" uv run legion serve experiments/smallmath/hf-jobs-thinking.yaml --stop
 ```
 
-`spec.yaml` also accepts a local or Slurm vLLM endpoint via `SERVER_URL`, `MODEL` and `ENV_BACKEND` (default `hf-sandbox`); see [open models](../../docs/open-models.md). The built-in `message_board.*` tools take text as tool arguments, including quotes and backslashes; no external tools directory is required.
+`spec.yaml` and `solo.yaml` also accept a local or Slurm vLLM endpoint via `SERVER_URL`, `MODEL` and `ENV_BACKEND` (default `podman`); see [open models](../../docs/open-models.md). The team URL spec runs one local board on its worker and applies the AoPS message rules. The built-in `message_board.*` tools take text as tool arguments, including quotes and backslashes; no external tools directory is required.
 
 ## Solo versus team evaluation
 
-Solo specs have no loop: they wait for one explicit kickoff prompt and are not automatically re-prompted. Wait for that turn to finish, then drain the worker so Harbor runs the verifier. A local no-loop run does not stop itself; ending it also stops a standalone model Job. Team specs start a loop, wake on board messages and send a final submission reminder at the end.
+Solo specs have no loop: they wait for one explicit kickoff prompt and are not automatically re-prompted. Wait for that turn to finish, then drain the worker so Harbor runs the verifier. A local no-loop run does not stop itself; ending it also stops a standalone model Job. Team specs start a loop, wake on board messages and send a final submission reminder at the end. Their per-agent output-token cap is 32,768, including reasoning tokens.
 
-The thinking-off comparison uses the same task and model for four independently launched solo runs (`solo.yaml`, N=1, no board) and a separate team run (`spec.yaml`, N=4). Use a shared no-thinking server from `hf-jobs-nothink.yaml` via `legion serve`, or a compatible Slurm/local vLLM server with thinking disabled. The standalone `hf-jobs-solo-nothink.yaml` starts a separate model Job for one solo run; it is more expensive when repeated. Never reuse a results directory: each independent run must have its own `RUN_NAME` and `RESULTS_DIR`. `BOARD_SPACE` is required only for the team. The commands below are examples that incur charges; wait for budget approval.
+The thinking-off comparison uses the same task and model for four independently launched solo runs (`solo.yaml`, N=1, no board) and a separate team run (`spec.yaml`, N=4). Use a shared no-thinking server from `hf-jobs-nothink.yaml` via `legion serve`, or a compatible Slurm/local vLLM server with thinking disabled. The standalone `hf-jobs-solo-nothink.yaml` starts a separate model Job for one solo run; it is more expensive when repeated. Never reuse a results directory: each independent run must have its own `RUN_NAME` and `RESULTS_DIR`. `BOARD_SPACE` is not needed for the URL team or solo specs; it is required for the standalone HF Jobs team specs. The commands below are examples that incur charges; wait for budget approval.
 
 ```sh
 # Start the shared no-thinking server as shown above and set SERVER_URL to its /v1 URL.
@@ -74,7 +74,6 @@ uv run legion stop "$RUN_NAME" --delete --yes
 # On Slurm, use --release to drain and preserve the run as described in docs/slurm.md.
 # Then launch an independent team run on the same task:
 export RUN_NAME="smallmath-team"
-export BOARD_SPACE="$RUN_NAME"
 export RESULTS_DIR="$PWD/runs/$RUN_NAME/results"
 uv run legion launch experiments/smallmath/spec.yaml
 ```

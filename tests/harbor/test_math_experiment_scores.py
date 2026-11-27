@@ -660,3 +660,25 @@ def test_answer_voting_preserves_qed_box_line_boundaries(tmp_path, monkeypatch):
     prompts = [json.loads(call.request.content)["messages"][0]["content"] for call in route.calls]
     assert "Model Solution: gold\n" in prompts[0]
     assert "Model Solution: wrong,gold\n" in prompts[1]
+
+
+@respx.mock
+def test_answer_self_evaluation_cleaning_shared_by_votes_and_judge(tmp_path, monkeypatch):
+    mod = module("imo-answerbench")
+    monkeypatch.setenv("TEST_JUDGE_KEY", "test")
+    task = "imo-bench-algebra-002"
+    trial(tmp_path, task, "a", "## Evaluation\n\\boxed{42}", 0)
+    trial(tmp_path, task, "b", " ## Evaluation\n\\boxed{42}", 0)
+    refs = tmp_path / "references"
+    refs.mkdir()
+    (refs / f"{task}.json").write_text(json.dumps({"kind": "literal", "answer": "42"}))
+    (refs / f"{task}.md").write_text("Problem statement")
+    route = respx.post("https://judge/v1/chat/completions").mock(
+        return_value=openai_reply(r"<thinking>Matches.</thinking> \boxed{Correct}"))
+    result = mod.score([tmp_path], answer_args(judge=True, reference_dir=str(refs)))
+    rows = result["teams"][0]["agents"]
+    assert [row["answer"] for row in rows] == ["", "## Evaluation\n\\boxed{42}"]
+    assert [row["correct"] for row in rows] == [0, 1]
+    assert route.call_count == 1
+    prompt = json.loads(route.calls[0].request.content)["messages"][0]["content"]
+    assert "Model Solution: 42\n" in prompt

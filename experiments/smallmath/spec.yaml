@@ -16,12 +16,16 @@ agents:
 team_file: team.md
 resources:
   message_board:
+    channels: [general]
     wake: ["mention", "thread", "channel"]
-    space_id: ${BOARD_SPACE}
-    private: false
+    rules:
+      max_len: 2000
+      min_post_gap: 5s
+      max_posts: 40
+      max_channels: 1
 tools: [message_board.post, message_board.read, message_board.wait]
 environment:
-  backend: ${ENV_BACKEND:-hf-sandbox}
+  backend: ${ENV_BACKEND:-podman}
 workers:
   env:
     LEGION_RESULTS_DIR: ${RESULTS_DIR:-./results}
@@ -38,6 +42,7 @@ loop:
   while:
     until: 30m
     max_rounds: 100
+    agent_output_tokens: 32768
   final:
     prompt: "The run is ending. Make sure /app/answer.txt holds just your final answer, then stop."
 limits:

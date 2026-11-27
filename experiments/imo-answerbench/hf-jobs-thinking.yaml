@@ -43,6 +43,7 @@ loop:
   while:
     until: 30m
     max_rounds: 100
+    agent_output_tokens: 32768
   final:
     prompt: "The run is ending. Make sure /app/answer.txt holds just your final answer, then stop."
 limits:

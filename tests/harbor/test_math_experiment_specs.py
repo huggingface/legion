@@ -19,22 +19,35 @@ BENCHMARKS = {
 @pytest.mark.parametrize("filename", ["spec.yaml", "hf-jobs-nothink.yaml", "hf-jobs-thinking.yaml"])
 def test_math_spec(name, revision, filename):
     path = ROOT / name / filename
-    spec = Spec.load(path, env={"TASK_ID": "example", "BOARD_SPACE": "test-board",
-                                "SERVER_URL": "https://example.com/v1"})
+    env = {"TASK_ID": "example", "SERVER_URL": "https://example.com/v1"}
+    if filename != "spec.yaml":
+        env["BOARD_SPACE"] = "test-board"
+    spec = Spec.load(path, env=env)
     assert spec.task.revision == revision
     assert spec.team_file == path.parent / "team.md"
-    assert spec.resources["message_board"]["wake"] == ["mention", "thread", "channel"]
+    board = spec.resources["message_board"]
+    assert board["wake"] == ["mention", "thread", "channel"]
+    if filename == "spec.yaml":
+        assert spec.environment.backend == "podman"
+        assert board == {"channels": ["general"], "wake": ["mention", "thread", "channel"],
+                         "rules": {"max_len": 2000, "min_post_gap": "5s", "max_posts": 40,
+                                   "max_channels": 1}}
+    else:
+        assert board["space_id"] == "test-board" and board["private"] is False
+        assert spec.environment.backend == "hf-sandbox"
     assert spec.tools == ["message_board.post", "message_board.read", "message_board.wait"]
     assert spec.loop.every == "24h" and spec.loop.notices is True
     assert spec.loop.on == ["message_board.channel", "message_board.mention", "message_board.thread"]
     assert spec.loop.wake.min_gap == "20s" and spec.loop.wake.max is None
     assert spec.loop.while_.until == "30m" and spec.loop.while_.max_rounds == 100
+    assert spec.loop.while_.agent_output_tokens == 32768
     artifact = "/app/proof.md" if name == "imo-proofbench" else "/app/answer.txt"
     assert artifact in spec.loop.final.prompt
     compiled = compile_spec(spec, {"repo": "example", "selector": "example", "revision": revision})
     assert compiled.types["agent"].env["LEGION_RESULTS_DIR"] == "./results"
     assert compiled.types["agent"].loop.every == "24h"
     assert compiled.types["agent"].loop.on == spec.loop.on
+    assert compiled.types["agent"].loop.while_.agent_output_tokens == 32768
     assert compiled.types["agent"].loop.final.prompt == spec.loop.final.prompt
     if filename == "spec.yaml":
         assert spec.inference.urls == ["https://example.com/v1"]
@@ -77,6 +90,7 @@ def test_solo_math_spec(name, revision, filename):
     assert spec.agents.count == 1 and spec.workers.agents_per_worker == 1
     assert spec.team_file is None and "message_board" not in spec.resources
     assert spec.loop is None
+    assert spec.environment.backend == ("podman" if filename == "solo.yaml" else "hf-sandbox")
     compiled = compile_spec(spec, {"repo": "example", "selector": "example", "revision": revision})
     assert compiled.types["agent"].replicas == 1
     assert compiled.types["agent"].loop is None

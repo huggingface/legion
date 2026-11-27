@@ -14,7 +14,7 @@ task:
 agents:
   count: 1
 environment:
-  backend: ${ENV_BACKEND:-hf-sandbox}
+  backend: ${ENV_BACKEND:-podman}
 workers:
   env:
     LEGION_RESULTS_DIR: ${RESULTS_DIR:-./results}

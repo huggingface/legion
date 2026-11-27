@@ -42,6 +42,7 @@ loop:
   while:
     until: 30m
     max_rounds: 100
+    agent_output_tokens: 32768
   final:
     prompt: "The run is ending. Write your complete self-contained proof to /app/proof.md, then stop."
 limits:
