@@ -220,14 +220,21 @@ exit $status
 EOF
 ```
 
+The job writes the run's data (`run.json`, events, agent workdirs, logs) to
+`./.legion/<swarm>-<UTC time>/` in the checkout it was submitted from, as any local run does
+([local.md](local.md)); `--data-dir` moves it. Its agents need tool calls, so the server must
+run with a tool-call parser: keep `serve-vllm.sbatch`'s default parsers or set
+`VLLM_PARSER_ARGS` to your model's, never to empty.
+
 [`scripts/slurm/serve-vllm.sbatch`](../scripts/slurm/serve-vllm.sbatch) is one vLLM server on
 one GPU, in Pyxis (the Slurm recipe below uses it too). Its log, `vllm-<job id>.log`, lands in
 the directory you ran `sbatch` from (`-o` moves it). Arguments after the model go to
 `vllm serve`, e.g. `--default-chat-template-kwargs '{"enable_thinking": false}'`; `PORT` and
 `IMAGE` (a vLLM `.sqsh`) come from the environment. The tool-call and reasoning parsers default
 to Qwen's (`--enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3`):
-for another model family set `VLLM_PARSER_ARGS` to its flags, or to empty for none
-(`VLLM_PARSER_ARGS= sbatch ...`). `podman-node.sh` and Slurm workers pull
+for another model family set `VLLM_PARSER_ARGS` to its flags. Empty
+(`VLLM_PARSER_ARGS= sbatch ...`) means none, only for a server agents don't use: Pi needs tool
+calls. `podman-node.sh` and Slurm workers pull
 Docker Hub images through `mirror.gcr.io` ([`scripts/slurm/registries.conf`](../scripts/slurm/registries.conf)).
 
 ### Slurm
