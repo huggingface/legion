@@ -325,9 +325,9 @@ def probe_targets(spec: SwarmSpec) -> set[tuple]:
 
 
 def unprobed(spec: SwarmSpec) -> list[str]:
-    """The models preflight would probe (`preflight: false` blocks are never probed)."""
+    """The models requiring a preflight result, including configuration opt-outs."""
     return sorted({ts.resolved_model.qualified for ts in spec.types.values()
-                   if ts.resolved_model is not None and ts.resolved_model.inference.preflight})
+                   if ts.resolved_model is not None})
 
 
 def source_header(spec_file: str | Path | None) -> dict[str, str]:
@@ -540,7 +540,7 @@ def update(api: Client, spec: SwarmSpec, spec_file: str, *, env_files=(),
             raise SpecError([f"servers: error {e.status}: {e.detail}"]) from None
     if preflight is None:  # --check probes every model; an update the ones it adds or moves
         preflight = (bool(probe_targets(spec) - probe_targets(old))
-                     or (check and bool(unprobed(spec))))
+                     or ((check or strict) and bool(unprobed(spec))))
     probed: list[str] = []
     if preflight:
         try:
@@ -553,6 +553,8 @@ def update(api: Client, spec: SwarmSpec, spec_file: str, *, env_files=(),
         if bad:
             raise SpecError([*bad, ("preflight failed: not updating (fix the provider or pass "
                                     "--skip-preflight)")])
+    elif strict and unprobed(spec):
+        raise SpecError(["--strict: not updating unverified models"])
     spec.tools_version = None
     names: tuple[list[str], list[str]] | None = None
     if bundle is not None:

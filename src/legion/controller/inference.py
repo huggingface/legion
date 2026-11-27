@@ -9,7 +9,7 @@ The controller runs it at apply (`check`) and preflight runs it before its probe
   provider, or under a policy (no provider, or `fastest`, `cheapest`, `preferred`) any provider
   with tools;
 - a server you run lists the names it serves, and `model` must be one of them; vLLM and SGLang
-  report `max_model_len`. With `api_format: anthropic_messages` the listing is `<url>/v1/models`.
+  report `max_model_len`. The Messages API resolves aliases via `<url>/v1/models/<model>`.
 
 A block with `preflight: false` is not checked: its window is `inference.context_window`, or
 Pi's default without one.
@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -120,24 +121,41 @@ def auth_headers(inference: Inference, key: str | None) -> dict[str, str]:
     return {"Authorization": f"Bearer {key}"} if key else {}
 
 
-def _get(client: httpx.Client, inference: Inference, url: str, key: str | None) -> Any:
-    models = f"{api_root(inference, url)}/models"
+def _models_endpoint(inference: Inference, url: str, model: str) -> str:
+    base = f"{api_root(inference, url)}/models"
+    return f"{base}/{quote(model, safe='')}" if inference.api_format == "anthropic_messages" else base
+
+
+def _get(client: httpx.Client, inference: Inference, url: str,
+         key: str | None, model: str) -> Any:
+    models = _models_endpoint(inference, url, model)
     try:
         r = client.get(models, headers=auth_headers(inference, key), timeout=TIMEOUT_S)
     except httpx.HTTPError as e:
         raise InferenceError(f"GET {models}: {type(e).__name__}: {e}") from None
-    return _reply(models, r)
+    return _model_reply(inference, models, model, r)
 
 
 async def aget(client: httpx.AsyncClient, inference: Inference, url: str,
-               key: str | None) -> Any:
-    """`GET <url>/models` (preflight's)."""
-    models = f"{api_root(inference, url)}/models"
+               key: str | None, model: str) -> Any:
+    """Fetch model metadata for preflight."""
+    models = _models_endpoint(inference, url, model)
     try:
         r = await client.get(models, headers=auth_headers(inference, key), timeout=TIMEOUT_S)
     except httpx.HTTPError as e:
         raise InferenceError(f"GET {models}: {type(e).__name__}: {e}") from None
-    return _reply(models, r)
+    return _model_reply(inference, models, model, r)
+
+
+def _model_reply(inference: Inference, endpoint: str, requested: str,
+                 response: httpx.Response) -> Any:
+    reply = _reply(endpoint, response)
+    if inference.api_format != "anthropic_messages":
+        return reply
+    if not isinstance(reply, dict) or not isinstance(reply.get("id"), str) or not reply["id"]:
+        raise InferenceError(f"GET {endpoint}: missing model id")
+    # A successful per-model lookup may resolve an alias to a different canonical id.
+    return {"data": [{**reply, "id": requested}]}
 
 
 def _reply(models: str, r: httpx.Response) -> Any:
@@ -156,7 +174,7 @@ def check(spec: SwarmSpec, secrets: Mapping[str, str],
     type whose block (but `max_working`, the controller's) and model are those of `previous`
     (the applied spec) keeps its window without a call: a re-apply does not need the servers
     up, and the window stays the one its workers' Trials hold."""
-    listings: dict[tuple[str, str, str | None], Any] = {}
+    listings: dict[tuple[str, str, str | None, str | None], Any] = {}
     with httpx.Client(transport=transport or TRANSPORT) as client:
         for name, ts in spec.types.items():
             r = ts.resolved_model
@@ -173,9 +191,10 @@ def check(spec: SwarmSpec, secrets: Mapping[str, str],
             try:
                 got = {}
                 for url in r.inference.endpoints:
-                    at = (url, r.inference.api_format, key)
+                    model = r.model_id if r.inference.api_format == "anthropic_messages" else None
+                    at = (url, r.inference.api_format, key, model)
                     if at not in listings:
-                        listings[at] = _get(client, r.inference, url, key)
+                        listings[at] = _get(client, r.inference, url, key, r.model_id)
                     got[url] = listings[at]
                 r.context_window = context_window(r.inference, r.model_id, got, r.provider_name)
             except InferenceError as e:

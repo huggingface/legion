@@ -98,7 +98,7 @@ use the same one:
 | `anthropic_messages` | `POST {url}/v1/messages` | `https://api.anthropic.com` (no `/v1`) | `x-api-key` |
 
 The HF router and most servers you run speak Chat Completions; the other two are for OpenAI's
-or Anthropic's own API, or a gateway in front of one. Their `GET /models` listings may report no
+or Anthropic's own API, or a gateway in front of one. Their model metadata may report no
 context window, so set `context_window` with them.
 
 ```yaml
@@ -115,8 +115,8 @@ inference:
 Some tasks serve the model to the agent themselves, e.g. a gateway service in the task's own
 compose project (`http://model-compat:8003/v1`, experiments/cib). Only the Trial can resolve
 that name, so the controller's model check and preflight would fail. `preflight: false` keeps the
-controller off the endpoints: no model check at apply, no preflight probe (`legion launch` and
-`legion update --check` do not list the model as unverified either), and no `metrics`. The
+controller off the endpoints and disables `metrics` for the block. Preflight reports the model
+as unverified, which `--strict` treats as a failure. The
 context window is `context_window`, or Pi's default without one. Pi and the agent's allowlist
 still get the URLs as written, and the first turn is the first real call.
 
@@ -385,7 +385,8 @@ servers across runs by itself.
 
 ## Model check and context window
 
-At apply the controller reads `GET <url>/models` from each endpoint, as written:
+At apply the controller reads model metadata from each endpoint's `GET <url>/models`. The Messages
+API uses `GET <url>/v1/models/<model>` so the provider can resolve aliases.
 
 - **The router** must list `model`. A named `provider` must serve it with tool support; the
   apply lists the providers that do when it does not.
@@ -445,7 +446,7 @@ the body) makes the controller probe each distinct model and inference block the
 starts. First the model check above, then two non-streamed turns on the block's `api_format`, as Pi
 calls it (a tool call written as text is no tool call, since Pi takes only the API's structured
 calls: `tool_calls`, `function_call` items or `tool_use` blocks). Blocks with `preflight: false`
-are skipped. Turn one asks
+are reported as unverified without a network call. Turn one asks
 for a call to a trivial `get_time` tool; turn two sends the model's output back with the tool's
 result and must complete. Per model it reports `ok`, `tool_call_seen`, `follow_up_ok`,
 `usage_reported`, `latency_ms`, `error` and `warning`. `ok` needs both turns: a server that
@@ -455,7 +456,7 @@ that reports zero token usage passes with a warning, since legion then cannot co
 launch` runs preflight and refuses to apply on a failure; `--skip-preflight` bypasses it.
 
 Preflight never passes silently. A model that was not probed (its key is not in the
-controller's environment, or `--skip-preflight`) is reported as `unverified` with a warning
+controller's environment, `preflight: false`, or `--skip-preflight`) is reported as `unverified` with a warning
 line. `launch` blocks on definite problems (a failed probe) and proceeds on missing evidence
 (unverified), unless `--strict` is passed, which counts unverified as failure (`legion update
 --check --strict` exits 1 the same way).

@@ -160,7 +160,17 @@ def responses_request(r: ResolvedModel) -> dict[str, Any]:
         "tool_choice": "auto",
         "max_output_tokens": MAX_OUTPUT_TOKENS,
         "store": False,
+        "include": ["reasoning.encrypted_content"],
     }
+
+
+def _response_output(data: dict[str, Any]) -> list[dict[str, Any]]:
+    if data.get("status") != "completed" or data.get("error") or data.get("incomplete_details"):
+        raise ProbeError(f"response did not complete: {json.dumps(data)[:300]}")
+    output = data.get("output")
+    if not isinstance(output, list) or not all(isinstance(item, dict) for item in output):
+        raise ProbeError(f"no output in the reply: {json.dumps(data)[:300]}")
+    return output
 
 
 async def _probe_responses_at(client, base: str, r: ResolvedModel, key: str | None,
@@ -169,21 +179,17 @@ async def _probe_responses_at(client, base: str, r: ResolvedModel, key: str | No
     headers = {**r.headers, **auth_headers(r.inference, key)}
     body = responses_request(r)
     data = await _post(client, url, body, headers, timeout)
-    output = data.get("output")
-    if not isinstance(output, list):
-        raise ProbeError(f"no output in the reply: {json.dumps(data)[:300]}")
-    calls = [c for c in output if isinstance(c, dict) and c.get("type") == "function_call"]
+    output = _response_output(data)
+    calls = [c for c in output if c.get("type") == "function_call"]
     result.tool_call_seen = bool(calls)
     if not calls:
         raise NoToolCall("the reply has no function call; agents on this model cannot use tools")
-    # Not stored: the calls go back by value, without the ids of items the server did not keep
-    sent = [{k: c.get(k) for k in ("type", "call_id", "name", "arguments")} for c in calls]
-    body2 = {**body, "input": [*body["input"], *sent, *(
+    # Stateless replay keeps the ordered response items, including encrypted reasoning and ids.
+    body2 = {**body, "input": [*body["input"], *output, *(
         {"type": "function_call_output", "call_id": c.get("call_id"), "output": TOOL_RESULT}
         for c in calls)]}
     data2 = await _post(client, url, body2, headers, timeout)
-    if not isinstance(data2.get("output"), list):
-        raise ProbeError(f"no output in the reply: {json.dumps(data2)[:300]}")
+    _response_output(data2)
     return sum(_tokens(d.get("usage"), "input_tokens", "output_tokens") for d in (data, data2))
 
 
@@ -254,6 +260,10 @@ async def probe(
     p = r.inference
     result = PreflightResult(model=r.qualified, provider=r.provider_name, types=types,
                              api=APIS[p.api_format], ok=False)
+    if not p.preflight:
+        result.unverified = True
+        result.warning = "unverified: inference.preflight is disabled for this block"
+        return result
     if p.key_env and not key:
         result.unverified = True
         result.warning = (f"unverified: secret {p.key_env} is not set on the controller, "
@@ -263,7 +273,8 @@ async def probe(
     t0 = time.monotonic()
     tok2 = 0
     try:
-        context_window(p, r.model_id, {u: await aget(client, p, u, key) for u in p.endpoints},
+        context_window(p, r.model_id,
+                       {u: await aget(client, p, u, key, r.model_id) for u in p.endpoints},
                        r.provider_name)
         tok1 = await _probe_all(client, r, key, result, timeout)
     except InferenceError as e:
@@ -294,12 +305,11 @@ async def probe(
 
 
 def models_to_probe(spec: SwarmSpec) -> list[tuple[ResolvedModel, list[str]]]:
-    """Distinct (inference block, model id, reasoning, API) in the spec, with their types;
-    without the blocks set to `preflight: false`."""
+    """Distinct (inference block, model id, reasoning, API) in the spec, with their types."""
     seen: dict[tuple, tuple[ResolvedModel, list[str]]] = {}
     for type_name, ts in spec.types.items():
         r = ts.resolved_model
-        if r is None or not r.inference.preflight:
+        if r is None:
             continue
         key = (r.provider_name, r.model_id, r.reasoning, r.inference.api_format)
         seen.setdefault(key, (r, []))[1].append(type_name)
