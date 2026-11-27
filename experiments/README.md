@@ -18,13 +18,10 @@ needs, what it costs and how to launch it.
 workers run ([docs/local.md](../docs/local.md)). A spec has one `environment` block; uncomment the one you want:
 
 ```yaml
-# Docker on the worker's machine (the default). Needs Docker with Compose; not on Slurm.
+# Rootless podman on the worker's machine (the default): the one container engine on Slurm and
+# the HF cluster (hopper-cpu nodes).
 environment:
-  backend: docker
-
-# Podman on the worker's machine, rootless: the one container engine on Slurm.
-# environment:
-#   backend: podman
+  backend: podman
 
 # One HF Sandbox (an HF Job) per agent. Needs HF_TOKEN on the workers and a task with a
 # public docker_image; billed to `namespace`, else HF_TOKEN's account.
@@ -40,3 +37,14 @@ environment:
 
 The two sandbox backends have no mounts or local network: give their agents a Space or HTTP
 board, and a model at a public URL. `compute: hf-jobs` workers need one of them.
+
+### Local runs
+
+`backend: docker` runs the Trials on a Docker engine with Compose, for `compute: local` on a
+machine that already runs dockerd (escape-room, programbench). It is refused on Slurm, and the
+HF cluster's nodes have no Docker. A spec without `backend` gets podman, so set it:
+
+```yaml
+environment:
+  backend: docker
+```

@@ -41,7 +41,7 @@ task:
 agents:
   count: 2
 environment:
-  backend: docker
+  backend: docker                       # a machine running dockerd; unset: podman (Local runs, below)
 limits:
   run_timeout_seconds: 900
   agent_max_turns: 30
@@ -83,6 +83,21 @@ used internally by `legion launch`, which supplies its already prepared checkpoi
 - After editing the experiment folder (spec, prompt files, tools), run `legion update <folder>` to
   apply the change to the running swarm; a broken save is shown and not applied
   ([live.md](live.md)).
+
+## Local runs
+
+`environment.backend` picks the container engine for each agent's Trial. The default is
+`podman`, rootless, which also runs on Slurm and the HF cluster ([slurm.md](slurm.md)).
+`docker` is for `compute: local` only, on a machine that already runs dockerd with Compose;
+Slurm refuses it. A spec that relied on the old `docker` default must now say so:
+
+```yaml
+environment:
+  backend: docker
+```
+
+`Dockerfile.controller` and `Dockerfile.worker` are the images legion's controller and workers
+deploy in (a Space, HF Jobs: [deploy-job.md](deploy-job.md)), not the engine the Trials run on.
 
 ## Reaching the run
 

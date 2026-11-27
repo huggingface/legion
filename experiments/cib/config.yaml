@@ -13,7 +13,7 @@ task:
 agents:
   count: 1
 environment:
-  backend: docker
+  backend: podman
 limits:
   run_timeout_seconds: 3600
   agent_max_turns: 256

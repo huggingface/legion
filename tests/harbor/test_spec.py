@@ -144,6 +144,13 @@ def test_spec_checks(tmp_path, edit, error):
         six_lane_spec(tmp_path, yaml.safe_dump(data))
 
 
+def test_a_slurm_spec_without_a_backend_runs_podman(tmp_path):
+    data = load_spec_yaml(LANES)
+    data.pop("environment")
+    data["compute"] = "slurm"
+    assert six_lane_spec(tmp_path, yaml.safe_dump(data)).environment.backend == "podman"
+
+
 def test_unset_variable_without_default(tmp_path):
     with pytest.raises(ValueError, match="unset variables without a default: ANSWERS"):
         six_lane_spec(tmp_path, LANES.replace("${ANSWERS:-96}", "${ANSWERS}"), env={})
