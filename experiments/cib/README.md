@@ -15,8 +15,20 @@ runs the other teammates, the judges and a model gateway (`model-compat`) in its
 - On an HF cluster CPU node, use Legion’s [Podman setup](../../docs/slurm.md).
 - Inference is paid, including the partner and judge calls of team episodes.
 
-Credentials stay in the shell that runs `legion launch`; local workers inherit it and compose
-passes them to the task's services. The spec only names them.
+### Prerequisites
+
+The dataset's runtime tarballs use Git LFS; install Git LFS and fetch the objects before
+running. Set the evaluated model's key and readout key in separate exports, so the latter
+receives the actual key value:
+
+```sh
+export GEMINI_API_KEY=...   # plus the partner and judge keys below
+export CI_PRIVATE_READOUT_API_KEY="$GEMINI_API_KEY"
+```
+
+Set `CI_PARTNER_QWEN14_API_KEY` too: the task validates it even for Sharing. Credentials stay
+in the shell that runs `legion launch`; local workers inherit them and compose passes them to
+the task's services. The spec only names them.
 
 | Variable | Purpose |
 |---|---|
@@ -74,7 +86,8 @@ uv run --with ../cib-harbor/adapter python experiments/cib/parity.py --dataset .
   --output results/cib/sharing --concurrency 2
 ```
 
-To run and score just the default solo case with incomplete coverage allowed:
+To run and score just the default solo case with incomplete coverage allowed (`parity.py`
+sets `allow_incomplete` for `--case`):
 
 ```sh
 uv run --with ../cib-harbor/adapter python experiments/cib/parity.py --dataset ../cib-harbor \
@@ -108,3 +121,5 @@ uv run --with ../cib-harbor/adapter python experiments/cib/parity.py --dataset .
 
 This uses local controllers on the node where the command runs; keep that allocation alive until
 the driver exits. Results in `scores.json` are partial benchmark coverage, not a full Sharing score.
+If invoking the dataset scorer directly against the full manifest for a single-scenario run,
+pass `--allow-incomplete`; the filtered manifest above instead describes only that scenario.
