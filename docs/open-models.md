@@ -151,8 +151,12 @@ networks it writes) cannot start the containers on the network legion gives each
 nodes' (4.9) can. `scripts/slurm/podman-node.sh` sets up podman in a shell on a node as
 `worker.sbatch` does for Slurm workers (storage under `/tmp`, no user systemd).
 
+Select the GPU partition when submitting the server. Check the available partitions with
+`sinfo -o '%P %a %G'` and use `hopper-b300` to request B300 GPUs on the HF cluster.
+
 ```sh
-sbatch -p hopper-b200 scripts/slurm/serve-vllm.sbatch Qwen/Qwen3.5-0.8B
+GPU_PARTITION=hopper-b300
+sbatch -p "$GPU_PARTITION" scripts/slurm/serve-vllm.sbatch Qwen/Qwen3.5-0.8B
 # its log ends with: serving Qwen/Qwen3.5-0.8B at http://<node address>:8000/v1
 srun -p hopper-cpu -n 1 -c 8 --mem=16G --pty bash
 source .venv/bin/activate && source scripts/slurm/podman-node.sh
