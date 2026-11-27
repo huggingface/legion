@@ -1,9 +1,10 @@
 #!/bin/bash
 # One vLLM server on one GPU, in Pyxis (docs/open-models.md "On the HF cluster"). Agents on other
 # nodes (podman on a CPU node, or a `compute: slurm` run's workers) reach it by this node's address.
-#   sbatch -p hopper-b200 scripts/slurm/serve-vllm.sbatch [MODEL [VLLM_ARG...]]
+#   GPU_PARTITION=hopper-b300  # B300 example on the HF cluster
+#   sbatch -p "$GPU_PARTITION" scripts/slurm/serve-vllm.sbatch [MODEL [VLLM_ARG...]]
 #   e.g. thinking off for every request (a request can still turn it on):
-#   sbatch -p hopper-b200 scripts/slurm/serve-vllm.sbatch Qwen/Qwen3.5-27B \
+#   sbatch -p "$GPU_PARTITION" scripts/slurm/serve-vllm.sbatch Qwen/Qwen3.5-27B \
 #     --default-chat-template-kwargs '{"enable_thinking": false}'
 # MODEL may also come from the environment (sbatch --export=ALL,MODEL=...,PORT=8011); PORT
 # (default 8000) and IMAGE (a vLLM .sqsh) likewise. The weights go to the node's own disk.
