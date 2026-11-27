@@ -4,7 +4,7 @@ Spec changes that need you to edit a spec or a stored swarm, newest first.
 
 ## 2026-11-27: `inference.api_format` is back, with `inference.preflight`
 
-[huggingface/legion#TBD](https://github.com/huggingface/legion/pulls)
+[huggingface/legion#156](https://github.com/huggingface/legion/pull/156)
 
 - `inference.api_format` picks Pi's wire API again: `openai_chat_completions` (the default, and
   the only behaviour since 2026-11-17), `openai_responses` or `anthropic_messages`. The Trial,
