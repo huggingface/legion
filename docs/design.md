@@ -65,9 +65,10 @@ one. A Trial that fails is reported and the next prompt starts a new one on the 
 ### CLI and library
 
 One package with three entry points: `legion` (CLI and library: `init`, `launch`, `update`,
-`stop`, `prompt`, `status`), `legion-controller` and `legion-worker`. `legion launch` compiles a
-Harbor spec (`legion.harbor.spec`) into a swarm spec with one type per role, packs the run's
-tools and resources folders and applies it.
+`stop`, `prompt`, `status`, `results`), `legion-controller` and `legion-worker`. `legion launch`
+compiles a Harbor spec (`legion.harbor.spec`) into a swarm spec with one type per role, packs the
+run's tools and resources folders and applies it. `legion.results` reads a finished run, local
+or Slurm, into one typed result with an outcome per Trial, agent and run (docs/results.md).
 
 ### Adding a harness, a compute backend or a server starter
 

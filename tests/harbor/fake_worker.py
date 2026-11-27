@@ -1,9 +1,10 @@
 """Harbor faked for a `legion-worker` process: its Trials are test_adapter.py's (the real LegionPi
 on a fake environment), container networks are faked at their command, the task download writes
-an empty folder, and the controller's model check asks tests/fake_models.py. `fake_harbor()`
-(also the task pin) is what tests/harbor/site/sitecustomize.py installs in every tiny run
-process."""
+an empty folder, and the controller's model check asks tests/fake_models.py. Its verifiers give
+TINY_FAKE_REWARD (default 1). `fake_harbor()` (also the task pin) is what
+tests/harbor/site/sitecustomize.py installs in every tiny run process."""
 
+import os
 import sys
 from pathlib import Path
 
@@ -32,6 +33,6 @@ def fake_harbor():
     from legion.controller import inference
     from tests import fake_models
 
-    install(setattr)
+    install(setattr).reward = float(os.environ.get("TINY_FAKE_REWARD", "1"))
     sources.download_task, sources.resolve_task = download, resolve
     inference.TRANSPORT = fake_models.transport()  # the controller's GET /models

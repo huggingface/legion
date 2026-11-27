@@ -75,7 +75,7 @@ from legion.worker.adapters.base import HarnessAdapter
 from legion.worker.agents import AgentRuntime
 from legion.worker.cgroup import TMPFS_TYPES, CgroupMem, MemThresholds, fs_type
 from legion.worker.events import Outbox, parse_iso, utcnow
-from legion.worker.harbor import HarborHost
+from legion.worker.harbor import HarborHost, IncarnationRecord, results_dir
 from legion.worker.sync import (
     BucketStats,
     BucketSync,
@@ -444,6 +444,11 @@ class Worker:
         self.harbor = HarborHost(cfg.work_root / "_harbor" / "_worker", emit=self._resource_event,
                                  folders=self.tools.folder, controller=self.controller_call)
         self.adapter_factory = adapter_factory or default_adapter_factory(cfg, self.harbor)
+        # this launch's record for legion.results: Slurm keeps it with the results, a local
+        # run in its bundle (WORK_ROOT is the bundle's agents/)
+        root = results_dir() or (cfg.work_root / "_harbor" if cfg.parent_pid is not None else None)
+        self.record = IncarnationRecord(root / "_workers" / cfg.worker_id if root else None,
+                                        cfg.worker_id, cfg.incarnation)
         self.sync = sync
         self.outbox = Outbox()
         self.agents: dict[str, AgentRuntime] = {}
@@ -568,6 +573,7 @@ class Worker:
                               sync=self.sync, working_count=self.working_count)
             self._set_lineage(rt, cmd)
             self.agents[cmd.agent] = rt
+            self.record.write([cmd.agent])
             self.spec_rev = type_spec_rev(cmd.spec)
             self.drain_window = parse_duration(cmd.spec.drain_window)
             self._spawn(self._setup(rt, cmd))
@@ -1007,6 +1013,7 @@ class Worker:
         }
         for sig, fn in handlers.items():
             loop.add_signal_handler(sig, fn)
+        self.record.write()
         try:
             await self._drained.wait()
         finally:
@@ -1016,6 +1023,7 @@ class Worker:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
         if self.preempted:  # what is left of the budget, for events and the last heartbeat
+            self.record.write(exit="preempted")
             left = max(1.0, self._deadline - loop.time())
             try:
                 await asyncio.wait_for(self._final_reports(), left)
@@ -1025,6 +1033,7 @@ class Worker:
             # before `drained`: that heartbeat lets the controller cancel the job at once.
             # Not in a preemption's budget: the job ends anyway
             await self.harbor.close()
+            self.record.write(exit="drained")  # its Trials ended, verified and kept
             # the loops are stopped: the heartbeat after the events flush is the last one
             self.drained = self._drain_done
             await self._final_reports()

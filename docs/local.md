@@ -135,8 +135,13 @@ budget check, the view and the bundle use the spec as currently applied, so a
                        budget_stop; agent ""), merged by time (pi session format v3)
   events/<agent>.jsonl one file per agent
   agents/<agent>/      agent workdirs
+  agents/_harbor/      a Harbor agent's Trials (<agent>/trials/<trial>/: result.json, verifier/)
+                       and each worker launch's record (_workers/<worker>/<incarnation>.json)
   logs/                controller.log, <worker>.log      controller/  the controller's SQLite state
 ```
+
+`legion results .legion/hello-20261021-161443` (or `legion.results.load` in Python) reads the
+run's outcome and each agent's reward from the bundle: see [run results](results.md).
 
 ## Switching to HF Jobs
 

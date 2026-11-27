@@ -105,7 +105,8 @@ workers have stopped; leave pre-existing and shared boards in place.
 
 Local runs write logs and a run bundle under `.legion/`. Use `legion status` to see
 agent state and usage, and the board to follow their conversation. See
-[local runs and results](docs/local.md) for where to find the files.
+[local runs and results](docs/local.md) for where to find the files, and
+[run results](docs/results.md) to read a run's outcome and rewards from Python.
 
 ### Configure your own swarm
 
