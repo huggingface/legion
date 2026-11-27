@@ -23,7 +23,7 @@ from threading import Event, Lock
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from legion import ops, rundir
 from legion.client import Client, ClientError
@@ -141,8 +141,7 @@ def _bind_dependencies(raw: dict, spec: Spec, source: Path, secrets_file: Path |
         mapping[name] = relative.as_posix()
 
     for name in ("tools_dir", "resources_dir"):
-        if name in spec.model_fields_set:
-            bind(raw, name, getattr(spec, name))
+        bind(raw, name, getattr(spec, name))
     bind(raw, "team_file", spec.team_file)
     loops = [(raw, spec.loop)]
     for name, role in (spec.agents.roles or {}).items():
@@ -170,6 +169,18 @@ def _copy_dependencies(dependencies: dict[Path, Path], root: Path,
             shutil.copy2(source, dst)
 
 
+def _sweep_error(exc: BaseException, credentials: tuple[str, ...]) -> str:
+    if not isinstance(exc, ValidationError):
+        return safe_error(exc, credentials)
+    # Pydantic's display trims input values. Render only validation locations and
+    # messages, so the redactor never has to recognize a partial input credential.
+    details = "\n".join(
+        f"{'.'.join(map(str, item['loc'])) or 'spec'}: {item['msg']}"
+        for item in exc.errors(include_input=False, include_context=False, include_url=False)
+    )
+    return safe_error(ValueError(details), credentials)
+
+
 def make_plan(path: Path, *, profile: Path | None = None, secrets_file: Path | None = None) -> Plan:
     """Expand and validate a matrix without contacting a controller, Hub or scheduler."""
     env = dict(os.environ)
@@ -186,7 +197,7 @@ def make_plan(path: Path, *, profile: Path | None = None, secrets_file: Path | N
     try:
         return _plan(path, profile, secrets_file, env, credentials)
     except (OSError, TypeError, ValueError) as exc:
-        raise ValueError(safe_error(exc, credentials)) from None
+        raise ValueError(_sweep_error(exc, credentials)) from None
 
 
 def _plan(path: Path, profile: Path | None, secrets_file: Path | None,
@@ -483,7 +494,7 @@ def _run_attempt(plan: Plan, cell: Cell, run: Path, profile: Path | None, secret
                     attempt.input_hash = _prepare(plan, cell, run, profile, secrets_file)
             except (OSError, TypeError, ValueError, ops.SpecError) as exc:
                 attempt.phase = "setup_failed"
-                attempt.note = safe_error(exc, plan.credentials)
+                attempt.note = _sweep_error(exc, plan.credentials)
                 _save(run, attempt)
                 return True
             attempt.phase = "launching"
@@ -531,7 +542,7 @@ def _run_attempt(plan: Plan, cell: Cell, run: Path, profile: Path | None, secret
         _save(run, attempt)
         return True
     except (_Paused, ClientError, ops.SpecError, OSError, TypeError, ValueError) as exc:
-        attempt.note = safe_error(exc, plan.credentials)
+        attempt.note = _sweep_error(exc, plan.credentials)
         _save(run, attempt)
         return False
 
@@ -600,7 +611,7 @@ def _reconcile(plan: Plan, cell: Cell, run: Path, stop: Event) -> str | None:
             raise _Paused("controller or world is still live; resume when its API is reachable")
         attempt.note = None
     except (_Paused, ClientError, ops.SpecError, OSError, TypeError, ValueError) as exc:
-        attempt.note = safe_error(exc, plan.credentials)
+        attempt.note = _sweep_error(exc, plan.credentials)
     _save(run, attempt)
     return attempt.note
 

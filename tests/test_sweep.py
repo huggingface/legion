@@ -1,10 +1,15 @@
 import json
-from subprocess import CompletedProcess
+import os
+import shutil
+import sys
+from pathlib import Path
+from subprocess import CompletedProcess, check_output
 
 import httpx
 import pytest
 from typer.testing import CliRunner
 
+import legion
 from legion import client, ops, rundir
 from legion.cli import app
 from legion.harbor.results import write_json
@@ -113,17 +118,37 @@ def test_resume_refuses_changed_file_dependencies(matrix, tmp_path, kind):
     assert "the sweep inputs changed" in result.output
 
 
-def test_plan_redacts_values_loaded_from_the_secrets_file(matrix, tmp_path):
+def test_default_tools_and_resources_affect_fingerprint(matrix, tmp_path):
+    package = tmp_path / "installed" / "legion"
+    shutil.copytree(Path(legion.__file__).parent, package, ignore=shutil.ignore_patterns("__pycache__"))
+    env = {**os.environ, "PYTHONPATH": str(package.parent), "PYTHONDONTWRITEBYTECODE": "1"}
+    command = [sys.executable, "-c", "from legion.cli import app; app()",
+               "sweep", str(matrix), "--plan"]
+    original = json.loads(check_output(command, env=env))
+    for filename in ("tools/message_board.py", "resources/message_board.py"):
+        module = package / "harbor" / "builtin" / filename
+        with module.open("a") as file:
+            file.write("\n# locally changed built-in\n")
+        changed = json.loads(check_output(command, env=env))
+        assert [cell["cell"] for cell in original] == [cell["cell"] for cell in changed]
+        assert original != changed
+        original = changed
+
+
+@pytest.mark.parametrize("dummy", ["example-file-credential", """escaped-quote-'\"-\\-suffix""",
+                                   "prefix-file-secret-" + "x" * 120 + "-suffix-file-secret"])
+def test_plan_redacts_values_loaded_from_the_secrets_file(matrix, tmp_path, dummy):
     spec = matrix.parent / "spec.yaml"
     spec.write_text(spec.read_text().replace("inference:", "inference:\n  api_key_env: ${FILE_KEY}"))
     secrets = tmp_path / "secrets.env"
-    dummy = "example-file-credential"
     secrets.write_text(f"FILE_KEY={dummy}\n")
     secrets.chmod(0o600)
     result = CliRunner().invoke(app, ["sweep", str(matrix), "--secrets", str(secrets), "--plan"])
     assert result.exit_code == 1
     assert "api_key_env" in result.output
-    assert dummy not in result.output
+    assert "input_value" not in result.output
+    assert dummy[:15] not in result.output
+    assert dummy[-14:] not in result.output
 
 
 def test_unconfirmed_submission_blocks_new_cells_without_submitting(matrix, tmp_path, monkeypatch):
