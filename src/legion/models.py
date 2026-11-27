@@ -1507,13 +1507,17 @@ _LOOP_SOURCE_RE = re.compile(r"^(message_board|world|artifacts)\.[A-Za-z0-9_.:*-
 
 class LoopWhile(BaseModel):
     """While every set condition holds, the loop goes on. Type-wide: `until` (wall time since
-    the loop started), `budget_usd` (the type's cost). Per agent: `max_rounds` (loop prompts),
-    `agent_usd` (the agent's cost; a map is keyed by model alias or model id),
-    `agent_output_tokens` (the agent's output tokens, every model counted)."""
+    the loop started, or since the type's first turn with `until_from: first_turn`),
+    `budget_usd` (the type's cost), `quiet` (stop once every agent has been idle with nothing
+    pending that long). Per agent: `max_rounds` (loop prompts), `agent_usd` (the agent's cost;
+    a map is keyed by model alias or model id), `agent_output_tokens` (the agent's output
+    tokens, every model counted)."""
 
     model_config = {"extra": "forbid"}
 
     until: str | None = None
+    until_from: Literal["launch", "first_turn"] = "launch"
+    quiet: str | None = None
     max_rounds: int | None = None
     budget_usd: float | None = None
     agent_usd: float | dict[str, float] | None = None
@@ -1538,6 +1542,43 @@ class LoopWhile(BaseModel):
         if v is not None and v < 1:
             raise ValueError("must be >= 1")
         return v
+
+    @field_validator("quiet")
+    @classmethod
+    def _quiet(cls, v: str | None) -> str | None:
+        if v is not None and parse_duration(v).total_seconds() <= 0:
+            raise ValueError("quiet must be a duration > 0")
+        return v
+
+    @model_validator(mode="after")
+    def _until_from(self) -> LoopWhile:
+        if self.until_from == "first_turn" and (self.until is None or self.until_s is None):
+            raise ValueError("until_from: first_turn needs until as a duration (2h), not a clock time")
+        return self
+
+    @property
+    def until_s(self) -> float | None:
+        """`until` in seconds when it is a duration; None when unset or a clock time."""
+        if self.until is None:
+            return None
+        try:
+            return parse_duration(self.until).total_seconds()
+        except ValueError:
+            return None
+
+    @property
+    def quiet_s(self) -> float | None:
+        return None if self.quiet is None else parse_duration(self.quiet).total_seconds()
+
+    @model_serializer(mode="wrap")
+    def _dump(self, handler):  # unset F3 keys stay off the wire (a worker older than them)
+        out = handler(self)
+        if isinstance(out, dict):
+            if out.get("until_from") == "launch":
+                out.pop("until_from")
+            if out.get("quiet", 0) is None:
+                out.pop("quiet")
+        return out
 
     @field_validator("budget_usd")
     @classmethod
@@ -1618,6 +1659,8 @@ class LoopSpec(BaseModel):
 
     prompt: str | None = None
     prompt_file: str | None = None  # inlined into `prompt` by `legion launch`
+    # Each agent's round 1 (and a wake prompt before it), when it must differ from `prompt`
+    start_prompt: str | None = None
     every: str = "turn_end"
     on: list[str] = Field(default_factory=list)  # message_board.mention, world.event:*
     while_: LoopWhile = Field(default_factory=LoopWhile, alias="while")
@@ -1634,6 +1677,8 @@ class LoopSpec(BaseModel):
             out["while"] = out.pop("while_")
         if isinstance(out, dict) and not self.notices:
             out.pop("notices", None)  # off: not dumped, so workers never see the key
+        if isinstance(out, dict) and out.get("start_prompt", 0) is None:
+            out.pop("start_prompt")  # unset: off the wire, like `notices`
         return out
 
     @field_validator("every")
@@ -1673,11 +1718,17 @@ def hit_max_turns(turn_ended: dict) -> bool:
 
 
 def worker_type_spec(ts: TypeSpec) -> TypeSpec:
-    """The type spec as workers get it: without the controller-only `loop.notices` (workers
-    validate it with extra=forbid; one older than the key would refuse the whole spec)."""
-    if ts.loop is None or not ts.loop.notices:
+    """The type spec as workers get it: without the controller-only `loop.notices`,
+    `loop.start_prompt` (it reaches workers as `LoopStartCommand.start_text`), `while.quiet` and
+    `while.until_from` (workers validate the spec with extra=forbid; one older than a key would
+    refuse the whole spec)."""
+    lp = ts.loop
+    if lp is None or not (lp.notices or lp.start_prompt is not None or lp.while_.quiet is not None
+                          or lp.while_.until_from != "launch"):
         return ts
-    return ts.model_copy(update={"loop": ts.loop.model_copy(update={"notices": False})})
+    w = lp.while_.model_copy(update={"quiet": None, "until_from": "launch"})
+    return ts.model_copy(update={"loop": lp.model_copy(
+        update={"notices": False, "start_prompt": None, "while_": w})})
 
 
 def agent_cap(ts: TypeSpec) -> float | None:
@@ -1895,6 +1946,11 @@ class LoopStartCommand(BaseModel):
     meta: LoopMeta  # kind "loop"; `round` is the rounds done so far
     max_rounds: int | None = None
     deadline: datetime | None = None
+    # `loop.start_prompt`: sent instead of `text` while the agent has had no round in this run
+    start_text: str | None = None
+    # A timing refresh (the first turn's clock and deadline): applied only to a worker loop of
+    # the same run that is still running, keeping its counters; never restarts an ended loop
+    refresh: bool = False
     # One run of the loop (POST /swarms/{swarm}/loop start begins a new one): a new run resets the
     # worker's round counter; a repeat of the same run (lost command, live update) does not.
     run: str | None = None
@@ -2075,6 +2131,7 @@ class LoopStatus(BaseModel):
     mode: Literal["worker", "controller"]  # who sends `every: turn_end` prompts
     every: str
     started_at: datetime | None = None
+    first_turn_at: datetime | None = None  # the type's first turn in this run of the loop
     stopped_at: datetime | None = None
     reason: str | None = None  # why it stopped
     agents: int = 0

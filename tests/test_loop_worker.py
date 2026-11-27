@@ -82,6 +82,21 @@ async def test_three_failed_turns_in_a_row_end_the_loop(tmp_path, monkeypatch):
     await rt.stop()
 
 
+async def test_a_refresh_never_restarts_a_loop_that_ended(tmp_path, monkeypatch):
+    # review #2 #7: the first turn's timing refresh arrives after the loop ended on errors
+    monkeypatch.setattr("legion.worker.agents.LOOP_ERROR_BACKOFF", 0.01)
+    rt, ad = runtime(tmp_path, idle_grace="5s", adapter=FailingAdapter(tmp_path / "h"))
+    await rt.setup(restore=False)
+    cmd = start()
+    rt.start_loop(cmd)
+    await until(lambda: custom(rt, "loop_stopped"), timeout=5)
+    rt.start_loop(cmd.model_copy(update={"refresh": True, "deadline": datetime.now(UTC)
+                                         + timedelta(hours=1)}))
+    await asyncio.sleep(0.2)
+    assert len(ad.sent) == 3 and rt.loop is None
+    await rt.stop()
+
+
 class MaxTurnsAdapter(ScriptedAdapter):
     def __init__(self, *a, data: dict, **kw):
         super().__init__(*a, **kw)
@@ -105,6 +120,15 @@ async def test_max_turns_is_not_a_failed_loop_turn(tmp_path, data):
     await until(lambda: custom(rt, "loop_stopped"), timeout=5)
     assert custom(rt, "loop_stopped")[0]["reason"] == "max_rounds" and len(ad.sent) == 5
     assert [d["why"] for d in custom(rt, "loop_prompt")] == ["start"] + ["turn_end"] * 4
+    await rt.stop()
+
+
+async def test_start_text_is_the_first_round_of_a_run(tmp_path):
+    rt, ad = runtime(tmp_path, idle_grace="5s")
+    await rt.setup(restore=False)
+    rt.start_loop(start("again", start_text="begin", max_rounds=3))
+    await until(lambda: custom(rt, "loop_stopped"), timeout=5)
+    assert ad.sent == ["begin", "again", "again"]
     await rt.stop()
 
 

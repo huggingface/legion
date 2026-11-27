@@ -10,7 +10,14 @@ from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from legion import cli
-from legion.models import LoopSpec, SwarmSpec, agent_cap, load_spec_yaml, loop_refusals
+from legion.models import (
+    LoopSpec,
+    SwarmSpec,
+    agent_cap,
+    load_spec_yaml,
+    loop_refusals,
+    worker_type_spec,
+)
 
 from .conftest import TOKEN, make_spec, wire
 
@@ -33,6 +40,18 @@ def test_loop_fields_and_the_while_alias_round_trip():
     assert loop_refusals(s) == []
 
 
+def test_f3_keys_stay_off_the_wire_unless_set_and_never_reach_workers():
+    plain = spec_with({"prompt": "x", "while": {"until": "1h"}}).model_dump(mode="json")
+    lp = plain["types"]["researcher"]["loop"]
+    assert "start_prompt" not in lp and set(lp["while"]) == {
+        "until", "max_rounds", "budget_usd", "agent_usd", "agent_output_tokens"}
+    s = spec_with({"prompt": "x", "start_prompt": "go",
+                   "while": {"until": "1h", "until_from": "first_turn", "quiet": "45s"}})
+    assert SwarmSpec.model_validate_json(s.model_dump_json()) == s
+    w = worker_type_spec(s.types["researcher"]).model_dump(mode="json")["loop"]
+    assert "start_prompt" not in w and "quiet" not in w["while"] and "until_from" not in w["while"]
+
+
 @pytest.mark.parametrize("loop, msg", [
     ({}, "loop needs prompt or prompt_file"),
     ({"prompt": "x", "every": "often"}, "bad duration"),
@@ -43,6 +62,11 @@ def test_loop_fields_and_the_while_alias_round_trip():
     ({"prompt": "x", "while": {"agent_usd": -1}}, ">= 0"),
     ({"prompt": "x", "while": {"agent_output_tokens": 0}}, ">= 1"),
     ({"prompt": "x", "while": {"rounds": 3}}, "Extra inputs"),
+    ({"prompt": "x", "while": {"quiet": "0s"}}, "quiet must be a duration > 0"),
+    ({"prompt": "x", "while": {"until_from": "first_turn"}}, "needs until as a duration"),
+    ({"prompt": "x", "while": {"until": "2026-10-28T20:00Z", "until_from": "first_turn"}},
+     "needs until as a duration"),
+    ({"prompt": "x", "while": {"until": "1h", "until_from": "queue"}}, "'launch' or 'first_turn'"),
     ({"prompt": "x", "final": {"reserve_usd": 1}}, "final needs prompt"),
     ({"prompt": "x", "final": {"prompt": "f", "reserve_usd": -1}}, ">= 0"),
     ({"prompt": "x", "while": {"agent_usd": {"glm": 2.1}}}, "no entry for model 'm'"),

@@ -576,7 +576,12 @@ class AgentRuntime:
     def start_loop(self, cmd: LoopStartCommand) -> None:
         """`loop_start`: send the loop prompt now if idle, then after every completed turn. A
         new run (a loop `start`) counts rounds from the command's; a repeat of the same
-        run keeps the higher count."""
+        run keeps the higher count. A `refresh` (new clock and deadline) only updates a loop of
+        its run that is still running: it never restarts one that ended, nor resets its errors."""
+        if cmd.refresh:
+            if self.loop is not None and self.loop.run == cmd.run:
+                self.loop = cmd
+            return
         self.loop = cmd
         if cmd.run is not None and cmd.run != self.state.loop_run:
             self.state.loop_run, self.state.loop_round = cmd.run, cmd.meta.round or 0
@@ -642,7 +647,9 @@ class AgentRuntime:
         if lp.deadline is not None and utcnow() >= lp.deadline:
             self._loop_end("deadline")
             return
-        await self.prompt(lp.text, loop=lp.meta.model_copy(update={"round": None, "why": why}))
+        # `loop.start_prompt`: the agent's first round of this run (again if that one was deferred)
+        text = lp.start_text if lp.start_text is not None and self.state.loop_round == 0 else lp.text
+        await self.prompt(text, loop=lp.meta.model_copy(update={"round": None, "why": why}))
 
     # ------------------------------------------------------------------ control
     @property

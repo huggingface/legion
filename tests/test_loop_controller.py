@@ -6,7 +6,8 @@ loop / final ordering, `every` as a duration and as turn_end (worker- and contro
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+import threading
+from datetime import datetime, timedelta
 
 import httpx
 import pytest
@@ -40,10 +41,12 @@ class Sim:
         await self.commands()  # drop the assigns
         return r
 
-    async def heartbeat(self, working: tuple[str, ...] = (), stuck: tuple[str, ...] = ()) -> None:
+    async def heartbeat(self, working: tuple[str, ...] = (), stuck: tuple[str, ...] = (),
+                        idle_since=None) -> None:
         agents = [AgentHeartbeat(name=n, state="working" if n in working else
                                  "stuck" if n in stuck else "idle",
                                  turn_id="t-1" if n in working else None,
+                                 idle_since=None if n in working else idle_since,
                                  tokens={PRICED: TokenUsage(output=self.cost[n])})
                   for n in (A0, A1)]
         r = await self.c.post(f"/workers/{W0}/heartbeat", json=hb_body(self.clock, W0, agents))
@@ -94,6 +97,10 @@ async def sim(store, clock, tick, priced):
 def board(kind: str, data: dict) -> tuple[str, dict]:
     """A message_board `resource` event, as the worker posts it."""
     return ("resource", {"resource": "message_board", "kind": kind, "data": data})
+
+
+def at(iso: str) -> datetime:
+    return datetime.fromisoformat(iso)
 
 
 def prompts(cmds: list[dict]) -> dict[str, dict]:
@@ -257,6 +264,354 @@ async def test_while_until_clock_time_stops_regardless_of_start(sim):
     sim.tick(31)
     fin = prompts(await sim.commands())
     assert fin[A0]["loop"]["why"] == "final: until"
+
+
+async def test_while_quiet_stops_once_every_agent_was_idle_that_long(sim):
+    await sim.apply({"prompt": "p", "every": "24h", "on": ["message_board.mention"],
+                     "wake": {"min_gap": "0s"}, "while": {"until": "1h", "quiet": "45s"},
+                     "final": {"prompt": "fin"}})
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    await sim.turn(A0, got[A0])
+    sim.tick(40)
+    await sim.heartbeat(working=(A1,))  # A1 still in its round-1 turn: not quiet
+    sim.tick(10)
+    assert (await sim.c.get("/swarms/demo/loop")).json()[0]["state"] == "running"
+    await sim.turn(A1, got[A1])
+    sim.tick(30)
+    assert sim.loops.wake(A0, "message_board.mention")  # a queued wake is not quiet either
+    sim.tick(3)
+    woke = prompts(await sim.commands())
+    assert list(woke) == [A0]
+    await sim.turn(A0, woke[A0])
+    await sim.heartbeat()
+    sim.tick()  # the first tick that sees everybody settled opens the window
+    sim.tick(44)
+    assert await sim.commands() == []
+    sim.tick(1)
+    fin = prompts(await sim.commands())
+    assert set(fin) == {A0, A1} and fin[A0]["loop"]["why"] == "final: quiet"
+    assert dict(sim.swarm_events())["loop_stopped"]["reason"] == "quiet"
+
+
+async def test_quiet_never_counts_time_spent_queued(sim):
+    # review #1: a worker queued for 10 min, then its first idle heartbeat: round 1, not final
+    await sim.apply({"prompt": "p", "every": "24h", "while": {"until": "1h", "quiet": "45s"},
+                     "final": {"prompt": "fin"}})
+    sim.tick()
+    sim.tick(600)
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    assert {p["loop"]["kind"] for p in got.values()} == {"loop"}
+    assert (await sim.c.get("/swarms/demo/loop")).json()[0]["state"] == "running"
+
+
+async def test_quiet_window_opens_when_the_idle_heartbeat_comes_not_at_the_old_activity(sim):
+    # review #1: a 10-min turn whose idle heartbeat arrives before its turn_ended batch
+    await sim.apply({"prompt": "p", "every": "24h", "while": {"until": "1h", "quiet": "45s"},
+                     "final": {"prompt": "fin"}})
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    await sim.events(A0, ("loop_prompt", {"kind": "loop", "round": 1, "why": "start"}),
+                     ("turn_started", {}))
+    await sim.events(A1, ("loop_prompt", {"kind": "loop", "round": 1, "why": "start"}),
+                     ("turn_started", {}))
+    for _ in range(20):
+        await sim.heartbeat(working=(A0, A1))
+        sim.tick(30)
+    await sim.heartbeat(idle_since=sim.clock())  # the turns' ends, not yet as events
+    sim.tick()
+    assert await sim.commands() == []
+    assert (await sim.c.get("/swarms/demo/loop")).json()[0]["state"] == "running"
+    for a in (A0, A1):
+        await sim.events(a, ("turn_ended", {"status": "completed", "tool_calls": 1}))
+    sim.tick(44)
+    assert await sim.commands() == []
+    await sim.heartbeat(idle_since=sim.clock() - timedelta(seconds=44))
+    sim.tick(1)
+    assert prompts(await sim.commands())[A0]["loop"]["why"] == "final: quiet"
+    assert got  # round 1 went out
+
+
+async def test_delayed_idle_heartbeat_does_not_hide_a_new_turn(sim):
+    await sim.apply({"prompt": "p", "every": "24h", "while": {"until": "1h", "quiet": "45s"},
+                     "final": {"prompt": "fin"}})
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    for agent in (A0, A1):
+        await sim.turn(agent, got[agent])
+    await sim.heartbeat(idle_since=sim.clock())
+    sim.tick()  # quiet window starts
+    sim.tick(44)
+    old_idle = hb_body(sim.clock, W0, [AgentHeartbeat(name=n, state="idle", idle_since=sim.clock())
+                                     for n in (A0, A1)])
+    assert (await sim.c.post(f"/agents/{A0}/prompt", json={"text": "hand"})).status_code == 200
+    assert A0 in prompts(await sim.commands())
+    sim.clock.advance(0.1)
+    await sim.events(A0, ("turn_started", {}))
+    await sim.heartbeat(working=(A0,))  # even a newer working report must retain the evidence
+    assert (await sim.c.post(f"/workers/{W0}/heartbeat", json=old_idle)).status_code == 200
+    sim.tick(0.9)
+    assert await sim.commands() == []
+    assert (await sim.c.get("/swarms/demo/loop")).json()[0]["state"] == "running"
+    await sim.events(A0, ("turn_ended", {"status": "completed"}))
+    await sim.heartbeat(idle_since=sim.clock())
+    sim.tick()
+    sim.tick(45)
+    assert prompts(await sim.commands())[A0]["loop"]["why"] == "final: quiet"
+
+
+async def test_a_pending_notice_keeps_the_loop_from_going_quiet(sim):
+    # review #2: a board notice not named in a round yet is pending work (here no `on:` wake)
+    await sim.apply({"prompt": "p", "every": "2m", "notices": True,
+                     "while": {"until": "1h", "quiet": "45s"}, "final": {"prompt": "fin"}})
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    for a in (A0, A1):
+        await sim.turn(a, got[a])
+    await sim.events(A0, board("mention", {"thread": 7, "msg_id": 70, "from": A1}))
+    sim.tick()
+    sim.tick(45)
+    await sim.heartbeat()
+    sim.tick(45)
+    assert await sim.commands() == []  # waits for the round that names it
+    sim.tick(30)
+    got = prompts(await sim.commands())
+    assert "mentioned you in thread 7" in got[A0]["text"]
+    for a in (A0, A1):
+        await sim.turn(a, got[a])
+    await sim.heartbeat()
+    sim.tick()
+    sim.tick(45)
+    assert prompts(await sim.commands())[A0]["loop"]["why"] == "final: quiet"
+
+
+async def test_a_wake_queued_for_an_agent_leaving_the_loop_does_not_block_quiet(sim):
+    # review #3: A0's queued wake dies with its loop (agent_output_tokens), quiet still comes
+    await sim.apply({"prompt": "p", "every": "24h", "on": ["message_board.mention"],
+                     "while": {"until": "1h", "quiet": "45s", "agent_output_tokens": 1000},
+                     "final": {"prompt": "fin"}})
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    await sim.events(A0, ("loop_prompt", {"kind": "loop", "round": 1, "why": "start"}),
+                     ("turn_started", {}))
+    assert sim.loops.wake(A0, "message_board.mention")  # queued while A0 works
+    await sim.turn(A1, got[A1])
+    sim.cost[A0] = 1000
+    await sim.events(A0, ("turn_ended", {"status": "completed", "tool_calls": 1}))
+    await sim.heartbeat()
+    sim.tick(3)
+    st = (await sim.c.get("/swarms/demo/loop")).json()[0]
+    assert st["per_agent"][A0]["done_reason"] == "agent_output_tokens"
+    assert await sim.commands() == []  # no wake prompt for an agent out of the loop
+    sim.tick(1)  # the next tick sees both settled (old code: A0's wake blocked it for good)
+    await sim.heartbeat()
+    sim.tick(44)
+    assert await sim.commands() == []
+    sim.tick(1)
+    assert prompts(await sim.commands())[A1]["loop"]["why"] == "final: quiet"
+
+
+async def test_quiet_waits_for_worker_loops_and_their_queued_loop_start(sim):
+    # review #4: `turn_end` on the workers: unfetched loop_starts and running loops are not quiet
+    await sim.apply({"prompt": "p", "while": {"until": "1h", "quiet": "5s"},
+                     "final": {"prompt": "fin"}})
+    await sim.heartbeat()
+    sim.tick()
+    sim.tick(10)  # the loop_starts are still in the queue
+    assert (await sim.c.get("/swarms/demo/loop")).json()[0]["state"] == "running"
+    assert [c["kind"] for c in await sim.commands()] == ["loop_start", "loop_start"]
+    sim.tick(10)  # fetched; the worker loops are running (between two turns, say)
+    assert (await sim.c.get("/swarms/demo/loop")).json()[0]["state"] == "running"
+
+
+async def test_first_turn_reaches_the_running_worker_loops(sim):
+    # review #5: loop_starts sent before the first turn carry no clock; the first turn re-sends
+    await sim.apply({"prompt": "r{round} {elapsed}",
+                     "while": {"until": "1h", "until_from": "first_turn"}})
+    sim.tick()
+    sim.tick(600)
+    await sim.heartbeat()
+    sim.tick()
+    cmds = await sim.commands()
+    assert [c["meta"]["started_at"] for c in cmds] == [None, None]
+    assert [c["deadline"] for c in cmds] == [None, None]
+    await sim.events(A0, ("loop_prompt", {"kind": "loop", "round": 1, "why": "start"}),
+                     ("turn_started", {}))
+    again = {c["agent"]: c for c in await sim.commands()}
+    assert set(again) == {A0, A1} and {c["run"] for c in again.values()} == {cmds[0]["run"]}
+    assert {at(c["meta"]["started_at"]) for c in again.values()} == {sim.clock()}
+    assert {at(c["deadline"]) for c in again.values()} == {sim.clock() + timedelta(hours=1)}
+
+
+async def test_a_turn_ending_between_ticks_restarts_the_quiet_window(sim):
+    # review #2 #1: a hand-prompted turn starts and ends between the T44 and T45 ticks; the
+    # T45 tick lands while its events are being ingested (after the idle state went public)
+    await sim.apply({"prompt": "p", "every": "24h", "while": {"until": "1h", "quiet": "45s"},
+                     "final": {"prompt": "fin"}})
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    for a in (A0, A1):
+        await sim.turn(a, got[a])
+    sim.tick()  # T0: everybody settled, the window opens
+    await sim.heartbeat()
+    sim.tick(44)
+    assert (await sim.c.post(f"/agents/{A0}/prompt", json={"text": "hand"})).status_code == 200
+    assert list(prompts(await sim.commands())) == [A0]
+    sim.clock.advance(1)
+    racers, real = [], sim.loops.on_events
+
+    def on_events(a, evs, spec=None):  # a spy on the real method: the T45 tick starts here
+        t = threading.Thread(target=sim.loops.tick)
+        t.start()
+        t.join(0.3)  # it must wait for the batch's bookkeeping, not run in between
+        racers.append(t)
+        return real(a, evs, spec)
+
+    sim.loops.on_events = on_events
+    try:
+        await sim.events(A0, ("turn_started", {}),
+                         ("turn_ended", {"status": "completed", "tool_calls": 1}))
+    finally:
+        sim.loops.on_events = real
+    for t in racers:
+        t.join()
+    assert await sim.commands() == []  # no final: the turn's end restarted the window
+    assert (await sim.c.get("/swarms/demo/loop")).json()[0]["state"] == "running"
+    await sim.heartbeat()
+    sim.tick(44)
+    assert await sim.commands() == []
+    sim.tick(1)
+    assert prompts(await sim.commands())[A0]["loop"]["why"] == "final: quiet"
+
+
+async def test_notices_of_an_agent_leaving_the_loop_do_not_block_quiet(sim):
+    # review #2 #6: with notices, A0's mention dies with its loop (agent_output_tokens)
+    await sim.apply({"prompt": "p", "every": "24h", "notices": True,
+                     "on": ["message_board.mention"],
+                     "while": {"until": "1h", "quiet": "45s", "agent_output_tokens": 1000},
+                     "final": {"prompt": "fin"}})
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    await sim.events(A0, ("loop_prompt", {"kind": "loop", "round": 1, "why": "start"}),
+                     ("turn_started", {}))
+    await sim.events(A0, board("mention", {"thread": 7, "msg_id": 70, "from": A1}))
+    await sim.turn(A1, got[A1])
+    sim.cost[A0] = 1000
+    await sim.events(A0, ("turn_ended", {"status": "completed", "tool_calls": 1}))
+    await sim.heartbeat()
+    sim.tick(3)
+    st = (await sim.c.get("/swarms/demo/loop")).json()[0]
+    assert st["per_agent"][A0]["done_reason"] == "agent_output_tokens"
+    assert await sim.commands() == []
+    sim.tick(1)
+    await sim.heartbeat()
+    sim.tick(44)
+    assert await sim.commands() == []
+    sim.tick(1)
+    assert prompts(await sim.commands())[A1]["loop"]["why"] == "final: quiet"
+
+
+async def test_first_turn_refresh_spares_a_worker_loop_that_ended_in_the_same_batch(sim):
+    # review #2 #7: A0's first batch comes late: round 1, three failed turns, loop_stopped
+    await sim.apply({"prompt": "p", "while": {"until": "1h", "until_from": "first_turn"}})
+    await sim.heartbeat()
+    sim.tick()
+    assert {c["agent"] for c in await sim.commands()} == {A0, A1}
+    fail = ("turn_ended", {"status": "error", "tool_calls": 0})
+    await sim.events(A0, ("loop_prompt", {"kind": "loop", "round": 1, "why": "start"}),
+                     ("turn_started", {}), fail, ("turn_started", {}), fail,
+                     ("turn_started", {}), fail,
+                     ("loop_stopped", {"reason": "errors", "round": 1, "active": True}))
+    again = await sim.commands()
+    assert [(c["kind"], c["agent"]) for c in again] == [("loop_start", A1)]  # not A0's
+    assert again[0]["refresh"] is True
+    st = (await sim.c.get("/swarms/demo/loop")).json()[0]
+    assert st["per_agent"][A0]["done_reason"] == "errors"
+
+
+async def test_quiet_waits_for_a_mode_change_stop_to_be_confirmed(sim):
+    # review #2 #8: turn_end on the workers, then every: 24h; the loop_stops are not confirmed
+    loop = {"prompt": "p", "while": {"until": "1h", "quiet": "5s"}, "final": {"prompt": "fin"}}
+    await sim.apply(loop)
+    await sim.heartbeat()
+    sim.tick()
+    assert [c["kind"] for c in await sim.commands()] == ["loop_start", "loop_start"]
+    for a in (A0, A1):  # round 1 on the workers' loops
+        await sim.events(a, ("loop_prompt", {"kind": "loop", "round": 1, "why": "start"}),
+                         ("turn_started", {}), ("turn_ended", {"status": "completed"}))
+    await sim.apply({**loop, "every": "24h"})
+    sim.tick()
+    for _ in range(3):
+        sim.tick(5)
+    st = (await sim.c.get("/swarms/demo/loop")).json()[0]
+    assert (st["mode"], st["state"]) == ("controller", "running")
+    assert [c["kind"] for c in await sim.commands()] == ["loop_stop", "loop_stop"]  # fetched now
+    for a in (A0, A1):
+        await sim.events(a, ("loop_stopped", {"reason": "mode_change", "round": 0, "active": True}))
+    await sim.heartbeat()
+    sim.tick()  # confirmed: the window opens now
+    sim.tick(4)
+    assert await sim.commands() == []
+    sim.tick(1)
+    assert prompts(await sim.commands())[A0]["loop"]["why"] == "final: quiet"
+
+
+async def test_until_from_first_turn_counts_from_the_first_turn(sim):
+    await sim.apply({"prompt": "p", "every": "10s",
+                     "while": {"until": "60s", "until_from": "first_turn"},
+                     "final": {"prompt": "fin"}})
+    sim.tick()  # the loop starts at launch
+    sim.tick(600)  # the worker is queued for 10 min: no heartbeat, no turn
+    st = (await sim.c.get("/swarms/demo/loop")).json()[0]
+    assert st["state"] == "running" and st["first_turn_at"] is None
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    assert got[A0]["loop"]["wall_s"] == 60
+    assert got[A0]["loop"]["started_at"] is None  # no first turn yet: {elapsed} is 0
+    await sim.turn(A1, got[A1])
+    await sim.turn(A0, got[A0])
+    first = (await sim.c.get("/swarms/demo/loop")).json()[0]["first_turn_at"]
+    assert at(first) == sim.clock()
+    ev = dict(sim.swarm_events())["loop_first_turn"]
+    assert ev == {"type": "researcher", "agent": A1, "after_s": 600.0}
+    sim.tick(59)
+    mid = prompts(await sim.commands())
+    assert {p["loop"]["kind"] for p in mid.values()} == {"loop"}
+    assert at(mid[A0]["loop"]["started_at"]) == at(first)
+    await sim.turn(A0, mid[A0])
+    await sim.turn(A1, mid[A1])
+    await sim.heartbeat()
+    sim.tick(1)
+    fin = prompts(await sim.commands())
+    assert fin[A0]["loop"]["why"] == "final: until"
+
+
+async def test_start_prompt_is_round_one(sim):
+    await sim.apply({"prompt": "again {round}", "start_prompt": "begin", "every": "5s"})
+    await sim.heartbeat()
+    sim.tick()
+    r1 = prompts(await sim.commands())
+    assert r1[A0]["text"] == "begin" and r1[A0]["loop"]["round"] == 1
+    await sim.turn(A0, r1[A0])
+    sim.tick(5)
+    got = prompts(await sim.commands())
+    assert got[A0]["text"] == "again {round}" and got[A0]["loop"]["round"] == 2
+    # worker-side (`turn_end`): the loop_start carries both; the worker picks by its round
+    await sim.apply({"prompt": "again {round}", "start_prompt": "begin"})
+    await sim.turn(A1, r1[A1])
+    sim.tick()
+    cmds = [c for c in await sim.commands() if c["kind"] == "loop_start"]
+    assert [(c["agent"], c["text"], c["start_text"]) for c in cmds] == [(A1, "again {round}", "begin")]
 
 
 async def test_agent_usd_takes_an_agent_out(sim):
