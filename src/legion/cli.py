@@ -18,6 +18,7 @@ from typer.core import TyperGroup
 from legion import ops, rundir
 from legion import status as legion_status
 from legion.client import Client, ClientError
+from legion.harbor.results import safe_error
 from legion.models import SwarmSpec
 from legion.ops import SpecError, check_spec, read_spec, source_header
 from legion.specrender import at_ref
@@ -50,7 +51,7 @@ def _main(ctx: typer.Context, run: str = typer.Option(
         help="Run every command against RUN_DIR (`legion init`): its cluster.env and run.env as "
              "the first --env files, its controller (hosts/controller.host) and token. Also LEGION_RUN_DIR, which "
              "an exported LEGION_URL beats; --run beats LEGION_URL.")) -> None:
-    _API[:] = [] if ctx.invoked_subcommand in ("init", "world") else [
+    _API[:] = [] if ctx.invoked_subcommand in ("init", "sweep", "world") else [
         Client.for_run(run, need_host=ctx.invoked_subcommand not in ("launch", "serve"))]
 
 
@@ -312,6 +313,33 @@ def launch(
             typer.echo(f"local run ended; bundle: {run['run_dir']}/run.json")
         _fail(e.lines)
     _show_launch(spec.swarm, done, strict)
+
+
+@app.command("sweep")
+def sweep(
+    matrix_file: Annotated[Path, typer.Argument(metavar="SWEEP_YAML")],
+    root: Annotated[Path | None, typer.Option(help="Directory for attempt receipts, runs and rows.jsonl.")] = None,
+    profile: Annotated[Path | None, typer.Option(help="Cluster profile for each run.")] = None,
+    secrets: Annotated[Path | None, typer.Option(help="Mode 600 secrets file for legion init.")] = None,
+    plan: Annotated[bool, typer.Option("--plan", help="Print cells and task pins without submitting.")] = False,
+) -> None:
+    """Run or resume a fixed matrix of Slurm experiments."""
+    # The sweep driver uses POSIX file locks. Other commands do not need them.
+    from legion import sweep as sweep_runner
+
+    if root is None and not plan:
+        raise typer.BadParameter("choose a sweep output directory", param_hint="--root")
+    try:
+        planned = sweep_runner.make_plan(matrix_file, profile=profile, secrets_file=secrets)
+        if plan:
+            typer.echo(json.dumps([cell.describe() for cell in planned.cells], indent=2))
+            return
+        rows = sweep_runner.execute(planned, root, profile=profile, secrets_file=secrets, say=typer.echo)
+    except (OSError, TypeError, ValueError) as error:
+        _fail([safe_error(error)])
+    typer.echo(f"summary: {root / 'rows.jsonl'}")
+    if any(row["status"] != "completed" for row in rows):
+        raise typer.Exit(1)
 
 
 def _show_launch(swarm: str, done: dict, strict: bool) -> None:

@@ -22,9 +22,11 @@ def safe_error(exc: BaseException, secrets=()):
         for key, value in os.environ.items()
         if len(value) >= 8 and any(name in key.upper() for name in ("TOKEN", "SECRET", "API_KEY"))
     }
+    values = env_secrets | {s for s in secrets if s}
+    redactions = values | {repr(s)[1:-1] for s in values} | {
+        json.dumps(s, ensure_ascii=False)[1:-1] for s in values
+    }
     message = str(exc)
-    for secret in sorted(
-        env_secrets | {s for s in secrets if s}, key=len, reverse=True
-    ):
+    for secret in sorted(redactions, key=len, reverse=True):
         message = message.replace(secret, "[redacted]")
     return f"{type(exc).__name__}: {message}"[:2000]

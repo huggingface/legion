@@ -86,11 +86,15 @@ while [ $# -gt 0 ]; do
     *) break;;
   esac
 done
-case ${{1:-}} in info) echo "$root";; unshare) shift; "$@";; esac
+case ${{1:-}} in
+  info) [ -d "$HOME" ] && [ -d "${{TMPDIR:-/tmp}}" ] && echo "$root";;
+  unshare) shift; "$@";;
+esac
 """
 
 
-def test_harbor_worker_runs_on_the_node_with_the_jobs_own_podman(tmp_path):
+@pytest.mark.parametrize("controller_home_exists", [True, False])
+def test_harbor_worker_runs_on_the_node_with_the_jobs_own_podman(tmp_path, controller_home_exists):
     """LEGION_HARNESS=harbor: no container even with an image set; legion-worker runs here with
     the upstream podman setup (this job's storage, podman-compose, health checks), gets its
     secrets in the file only (and the health checks none), git gets the HF token for
@@ -109,6 +113,7 @@ def test_harbor_worker_runs_on_the_node_with_the_jobs_own_podman(tmp_path):
 for _ in $(seq 100); do [ -s {health} ] && break; sleep 0.05; done  # the health checks started
 {{ echo "compose=$PODMAN_COMPOSE_PROVIDER podman=$(command -v podman) env_token=${{HF_TOKEN:-none}}"
   echo "xdg=$XDG_RUNTIME_DIR git_prompt=$GIT_TERMINAL_PROMPT"
+  echo "home=$HOME tmp=${{TMPDIR:-unset}}"
   podman info --format '{{{{.Store.GraphRoot}}}}'; cat "$LEGION_WORKER_SECRETS_FILE"
   printf 'protocol=https\\nhost=huggingface.co\\n\\n' | git credential fill | grep password=
   env | grep -c hf_tok; }} > {log}
@@ -118,14 +123,19 @@ exit 75""", env_extra="LEGION_HARNESS=harbor\n", cluster_extra=f"CONTAINER_IMAGE
     (venv / "bin" / "podman-compose").chmod(0o755)
     (venv / "bin" / "python").write_text(
         f'#!/bin/bash\necho "$* hf=${{HF_TOKEN:-none}} legion=${{LEGION_TOKEN:-none}}" > {health}\n')
+    inherited = tmp_path if controller_home_exists else tmp_path / "controller-node-only"
     r = subprocess.run(["bash", str(script), str(env_file)],
-                       env={"PATH": f"{stubs}:{os.environ['PATH']}", "HOME": str(tmp_path)},
+                       env={"PATH": f"{stubs}:{os.environ['PATH']}", "HOME": str(inherited),
+                            "TMPDIR": str(inherited)},
                        capture_output=True, text=True, timeout=30, check=False)
     assert r.returncode == 75, r.stdout + r.stderr  # legion-worker's exit code, through the wait
-    compose, xdg, graphroot, *secrets, password, in_env = log.read_text().splitlines()
+    compose, xdg, home, graphroot, *secrets, password, in_env = log.read_text().splitlines()
     local = Path(graphroot).parent
     try:
         assert (local / "hf-token").stat().st_mode & 0o777 == 0o600
+        expected = (f"home={tmp_path} tmp={tmp_path}" if controller_home_exists
+                    else f"home={local}/home tmp=unset")
+        assert home == expected
     finally:
         shutil.rmtree(local)  # the job's /tmp takes it on the cluster
     assert (password, in_env) == ("password=hf_tok", "0")

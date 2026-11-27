@@ -1,0 +1,41 @@
+# Two cells from the s³ aggregation grid on Slurm, using a shared vLLM endpoint.
+spec: spec.yaml
+max_runs: 2
+max_agents: 3
+infrastructure_retries: 1
+run_timeout: 1h
+overrides:
+  compute:
+    kind: slurm
+    partition: ${SLURM_PARTITION}
+    cpus: ${WORKER_CPUS:-4}
+    mem: ${WORKER_MEM:-8G}
+  bucket_id: ${BUCKET_ID}
+  model: ${MODEL:-Qwen/Qwen3.5-2B}
+  inference:
+    hf_router: null
+    api_key_env: null
+    urls:
+      - ${VLLM_URL}
+  resources:
+    message_board:
+      space_id: null
+      private: null
+  environment:
+    backend: podman
+matrix:
+  team:
+    p01-n01:
+      task:
+        selector: [agg-p01-n01-s01]
+      agents:
+        count: 1
+      workers:
+        agents_per_worker: 1
+    p01-n02:
+      task:
+        selector: [agg-p01-n02-s01, agg-p01-n02-s02]
+      agents:
+        count: 2
+      workers:
+        agents_per_worker: 2
