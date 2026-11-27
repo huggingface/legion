@@ -34,12 +34,12 @@ workers:
     CI_PRIVATE_READOUT_BASE_URL: http://model-compat:8003/v1
     CI_PRIVATE_READOUT_EFFORT: ${EFFORT:-low}
     # What the team service records about the evaluated agent. The private final-answer call
-    # checks its model and reasoning effort; runner `legion-launch` scores the verifier results
-    # without the upstream launcher's run.json
+    # checks its model and reasoning effort. parity.py validates and records the gateway options.
     CI_AGENT_CONFIGURATION: '{"scaffold": "pi", "runner": "legion-launch", "version": "1.5.0",
       "model": "${MODEL:-gemini-3.8-flash}", "endpoint": "${GATEWAY_URL:-http://model-compat:8003/v1}",
       "parameters": {"api_format": "${API_FORMAT:-openai_chat_completions}",
-      "reasoning_effort": "${EFFORT:-low}", "max_turns": 256}}'
+      "reasoning_effort": "${EFFORT:-low}", "max_turns": 256},
+      "model_gateway": ${CIB_GATEWAY_CONFIGURATION:-null}}'
 loop:
   prompt: ""  # turn 1 is the task's instruction alone, as the upstream launcher sends it
   every: turn_end

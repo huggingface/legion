@@ -12,11 +12,7 @@ runs the other teammates, the judges and a model gateway (`model-compat`) in its
 - Linux, rootless Podman 4+ (the spec's default backend), Python 3.12+, uv, Git and Git LFS.
   With dockerd, set `BACKEND=docker`.
 - Read access to the private dataset through Git: `hf auth login --add-to-git-credential`.
-- Podman needs Harbor's `--no-TTY` rewritten for podman-compose and a Docker Hub mirror. Until
-  [huggingface/legion#153](https://github.com/huggingface/legion/pull/153) lands, follow the
-  dataset's [Podman setup](https://huggingface.co/datasets/HuggingFaceSwarms/collaborative-intelligence-benchmark/blob/main/adapter/README.md#podman)
-  (the shim, `CONTAINERS_REGISTRIES_CONF` and, on an HF cluster CPU node,
-  `scripts/slurm/podman-node.sh`).
+- On an HF cluster CPU node, use Legion’s [Podman setup](../../docs/slurm.md).
 - Inference is paid, including the partner and judge calls of team episodes.
 
 Credentials stay in the shell that runs `legion launch`; local workers inherit it and compose
@@ -33,7 +29,8 @@ passes them to the task's services. The spec only names them.
 ## Run one case
 
 ```sh
-export GEMINI_API_KEY=... CI_PRIVATE_READOUT_API_KEY=$GEMINI_API_KEY   # plus the team's keys
+export GEMINI_API_KEY=...   # plus the team's keys
+export CI_PRIVATE_READOUT_API_KEY="$GEMINI_API_KEY"
 uv run legion launch experiments/cib/spec.yaml
 uv run legion status cib
 ```
@@ -42,7 +39,8 @@ uv run legion status cib
 agent once, ends after that turn and grades it: the verifier's result is
 `.legion/<run>/agents/_harbor/agent-001/trials/*/verifier/result.json`. The model's endpoint,
 `http://model-compat:8003`, exists only inside the Trial, so the spec sets
-`inference.preflight: false` (no controller check or preflight, docs/open-models.md).
+`inference.preflight: false` and the controller reports its probe as unverified. Use the case
+driver below to score a single run against its Legion host and Harbor Trial evidence.
 
 ## Other models
 
@@ -63,7 +61,8 @@ Set the variables for one command, as the spec reads them:
 
 The benchmark runs each scenario's solo first; a passing solo unlocks three team seeds, and the
 dataset's scorer aggregates them. Until `legion sweep` exists, `parity.py` runs one dimension
-that way, one `legion launch` per case in its own folder, and prints the scorer's command. It
+that way, one `legion launch` per case in its own folder, and writes `scores.json` with the
+pinned dataset's scorer. It
 needs a clone of the dataset at the spec's revision and supports Sharing (`manifest.json`); the
 other dimensions use aliases and reader grading, which the
 [dataset's sweep](https://huggingface.co/datasets/HuggingFaceSwarms/collaborative-intelligence-benchmark#run)
@@ -72,8 +71,14 @@ still handles.
 ```sh
 git clone https://huggingface.co/datasets/HuggingFaceSwarms/collaborative-intelligence-benchmark ../cib-harbor
 git -C ../cib-harbor checkout 2404577cc0b03402a86b7195ac62500664f3a75e
-uv run python experiments/cib/parity.py --dataset ../cib-harbor --manifest manifest.json \
+git -C ../cib-harbor lfs pull
+uv run --with ../cib-harbor/adapter python experiments/cib/parity.py --dataset ../cib-harbor \
   --output results/cib/sharing --concurrency 2
 ```
 
-Running it again resumes: graded cases are kept and the others are run again.
+Add `--case <task-id>` to run and score just one case with incomplete coverage allowed.
+Running the same configuration again reuses admitted cases and waits for live local controllers.
+Unavailable attempts are retained when the driver starts a retry. Use a fresh output directory
+for a new model, gateway configuration or manifest. If a sparse dataset checkout leaves Git LFS
+pointer files in place of task archives, include the root `.gitattributes` and fetch the archives
+before launching.
