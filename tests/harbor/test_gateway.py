@@ -11,6 +11,7 @@ import socket
 import subprocess
 import sys
 import threading
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import httpx
@@ -20,13 +21,15 @@ from harbor.models.trial.config import AgentConfig
 
 from legion.harbor import env as env_world
 from legion.harbor.tools.runner import load_module
+from legion.models import TokenUsage
 
 from ..worker_fakes import until
 from . import test_world
 from .test_world import SECRET, TOOLS_DIR, WorldResource, world_tools
 
 served = test_world.served  # the fixture: a legion.world server
-Gateway = load_module(TOOLS_DIR.parent / "resources" / "gateway.py").Resource
+gateway_module = load_module(TOOLS_DIR.parent / "resources" / "gateway.py")
+Gateway = gateway_module.Resource
 KEY = "hf_real-inference-key"
 MODEL = "moonshotai/Kimi-K2.5:deepinfra"
 USAGE = {"prompt_tokens": 1500, "completion_tokens": 100,
@@ -293,6 +296,12 @@ async def test_inference_streams_through_with_the_key_and_counts_each_call_once(
         assert (await gw.export(tmp_path)) == {"usage": "usage.json"}
         assert json.loads((tmp_path / "usage.json").read_text())["agent-001"]["calls"] == 3
         assert not [a for a in answers if KEY.encode() in a] and KEY not in caplog.text
+        # the agent hung up after the usage line, before [DONE]: answered, not broken off
+        done = SimpleNamespace(status_code=200, headers={}, aclose=lambda: asyncio.sleep(0))
+        relay, gw.inflight["agent-001"] = gateway_module.Relay(gw, "agent-001", done, True, 0.0), 1
+        relay.last = TokenUsage(input=1)
+        await relay.close()
+        assert "agent-001 /inference/chat/completions: 200, 1 in, 0 out" in caplog.text
     finally:
         watching.cancel()
         await gw.stop()

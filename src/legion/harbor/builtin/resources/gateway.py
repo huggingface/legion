@@ -298,7 +298,9 @@ class Resource:
 class Relay(StreamingResponse):
     """An upstream answer, sent on as it arrives. Its usage is counted before the body ends (the
     agent's turn may end on it). `close` (the app's, always) ends the upstream call too, so a
-    client that goes away stops the generation; its usage is then unknown."""
+    client that goes away stops the generation; its usage is then unknown. A stream whose usage
+    arrived was answered in full (usage comes on its last chunk): a client that hangs up after
+    it, before `[DONE]`, is not a broken-off call."""
 
     def __init__(self, gateway, name, response, stream, started):
         self.gateway, self.name, self.r, self.stream, self.started = (
@@ -327,7 +329,8 @@ class Relay(StreamingResponse):
             return
         self.closed = True
         self.gateway.inflight[self.name] -= 1
-        self.gateway._count(self.name, self.last, self.status_code if self.done else "broken off",
+        answered = self.done or (self.stream and self.last is not None)
+        self.gateway._count(self.name, self.last, self.status_code if answered else "broken off",
                             self.started)
         await self.r.aclose()
 
