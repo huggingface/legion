@@ -41,6 +41,7 @@ def test_loop_fields_and_the_while_alias_round_trip():
     ({"prompt": "x", "while": {"max_rounds": 0}}, ">= 1"),
     ({"prompt": "x", "while": {"until": "soon"}}, "bad until"),
     ({"prompt": "x", "while": {"agent_usd": -1}}, ">= 0"),
+    ({"prompt": "x", "while": {"agent_output_tokens": 0}}, ">= 1"),
     ({"prompt": "x", "while": {"rounds": 3}}, "Extra inputs"),
     ({"prompt": "x", "final": {"reserve_usd": 1}}, "final needs prompt"),
     ({"prompt": "x", "final": {"prompt": "f", "reserve_usd": -1}}, ">= 0"),

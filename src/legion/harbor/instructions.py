@@ -65,7 +65,7 @@ def build_agent_instructions(
     )
     for name, definition in manifest["tools"].items():
         parameters = definition["parameters"]
-        arguments = {
+        arguments = definition.get("example") or {
             key: _example_value(parameters["properties"][key])
             for key in parameters["required"]
         }
