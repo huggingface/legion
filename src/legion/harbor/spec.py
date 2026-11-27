@@ -38,6 +38,7 @@ from legion.models import (
     max_workers,
     parse_duration,
 )
+from legion.registry import load
 from legion.world.protocol import ADMIN_TOKEN_ENV
 
 from .config import (
@@ -380,18 +381,30 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
                              "sandboxes; the router's default key) and would reach every "
                              "agent's container: name an inference-only token, e.g. "
                              "HF_INFERENCE_TOKEN")
+    own = {}  # each role's compiled block: its own (or the run's) with api_format resolved
     for name, role in roles.items():  # here, not in Spec: a worker's config has no inference
-        harness = HARNESSES[spec.harness_of(role)]
+        kind, harness = spec.harness_of(role), HARNESSES[spec.harness_of(role)]
         inference = role.inference or spec.inference
+        where = f"agents.roles.{name}.inference" if role.inference else "inference"
         if harness.host and not (inference.urls and all(
                 urlsplit(u).hostname == harness.host for u in inference.urls)):
-            raise ValueError(f"agents.roles.{name}: harness {spec.harness_of(role)} runs only "
-                             f"models at https://{harness.host}: set the role's inference.urls "
-                             f"to [https://{harness.host}/v1] and its api_key_env")
+            raise ValueError(f"agents.roles.{name}: harness {kind} runs only models at "
+                             f"https://{harness.host}: set the role's inference.urls to it and "
+                             "its api_key_env")
         if harness.host and not inference.api_key_env:
-            raise ValueError(f"agents.roles.{name}.inference.api_key_env: name the secret "
-                             f"holding the role's {harness.key} (its agents get it under "
-                             "that name)")
+            raise ValueError(f"{where}.api_key_env: name the secret holding the role's "
+                             f"{harness.key} (its agents get it under that name)")
+        api = inference.api_format
+        if kind != "pi":  # Pi: the block's, as written
+            # the APIs Harbor's agent class speaks; unset with only one of them: that one
+            speaks = [f.value for f in load(harness.agent).MODEL_CONNECTION.supported_api_formats]
+            if "api_format" not in inference.model_fields_set and len(speaks) == 1:
+                api = speaks[0]
+            elif api not in speaks:
+                raise ValueError(f"{where}.api_format: harness {kind} speaks "
+                                 f"{', '.join(speaks)}, not {api}")
+        own[name] = (inference.model_copy(update={"api_format": api})
+                     if api != inference.api_format else role.inference)
     board = spec.resources.get("message_board") or {}
     if any(remote.values()) and board.get("space_id") and board.get("private") is not False:
         raise ValueError("resources.message_board.private: set it to false: a private Space's "
@@ -458,7 +471,7 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
             **packing,
             "harness": "harbor",
             "model": model,
-            "inference": lifetime(role.inference),
+            "inference": lifetime(own[name]),
             "pricing": prices.get(model) or prices["*"],
             "name_prefix": role.name_prefix,
             "replicas": 0 if ramp else role.count,  # the ramp raises them

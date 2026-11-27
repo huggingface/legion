@@ -9,20 +9,23 @@ one board.
 Set `harness` at the top level for every role, or in every role of `agents.roles`, never both
 (the same rule as `agents.count` and `agents.roles`). A spec without `harness` runs Pi.
 
-| `harness` | Models | Wire API | The agent's key |
+| `harness` | Models | `inference.api_format` | The agent's key |
 | --- | --- | --- | --- |
-| `pi` | any `inference` block (HF router, your servers, `hf_jobs`) | Chat Completions | `api_key_env`, as today |
-| `codex` | OpenAI's, at `https://api.openai.com/v1` | Responses | `OPENAI_API_KEY` |
-| `claude-code` | Anthropic's, at `https://api.anthropic.com/v1` | Anthropic Messages | `ANTHROPIC_API_KEY` |
+| `pi` | any `inference` block (HF router, your servers, `hf_jobs`) | the block's, as written | `api_key_env`, as today |
+| `codex` | OpenAI's, at `https://api.openai.com/v1` | `openai_responses` | `OPENAI_API_KEY` |
+| `claude-code` | Anthropic's, at `https://api.anthropic.com` | `anthropic_messages` | `ANTHROPIC_API_KEY` |
+
+A Codex or Claude Code role may leave `api_format` out: launch takes the one API Harbor's agent
+class for that harness speaks. A value it does not speak is refused at launch.
 
 Other combinations are refused at launch. A Codex or Claude Code role needs its own
 `inference` block with that URL and an `api_key_env`: the secret's name on your machine (and
 the controller's). Its agents get the value under the harness's own name, and only that key:
 no other role's key and no Hub token. Settings in the worker's own environment (a local worker
 has your shell's) never change that: a Claude or Codex login, `CODEX_API_KEY`, Bedrock mode or
-a `*_BASE_URL` are masked, and the URL is always the role's. Neither provider's model list
-gives the context window legion reads, so set `context_window`. The model must be listed by
-the provider's `GET /v1/models` under that id.
+a `*_BASE_URL` are masked, and the URL is always the role's. Anthropic URLs leave out `/v1`
+([model endpoints](open-models.md)). Neither provider's model list gives the context window
+legion reads, so set `context_window`.
 
 ```yaml
 model: moonshotai/Kimi-K2.5
@@ -35,7 +38,7 @@ agents:
       model: claude-sonnet-5-5
       pricing: [2, 10, 0.1]
       inference:
-        urls: [https://api.anthropic.com/v1]
+        urls: [https://api.anthropic.com]
         api_key_env: ANTHROPIC_API_KEY
         context_window: 1000000
     implementer:
@@ -58,8 +61,8 @@ agents:
 - The controller refuses the apply when a Codex or Claude Code role's key is not set on it.
   The error names the secret, never its value. A Pi role keeps its behaviour (a warning, and
   preflight reports it unverified).
-- Preflight probes each role in its harness's API: Chat Completions for Pi, Responses for
-  Codex, Anthropic Messages for Claude Code ([preflight](open-models.md#preflight)).
+- Preflight probes each role on its block's `api_format`, resolved as above
+  ([preflight](open-models.md#preflight)).
 
 ## How turns run
 

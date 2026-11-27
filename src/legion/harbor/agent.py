@@ -196,6 +196,10 @@ class TurnServer:
         normally by its own account: then a non-zero exit is no error) of one call's output."""
         raise NotImplementedError
 
+    def capped(self, path):
+        """The call stopped at limits.agent_max_turns (its turn ends with reason max_turns)."""
+        return False
+
     async def run(self, instruction, environment, context):
         # resume() sets this private flag around run(); that call is one --continue turn.
         if self._resume:
@@ -221,7 +225,9 @@ class TurnServer:
                 prompt = await self._next_prompt(environment, deadline)
                 if prompt is None:
                     return
-                text = f"{instruction}\n\n{prompt}" if fresh else prompt
+                # an empty first prompt (`loop.prompt: ""`): the task's instruction alone, as
+                # the upstream launcher sends it
+                text = (f"{instruction}\n\n{prompt}" if prompt else instruction) if fresh else prompt
                 ended, used, model_error = await self._turn(text, fresh, environment, totals)
                 transient = ended.data.get("reason") == "model_transport"
                 # the model's own error (a 500) says nothing about the restored sessions
@@ -284,11 +290,14 @@ class TurnServer:
         output = self.logs_dir / self.OUTPUT
         with suppress(OSError):
             output.unlink()  # a turn that never ran must not recount the last one
-        # shortcut: on hf-sandbox a turn that fails before Pi starts recounts the remote pi.txt
-        # of the turn before (overcounts spend, the safe side); delete it remotely if it matters.
         error = None
+        cleared = environment.is_path_mounted(self.environment_logs_dir, self.logs_dir)
         try:
             try:
+                if not cleared:
+                    remote = (self.environment_logs_dir / self._OUTPUT_FILENAME).as_posix()
+                    await self.exec_as_agent(environment, f"rm -f {shlex.quote(remote)}")
+                    cleared = True
                 if first:
                     await super().run(text, environment, AgentContext())
                 else:
@@ -297,11 +306,13 @@ class TurnServer:
                 error = safe_error(exc)  # Harbor's: the command (with the prompt), then output
                 error = error if len(error) <= 500 else f"{error[:60]} ... {error[-400:]}"
             try:
-                await self._pull(environment, output)
+                if cleared:
+                    await self._pull(environment, output)
             except Exception as exc:
                 ch.emit(AdapterEvent("error", error=f"session sync: {safe_error(exc)[:300]}"))
             messages, usage, own_error, ended_well = self.read_turn(output)
             error = own_error or (None if ended_well else error)  # the harness's own words first
+            capped = self.capped(output)
             for message in messages:
                 ch.emit(AdapterEvent("message", message=message))
             if usage != TokenUsage():
@@ -316,7 +327,7 @@ class TurnServer:
                 transient = own_error and transient_error(own_error)
                 data = {"reason": "model_transport"} if transient else {}
             else:
-                status, data = "completed", {}
+                status, data = "completed", {"reason": "max_turns"} if capped else {}
             ended = AdapterEvent("turn_ended", status=status, data=data,
                                  error=error if status == "error" else None)
             ch.emit(ended)
@@ -404,6 +415,11 @@ class LegionPi(TurnServer, Pi):
 
     def read_turn(self, path):
         return *read_turn(path), terminal_pi_error(path, self.channel.max_turns), False
+
+    def capped(self, path):
+        max_turns = self.channel.max_turns
+        return (max_turns is not None and terminal_pi_error(path, max_turns) is None
+                and terminal_pi_error(path) == "This operation was aborted")
 
     def _build_custom_models_json(self, access, model_id):
         """Harbor's models.json with the channel's endpoint: its base URL, the model's

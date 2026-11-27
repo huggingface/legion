@@ -7,7 +7,7 @@ inference:
   api_key_env: HF_INFERENCE_TOKEN
   reasoning_effort: low
 task:
-  repo: https://huggingface.co/datasets/HuggingFaceSwarms/programbench-staging
+  repo: https://huggingface.co/datasets/HuggingFaceSwarms/ProgramBench
   revision: 71a3477240b19b966da44873be69e15364e50481
   selector: wfxr--csview.8ac4de0
 team_file: prompts/team.md

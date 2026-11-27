@@ -128,6 +128,8 @@ class FakeEnv:
             for gate in f.gates.values():
                 gate.set()
             return ExecResult(return_code=0)
+        if "rm -f /logs/agent/pi.txt" in command:
+            self._remote("/logs/agent/pi.txt").unlink(missing_ok=True)
         if "CODEX_RUNTIME_ID" in command:  # Codex asks the agent's uid and gid
             return ExecResult(return_code=0, stdout="CODEX_RUNTIME_ID 0 0\n")
         harness = next((h for h, call in NATIVE.items() if call in command), None)
@@ -155,6 +157,8 @@ class FakeEnv:
             "content": [{"type": "text", "text": f"reply-{n}"}],
             "usage": {"input": 1000, "cacheRead": 500, "output": 100},
         }
+        if failure == "max_turns":
+            message.update(content=[], errorMessage="This operation was aborted", usage={})
         if failure == "provider":
             message.update(content=[], errorMessage="429 Too Many Requests")
         if failure == "server":  # a 500 before any token
@@ -162,7 +166,8 @@ class FakeEnv:
         if failure == "rejected":  # the model refuses the request (e.g. the history)
             message.update(content=[], errorMessage="400 Bad Request", usage={})
         (self.logs_dir / "pi.txt").write_text(
-            json.dumps({"type": "message_end", "message": message}) + "\n"
+            (json.dumps({"type": "turn_end"}) + "\n" if failure == "max_turns" else "")
+            + json.dumps({"type": "message_end", "message": message}) + "\n"
         )
         sessions = self.logs_dir / "pi" / "sessions"
         sessions.mkdir(parents=True, exist_ok=True)
@@ -365,10 +370,10 @@ async def test_one_trial_across_bursts(fakes, tmp_path):
 def native_spec(harness):
     """pi-hf.yaml's agents on Codex or Claude Code, at their provider's API."""
     spec = Spec.load(EXAMPLES / "pi-hf.yaml", env={})
-    host, key = {"codex": ("api.openai.com", "OPENAI_ROLE_KEY"),
-                 "claude-code": ("api.anthropic.com", "ANTHROPIC_ROLE_KEY")}[harness]
+    url, key = {"codex": ("https://api.openai.com/v1", "OPENAI_ROLE_KEY"),
+                "claude-code": ("https://api.anthropic.com", "ANTHROPIC_ROLE_KEY")}[harness]
     spec.harness, spec.model = harness, "native-model"
-    spec.inference = Inference(urls=[f"https://{host}/v1"], api_key_env=key)
+    spec.inference = Inference(urls=[url], api_key_env=key)  # api_format: Harbor's
     return compile_spec(spec, TASK).types["agent"]
 
 
@@ -436,6 +441,16 @@ async def test_codex_and_claude_code_turns_resume_their_sessions(
     assert resume in fakes.pi[2] and "TASK" not in fakes.prompts[2] and "Third." in fakes.prompts[2]
     assert len(path.read_text().splitlines()) == 3
     await b.close()
+
+
+async def test_an_empty_first_prompt_sends_the_instruction_alone(fakes, tmp_path):
+    a = adapter(tmp_path)
+    sid, events = await start(a)
+    await a.send("")
+    assert (await read(events, "turn_ended"))[-1].status == "completed"
+    (session,) = a.session_files(sid)
+    prompt = json.loads(session.read_text().splitlines()[0])["prompt"]
+    assert prompt == "TASK\n\n" + fakes.trials[0].config.extra_instructions[0]  # nothing after it
 
 
 def pi_models(fakes, n=0):
@@ -1226,3 +1241,37 @@ async def test_success_at_trial_expiry_is_retained_until_release(
         assert any(p.name == "result.json" for p in a.artifact_files())
     finally:
         await a.close(0)
+
+
+async def test_close_preserves_verifier_without_success_check(fakes, tmp_path):
+    a = adapter(tmp_path)
+    _, events = await start(a)
+    await a.send("a")
+    await read(events, "turn_ended")
+    await a.close()
+    saved = a.home / "results" / a.trial.config.trial_name / "result.json"
+    assert json.loads(saved.read_text())["verifier_result"]["rewards"] == {"reward": 1.0}
+
+
+async def test_unmounted_failed_turn_does_not_replay_previous_output(fakes, tmp_path):
+    fakes.mounted = False
+    a = adapter(tmp_path)
+    _, events = await start(a)
+    await a.send("first")
+    await read(events, "turn_ended")
+    fakes.fail = lambda n: "exit" if n == 2 else None
+    await a.send("second")
+    second = await read(events, "turn_ended")
+    assert not any(e.kind in ("message", "usage") for e in second)
+    await a.close()
+
+
+async def test_turn_cap_is_reported_as_max_turns(fakes, tmp_path):
+    a = adapter(tmp_path)
+    a.spec.harbor.config["limits"]["agent_max_turns"] = 1
+    fakes.fail = lambda n: "max_turns"
+    _, events = await start(a)
+    await a.send("first")
+    ended = [e for e in await read(events, "turn_ended") if e.kind == "turn_ended"]
+    assert ended[0].status == "completed" and ended[0].data["reason"] == "max_turns"
+    await a.close()

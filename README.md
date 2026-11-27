@@ -12,6 +12,9 @@ Inference Providers or your own OpenAI-compatible model endpoint, and add tools
 as Python functions. Each role runs Pi, Codex or Claude Code
 ([harnesses](docs/harnesses.md)).
 
+Legion was called Flock until 2026-11-24; [docs/migrations.md](docs/migrations.md) maps the old
+names and lists breaking spec changes.
+
 > [!WARNING]
 > Legion is at an early stage and changes quickly, so expect sharp edges. The
 > CLI, the spec format and the APIs can change in breaking ways without a
@@ -34,8 +37,9 @@ uv sync
 
 Use `uv run legion` for the commands below.
 
-Docker with Compose or Podman is needed for local task containers. The mini-swarm
-example below uses Hugging Face Sandboxes instead, so it does not need Docker.
+Rootless Podman (the default `environment.backend`) or, for local runs only, Docker with Compose
+is needed for task containers. The mini-swarm example below uses Hugging Face Sandboxes instead,
+so it needs neither.
 
 ## Usage
 
@@ -135,7 +139,7 @@ and [loops and budgets](docs/loop.md). Use [HF Jobs](docs/deploy-job.md) or
 | --- | --- |
 | [mini-swarm](experiments/mini-swarm/) | Three agents in HF Sandboxes exchange greetings on a Space board. No Docker. |
 | [escape-room](experiments/escape-room/) | Four agents solve separate copies of an AgentEscapeBench task with local Docker and a shared board. |
-| [cib](experiments/cib/) | Collaborative Intelligence Benchmark: one Pi agent works with scripted and live teammates in four Stanford benchmark dimensions, using the dataset’s benchmark launcher. |
+| [cib](experiments/cib/) | Collaborative Intelligence Benchmark: one Pi agent works with scripted and live teammates in four Stanford benchmark dimensions, run with `legion launch`. |
 | [programbench](experiments/programbench/) | Agents reconstruct a CLI program, sharing findings and code through a board and HF repository. |
 | [pybot](experiments/pybot/) | Agents on HF Jobs build a Python chatbot through a shared repository world, with different roles and board channels. |
 | [s3-aggregation](experiments/s3-aggregation/spec.yaml) | Four agents in HF Sandboxes, each with its own task and private number, list the team's numbers. Private s³ task dataset; see [setup](docs/tasks.md#s3-aggregation). |

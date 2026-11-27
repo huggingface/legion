@@ -239,6 +239,10 @@ class HFJobs(BaseModel):
         return v
 
 
+# Pi's wire APIs (Harbor's ModelApiFormat), as `inference.api_format` names them
+ApiFormat = Literal["openai_chat_completions", "openai_responses", "anthropic_messages"]
+
+
 class Inference(BaseModel):
     """Where a model runs (design.md 'Inference'): the HF router (`hf_router`, the default),
     OpenAI-compatible servers you run (`urls`) or vLLM servers legion starts on HF Jobs
@@ -267,6 +271,12 @@ class Inference(BaseModel):
     metrics: bool = False
     # Pi's `--thinking` level; None: Pi's default
     reasoning_effort: Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"] | None = None
+    # The wire API Pi speaks to the endpoints, which the model check and preflight use too.
+    # anthropic_messages: each URL is the base without `/v1` (Pi calls `<url>/v1/messages`).
+    api_format: ApiFormat = "openai_chat_completions"
+    # False: the controller never calls the endpoints (no model check, no preflight), for
+    # endpoints that exist only inside the Trial, such as a task's own model gateway
+    preflight: bool = True
 
     @field_validator("urls", mode="before")
     @classmethod
@@ -312,8 +322,13 @@ class Inference(BaseModel):
             raise ValueError(f"set one of hf_router, urls or hf_jobs, not {' and '.join(given)}")
         if not given:
             self.hf_router = HFRouter()
+        if self.hf_router is not None and self.api_format != "openai_chat_completions":
+            raise ValueError("hf_router requires api_format: openai_chat_completions")
         if self.metrics and self.urls is None:
             raise ValueError("metrics scrapes your servers' vLLM metrics: it needs urls")
+        if self.metrics and not self.preflight:
+            raise ValueError("metrics is scraped by the controller, which preflight: false "
+                             "keeps off these endpoints")
         return self
 
     def held(self) -> Inference:
@@ -1493,7 +1508,8 @@ _LOOP_SOURCE_RE = re.compile(r"^(message_board|world|artifacts)\.[A-Za-z0-9_.:*-
 class LoopWhile(BaseModel):
     """While every set condition holds, the loop goes on. Type-wide: `until` (wall time since
     the loop started), `budget_usd` (the type's cost). Per agent: `max_rounds` (loop prompts),
-    `agent_usd` (the agent's cost; a map is keyed by model alias or model id)."""
+    `agent_usd` (the agent's cost; a map is keyed by model alias or model id),
+    `agent_output_tokens` (the agent's output tokens, every model counted)."""
 
     model_config = {"extra": "forbid"}
 
@@ -1501,6 +1517,7 @@ class LoopWhile(BaseModel):
     max_rounds: int | None = None
     budget_usd: float | None = None
     agent_usd: float | dict[str, float] | None = None
+    agent_output_tokens: int | None = None
 
     @field_validator("until", mode="before")
     @classmethod
@@ -1515,7 +1532,7 @@ class LoopWhile(BaseModel):
             until_deadline(v, 0.0)
         return v
 
-    @field_validator("max_rounds")
+    @field_validator("max_rounds", "agent_output_tokens")
     @classmethod
     def _positive(cls, v: int | None) -> int | None:
         if v is not None and v < 1:

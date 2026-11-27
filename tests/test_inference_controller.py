@@ -17,6 +17,7 @@ from legion.controller.jobs import FakeJobsClient
 from legion.controller.reconcile import rebuild_from_jobs, reconcile
 from legion.controller.store import Store
 from legion.models import AgentHeartbeat, SwarmSpec, TokenUsage, WorkerHeartbeat
+from legion.ops import provider_backed, unprobed
 
 from . import fake_models
 from .conftest import HARBOR, HB, TOKEN
@@ -428,7 +429,8 @@ async def test_a_server_that_wants_a_key_the_controller_lacks(store, clock):
 
 def fake_provider(tool_call: bool = True, status: int = 200, follow_up_fails: bool = False,
                   zero_usage: bool = False, text_call: bool = False,
-                  no_call_on: str | None = None) -> tuple[FastAPI, list[dict]]:
+                  no_call_on: str | None = None,
+                  response_failure: str | None = None) -> tuple[FastAPI, list[dict]]:
     """A tiny OpenAI-compatible Chat Completions server. `follow_up_fails` refuses the turn
     carrying the tool result, as the HF router did on its auto provider."""
     fake = FastAPI()
@@ -436,10 +438,12 @@ def fake_provider(tool_call: bool = True, status: int = 200, follow_up_fails: bo
     usage = {"input_tokens": 0 if zero_usage else 12, "output_tokens": 0 if zero_usage else 5}
 
     @fake.get("/v1/models")
-    async def models(request: Request):
-        if request.url.hostname == "api.anthropic.com":  # pages 20 models unless asked for more
-            seen.append({"path": "models", "limit": request.query_params.get("limit")})
+    async def models():
         return fake_models.listing()
+
+    @fake.get("/v1/models/{model:path}")
+    async def model(model: str):
+        return {"id": f"{model}-canonical", "type": "model"}
 
     @fake.post("/v1/chat/completions")
     async def chat(request: Request):
@@ -466,26 +470,39 @@ def fake_provider(tool_call: bool = True, status: int = 200, follow_up_fails: bo
 
     @fake.post("/v1/responses")
     async def responses(request: Request):
-        """OpenAI's Responses API (Codex): a function call, then text once its output is sent."""
+        """Non-streamed Responses API: a `function_call` output item, then text."""
         body = await request.json()
         seen.append({"path": "responses", "auth": request.headers.get("authorization"), **body})
-        done = body["input"][-1].get("type") == "function_call_output"
-        out = ({"type": "message", "content": [{"type": "output_text", "text": "Noon."}]} if done
-               else {"type": "function_call", "call_id": "fc_1", "name": "get_time",
-                     "arguments": '{"timezone": "UTC"}'})
-        return JSONResponse({"output": [out], "usage": usage})
+        follow_up = body["input"][-1].get("type") == "function_call_output"
+        if follow_up and follow_up_fails:
+            return JSONResponse({"error": {"message": "bad tool message"}}, status_code=400)
+        out = [{"type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "It is noon UTC."}]}]
+        if tool_call and not follow_up:
+            out = [{"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "opaque"},
+                   {"type": "function_call", "id": "fc_1", "call_id": "call_1",
+                    "name": "get_time", "arguments": '{"timezone": "UTC"}'}]
+        response_status = response_failure if follow_up and response_failure else "completed"
+        return JSONResponse({"id": "r1", "object": "response", "output": out,
+                             "status": response_status, "usage": usage})
 
     @fake.post("/v1/messages")
     async def messages(request: Request):
-        """Anthropic's Messages API (Claude Code): a tool_use, then text after its result."""
+        """Non-streamed Anthropic Messages: a `tool_use` block, then text."""
         body = await request.json()
         seen.append({"path": "messages", "auth": request.headers.get("x-api-key"),
-                     "bearer": request.headers.get("authorization"), **body})
-        done = body["messages"][-1]["role"] == "user" and len(body["messages"]) > 1
-        out = ({"type": "text", "text": "Noon."} if done
-               else {"type": "tool_use", "id": "tu_1", "name": "get_time",
-                     "input": {"timezone": "UTC"}})
-        return JSONResponse({"content": [out], "usage": usage})
+                     "version": request.headers.get("anthropic-version"), **body})
+        last = body["messages"][-1]["content"]
+        follow_up = isinstance(last, list) and last[0].get("type") == "tool_result"
+        if follow_up and follow_up_fails:
+            return JSONResponse({"type": "error", "error": {"message": "bad tool message"}},
+                                status_code=400)
+        content = [{"type": "text", "text": "It is noon UTC."}]
+        if tool_call and not follow_up:
+            content = [{"type": "tool_use", "id": "toolu_1", "name": "get_time",
+                        "input": {"timezone": "UTC"}}]
+        return JSONResponse({"id": "msg_1", "type": "message", "role": "assistant",
+                             "content": content, "usage": usage})
 
     return fake, seen
 
@@ -605,31 +622,81 @@ async def test_preflight_probes_chat_completions(preflight_client):
     assert m2[2]["tool_call_id"] == "call_1" == m2[1]["tool_calls"][0]["id"]
 
 
+@pytest.mark.parametrize(("api_format", "url", "api"), [
+    ("openai_responses", "http://fake/v1", "responses"),
+    ("anthropic_messages", "http://fake", "messages"),
+])
+async def test_preflight_probes_the_blocks_api(preflight_client, api_format, url, api):
+    fake, seen = fake_provider()
+    block = {"urls": [url], "api_key_env": "ANTH_KEY", "api_format": api_format,
+             "context_window": 200000}  # Anthropic's and OpenAI's listings report no window
+    spec = pspec(block, pixel={**HB, "model": "Qwen/Small"})
+    async with await preflight_client(fake, SECRETS) as c:
+        rep = (await c.post("/swarms/p/preflight", json=spec.model_dump(mode="json"))).json()
+    [x] = rep["results"]
+    assert rep["ok"] and x["api"] == api and x["follow_up_ok"] and x["usage_reported"], x
+    turn1, turn2 = seen
+    assert {t["path"] for t in seen} == {api} and turn1["model"] == "Qwen/Small"
+    if api == "responses":
+        assert turn1["auth"] == "Bearer ak" and turn1["store"] is False
+        assert turn1["tools"][0]["name"] == "get_time" and "temperature" not in turn1
+        assert turn1["include"] == ["reasoning.encrypted_content"]
+        assert [i.get("type") for i in turn2["input"][1:]] == [
+            "reasoning", "function_call", "function_call_output"]
+        assert turn2["input"][1]["encrypted_content"] == "opaque"
+        assert turn2["input"][2]["id"] == "fc_1"
+        assert turn2["input"][3]["call_id"] == "call_1"
+    else:
+        assert (turn1["auth"], turn1["version"]) == ("ak", "2023-06-01")
+        assert turn1["tools"][0]["input_schema"]["required"] == ["timezone"]
+        assert [m["role"] for m in turn2["messages"]] == ["user", "assistant", "user"]
+        assert turn2["messages"][2]["content"][0]["tool_use_id"] == "toolu_1"
+    fake, seen = fake_provider(tool_call=False)
+    async with await preflight_client(fake, SECRETS) as c:
+        [x] = (await c.post("/swarms/p/preflight", json=spec.model_dump(mode="json"))).json()["results"]
+    assert not x["ok"] and not x["tool_call_seen"] and len(seen) == 1
+
+
+@pytest.mark.parametrize("status", ["failed", "incomplete"])
+async def test_preflight_rejects_incomplete_responses_follow_up(preflight_client, status):
+    fake, _ = fake_provider(response_failure=status)
+    spec = pspec({"urls": ["http://fake/v1"], "api_format": "openai_responses",
+                  "context_window": 200000}, pixel={**HB, "model": "Qwen/Small"})
+    async with await preflight_client(fake, SECRETS) as c:
+        rep = (await c.post("/swarms/p/preflight", json=spec.model_dump(mode="json"))).json()
+    [result] = rep["results"]
+    assert not rep["ok"] and result["tool_call_seen"] and not result["follow_up_ok"]
+    assert "follow-up" in result["error"] and status in result["error"]
+
+
+async def test_preflight_false_keeps_the_controller_off_the_endpoints(store, clock):
+    """A task's own model gateway: no model check at apply, no preflight probe."""
+    seen: list[str] = []
+    app = create_app(store, TOKEN, clock=clock, secret_source=SECRETS,
+                     inference_transport=fake_models.transport(seen=seen),
+                     preflight_transport=fake_models.transport(seen=seen))
+    gateway = {"urls": ["http://model-compat:8003/v1"], "api_key_env": "ANTH_KEY",
+               "api_format": "openai_responses", "preflight": False}
+    spec = pspec(gateway, pixel={**HB, "model": "gpt-6.1-sol"},
+                 pinned={**HB, "model": "gpt-6.1-sol",
+                         "inference": {**gateway, "context_window": 400000}})
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t",
+                                 headers={"Authorization": f"Bearer {TOKEN}"}) as c:
+        rep = (await c.post("/swarms/p/preflight", json=spec.model_dump(mode="json"))).json()
+        assert rep["ok"] and rep["unverified"] == 2
+        assert all(r["unverified"] and "disabled" in r["warning"] for r in rep["results"])
+        assert (await put(c, spec)).status_code == 200
+        types = (await c.get("/swarms/p")).json()["spec"]["types"]
+    assert not seen
+    assert types["pixel"]["resolved_model"]["context_window"] is None  # Pi's default
+    assert types["pinned"]["resolved_model"]["context_window"] == 400000
+    assert not provider_backed(spec) and len(unprobed(spec)) == 2
+
+
 def native(harness: str, model: str, url: str, key_env: str) -> dict:
     """A type whose role runs `harness` (Codex, Claude Code) on its provider's API."""
     return {**HB, "model": model, "harbor": {**HARBOR, "config": {"task": {}, "harness": harness}},
             "inference": {"urls": [url], "api_key_env": key_env, "context_window": 200000}}
-
-
-async def test_preflight_probes_each_harness_in_its_api(preflight_client):
-    fake, seen = fake_provider()
-    spec = pspec(FAKE_GPU, pi={**HB, "model": "Qwen/Small"},
-                 codex=native("codex", "m", "https://api.openai.com/v1", "OPENAI_KEY"),
-                 claude=native("claude-code", "m2", "https://api.anthropic.com/v1", "ANTH_KEY"))
-    async with await preflight_client(fake, {**SECRETS, "OPENAI_KEY": "ok"}) as c:
-        rep = (await c.post("/swarms/p/preflight", json=spec.model_dump(mode="json"))).json()
-    assert rep["ok"] is True, rep
-    assert {x["types"][0]: x["api"] for x in rep["results"]} == {
-        "pi": "chat_completions", "codex": "responses", "claude": "anthropic_messages"}
-    assert all(x["tool_call_seen"] and x["follow_up_ok"] for x in rep["results"])
-    by = {k: [x for x in seen if x["path"] == k] for k in ("responses", "messages")}
-    assert [x["auth"] for x in by["responses"]] == ["Bearer ok"] * 2
-    assert by["responses"][1]["input"][-1] == {"type": "function_call_output", "call_id": "fc_1",
-                                               "output": "2026-01-01T12:00:00Z"}
-    assert [x["limit"] for x in seen if x["path"] == "models"] == ["1000"]  # one page: all of them
-    # Anthropic's own key header, never a bearer
-    assert [(x["auth"], x["bearer"]) for x in by["messages"]] == [("ak", None)] * 2
-    assert by["messages"][1]["messages"][-1]["content"][0]["tool_use_id"] == "tu_1"
 
 
 async def test_a_native_harness_needs_its_key_on_the_controller(store, clock):

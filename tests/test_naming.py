@@ -80,3 +80,14 @@ async def test_words_through_the_controller(client, store, tick):
     assert store.reserved_name(child)["type"] == "helper"  # kept after removal
     tick()
     assert [a["name"] for a in store.list_agents("demo", "leader")] == [leader]
+
+
+def test_deleting_child_clears_idempotency_key(tmp_path):
+    store = Store(tmp_path)
+    store.put_swarm(words_spec(), 0)
+    store.insert_agent("parent", "demo", "leader", 0, 0)
+    store.insert_child("child", "demo", "helper", 0, "parent", 1, 0)
+    store.put_spawn_key("parent", "key", "child")
+    store.delete_agent("child")
+    assert store.spawn_key_child("parent", "key") is None
+    store.close()

@@ -193,6 +193,12 @@ def test_spec_checks(tmp_path, edit, error):
      "harness claude-code runs only models at https://api.anthropic.com"),
     (lambda d: d.update(harness="codex", inference={"urls": ["https://api.openai.com/v1"]}),
      "inference.api_key_env: name the secret holding the role's OPENAI_API_KEY"),
+    # an api_format the harness's Harbor class does not speak
+    (lambda d: d.update(harness="claude-code", inference={
+        "urls": ["https://api.anthropic.com"], "api_key_env": "K",
+        "api_format": "openai_chat_completions"}),
+     "inference.api_format: harness claude-code speaks anthropic_messages, not "
+     "openai_chat_completions"),
 ])
 def test_compile_refuses_other_harness_pairings(tmp_path, edit, error):
     data = load_spec_yaml(COMPILE)
@@ -203,6 +209,13 @@ def test_compile_refuses_other_harness_pairings(tmp_path, edit, error):
     (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
     with pytest.raises(ValueError, match=error):
         compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
+
+
+def test_a_slurm_spec_without_a_backend_runs_podman(tmp_path):
+    data = load_spec_yaml(LANES)
+    data.pop("environment")
+    data["compute"] = "slurm"
+    assert six_lane_spec(tmp_path, yaml.safe_dump(data)).environment.backend == "podman"
 
 
 def test_unset_variable_without_default(tmp_path):
@@ -671,7 +684,7 @@ def test_each_role_runs_its_own_harness(tmp_path, capsys):
     roles["safety"].update(harness="codex", model="gpt-x",
                            inference={"urls": ["https://api.openai.com/v1"], "api_key_env": "OAI"})
     roles["review"] = {"harness": "claude-code", "model": "claude-x", "pricing": [3, 15, 0.3],
-                       "inference": {"urls": ["https://api.anthropic.com/v1"],
+                       "inference": {"urls": ["https://api.anthropic.com"],
                                      "api_key_env": "ANTH"}}
     for name in ("team.md", "answers.md", "round.md"):
         (tmp_path / name).write_text("x")
@@ -683,6 +696,12 @@ def test_each_role_runs_its_own_harness(tmp_path, capsys):
     assert Spec.model_validate(swarm.types["review"].harbor.config).harness == "claude-code"
     assert {n: ts.resolved_model.inference.key_env for n, ts in swarm.types.items()} == {
         "answers": "HF_INFERENCE_TOKEN", "safety": "OAI", "review": "ANTH"}
+    # api_format left unset: the one API Harbor's Codex and Claude Code classes speak; Pi's role
+    # keeps the run's block as written
+    assert {n: ts.resolved_model.inference.api_format for n, ts in swarm.types.items()} == {
+        "answers": "openai_chat_completions", "safety": "openai_responses",
+        "review": "anthropic_messages"}
+    assert swarm.types["answers"].inference is None
     from legion.ops import role_lines
 
     assert role_lines(swarm) == [

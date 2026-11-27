@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from datetime import datetime, timedelta
 
+import pytest
 from pydantic import TypeAdapter
 
 from legion import status as fs
@@ -480,15 +481,18 @@ def test_launch_refused_classification():
     assert not launch_refused(RuntimeError("x")) and not launch_refused(ConnectionError("x"))
 
 
-def test_resume_prompt_goes_through_max_working_admission(store, jobs, clock, tick):
+@pytest.mark.parametrize("type_cap", [False, True])
+def test_resume_prompt_goes_through_max_working_admission(store, jobs, clock, tick, type_cap):
     """A capped inference block's resume prompt is queued after the assign (pending_prompts),
     so the controller's max_working admission sees it like any API prompt."""
     from legion.models import SwarmSpec
 
     spec = SwarmSpec.model_validate({
         "swarm": "demo", "namespace": "ns", "bucket_id": "ns/b",
-        "inference": {"urls": ["http://fake/v1"], "api_key_env": "K", "max_working": 1},
+        "inference": {"urls": ["http://fake/v1"], "api_key_env": "K",
+                      **({} if type_cap else {"max_working": 1})},
         "types": {"researcher": {**HB, "model": "m", "replicas": 1,
+                                 **({"max_working": 1} if type_cap else {}),
                                  "resume_prompt": "go on"}}})
     store.put_swarm(spec, 0)
     tick()

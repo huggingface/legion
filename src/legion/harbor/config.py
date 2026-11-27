@@ -19,26 +19,25 @@ PI_VERSION = "1.5.0"
 
 @dataclass(frozen=True)
 class Harness:
-    """A harness legion serves turns with: its turn server (legion.harbor.agent), the wire API
-    Harbor configures and preflight probes, the env name its model key takes in the agent
+    """A harness legion serves turns with: its turn server (legion.harbor.agent; its Harbor
+    class names the wire APIs it speaks), the env name its model key takes in the agent
     (None: the role's own `api_key_env`), the one provider host it may call (None: any), and
     the agent env that masks what Harbor would otherwise read from the worker's own env (a
     local worker has the operator's shell): another login, key or auth mode."""
 
     agent: str
-    api: str  # Harbor's ModelApiFormat
     key: str | None = None
     host: str | None = None
     mask: dict[str, str] = dataclasses.field(default_factory=dict)  # Harbor's bools take "0", not ""
 
 
 HARNESSES = {
-    "pi": Harness("legion.harbor.agent:LegionPi", "openai_chat_completions"),
-    "codex": Harness("legion.harbor.agent:LegionCodex", "openai_responses", "OPENAI_API_KEY",
+    "pi": Harness("legion.harbor.agent:LegionPi"),
+    "codex": Harness("legion.harbor.agent:LegionCodex", "OPENAI_API_KEY",
                      "api.openai.com", {"CODEX_API_KEY": "", "CODEX_AUTH_JSON_PATH": "",
                                         "CODEX_FORCE_AUTH_JSON": "0"}),
-    "claude-code": Harness("legion.harbor.agent:LegionClaudeCode", "anthropic_messages",
-                           "ANTHROPIC_API_KEY", "api.anthropic.com", {
+    "claude-code": Harness("legion.harbor.agent:LegionClaudeCode", "ANTHROPIC_API_KEY",
+                           "api.anthropic.com", {
                                "ANTHROPIC_AUTH_TOKEN": "", "CLAUDE_CODE_OAUTH_TOKEN": "",
                                "CLAUDE_FORCE_OAUTH": "0", "CLAUDE_CODE_USE_BEDROCK": "0",
                                "AWS_BEARER_TOKEN_BEDROCK": ""}),
@@ -141,7 +140,7 @@ E2B_SETUP_S = 600
 
 
 class EnvironmentSettings(Settings):
-    backend: Literal["docker", "podman", "hf-sandbox", "e2b"] = "docker"
+    backend: Literal["docker", "podman", "hf-sandbox", "e2b"] = "podman"
     # Hugging Face Jobs hardware for hf-sandbox, e.g. cpu-basic or cpu-upgrade.
     flavor: str | None = Field(default=None, min_length=1)
 
@@ -259,5 +258,5 @@ class Config(Settings):
             skip_model_parsing=True,
             base_url=self.inference.endpoints[0],
             model_api_key_name=name,
-            model_api_format="openai_chat_completions",
+            model_api_format=self.inference.api_format,
         )

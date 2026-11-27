@@ -33,7 +33,7 @@ agents:
       model: ${ANTHROPIC_MODEL:-claude-haiku-5-5}
       inference:
         urls:
-          - https://api.anthropic.com/v1
+          - https://api.anthropic.com
         api_key_env: ANTHROPIC_API_KEY
         context_window: 1000000
       environment:
