@@ -1,0 +1,6 @@
+The answerbench.txt and proofbench.txt prompt templates are reproduced without changes from
+CMU-AIRe/QED-Nano, revision 02a4699ed380f8e980a8d44c755b8bfd4e310718:
+https://github.com/CMU-AIRe/QED-Nano/tree/02a4699ed380f8e980a8d44c755b8bfd4e310718/eval/configs/prompts
+QED-Nano is distributed under the Apache License 2.0 (see LICENSE).
+The grading parser and self-evaluation cleanup in math_eval_common.py are adapted from
+https://github.com/CMU-AIRe/QED-Nano/tree/02a4699ed380f8e980a8d44c755b8bfd4e310718/eval/src/imobench

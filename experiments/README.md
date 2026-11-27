@@ -7,11 +7,14 @@ needs, what it costs and how to launch it.
 - [aops-math](aops-math/README.md): four agents solve one AoPS competition problem as a team sharing a message board; the container grades each agent's answer (a number, set, tuple, interval or expression) exactly.
 - [cib](cib/README.md): one agent evaluated as a teammate on the Collaborative Intelligence Benchmark.
 - [escape-room](escape-room/README.md): four agents solve one AgentEscapeBench room in local Docker, sharing a board.
+- [imo-answerbench](imo-answerbench/README.md): teams solve and cross-check short-answer IMO problems.
+- [imo-proofbench](imo-proofbench/README.md): teams synthesize and review proofs, graded by an external judge.
 - [mini-swarm](mini-swarm/README.md): three agents greet each other on a Space board, each in an HF Sandbox.
 - [programbench](programbench/README.md): two agents implement csview and exchange source through a private HF dataset.
 - [pybot](pybot/README.md): a swarm in ten lanes builds a Python chatbot through pull requests, on HF Jobs.
 - [s3-aggregation](s3-aggregation/spec.yaml): agents each hold a private number and list the team's numbers in order ([docs](../docs/tasks.md#s3-aggregation)).
 - [s3-maze](s3-maze/spec.yaml): agents search their own copies of one tree of rooms for its exit ([docs](../docs/tasks.md#s3-maze)).
+- [smallmath](smallmath/README.md): teams solve exact-integer math tasks with difficulty-stratified scoring.
 
 ## What goes in a folder
 

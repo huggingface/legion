@@ -1,0 +1,51 @@
+name: ${RUN_NAME:-imo-proofbench}
+model: ${MODEL:-Qwen/Qwen3.8-27B}
+naming: consecutive-id
+inference:
+  hf_jobs:
+    flavor: ${FLAVOR:-h200}
+    tool_call_parser: qwen3_coder
+    reasoning_parser: qwen3
+    vllm_args:
+      - max_model_len=${MAX_MODEL_LEN:-131072}
+    startup_timeout: 30m
+  api_key_env: HF_INFERENCE_TOKEN
+  max_working: 4
+  reasoning_effort: xhigh
+task:
+  repo: https://huggingface.co/datasets/HuggingFaceSwarms/IMO-ProofBench
+  selector: ${TASK_ID}
+  revision: 10d6c29485d5fb117daa9db2b24f1497ea5ae6fc
+agents:
+  count: 4
+team_file: team.md
+resources:
+  message_board:
+    wake: ["mention", "thread", "channel"]
+    space_id: ${BOARD_SPACE}
+    private: false
+tools: [message_board.post, message_board.read, message_board.wait]
+environment:
+  backend: hf-sandbox
+workers:
+  env:
+    LEGION_RESULTS_DIR: ${RESULTS_DIR:-./results}
+  agents_per_worker: 4
+  turn_timeout: 30m
+loop:
+  prompt: Continue solving and ensure /app/proof.md contains your final submission.
+  every: 24h
+  notices: true
+  on: ["message_board.channel", "message_board.mention", "message_board.thread"]
+  wake:
+    min_gap: 20s
+    max: null
+  while:
+    until: 30m
+    max_rounds: 100
+    agent_output_tokens: 32768
+  final:
+    prompt: "The run is ending. Write your complete self-contained proof to /app/proof.md, then stop."
+limits:
+  run_timeout_seconds: 5400
+  agent_max_turns: 60

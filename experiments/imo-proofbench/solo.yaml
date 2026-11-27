@@ -1,0 +1,25 @@
+name: ${RUN_NAME:-imo-proofbench-solo}
+model: ${MODEL:-Qwen/Qwen3.8-27B}
+naming: consecutive-id
+inference:
+  urls:
+    - ${SERVER_URL}
+  api_key_env: HF_INFERENCE_TOKEN
+  # For Qwen3.8 thinking use xhigh (not high); its template accepts xhigh, medium, low.
+  reasoning_effort: ${REASONING_EFFORT:-off}
+task:
+  repo: https://huggingface.co/datasets/HuggingFaceSwarms/IMO-ProofBench
+  selector: ${TASK_ID}
+  revision: 10d6c29485d5fb117daa9db2b24f1497ea5ae6fc
+agents:
+  count: 1
+environment:
+  backend: ${ENV_BACKEND:-podman}
+workers:
+  env:
+    LEGION_RESULTS_DIR: ${RESULTS_DIR:-./results}
+  agents_per_worker: 1
+  turn_timeout: 30m
+limits:
+  run_timeout_seconds: 2400
+  agent_max_turns: 60

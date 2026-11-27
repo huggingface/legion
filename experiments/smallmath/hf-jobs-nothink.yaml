@@ -1,0 +1,50 @@
+name: ${RUN_NAME:-smallmath}
+model: ${MODEL:-Qwen/Qwen3.8-27B}
+naming: consecutive-id
+inference:
+  hf_jobs:
+    flavor: ${FLAVOR:-h200}
+    tool_call_parser: qwen3_coder
+    vllm_args:
+      - max_model_len=${MAX_MODEL_LEN:-131072}
+      - 'default_chat_template_kwargs={"enable_thinking": false}'
+    startup_timeout: 30m
+  api_key_env: HF_INFERENCE_TOKEN
+  max_working: 4
+task:
+  repo: https://huggingface.co/datasets/HuggingFaceSwarms/SmallMath
+  selector: ${TASK_ID}
+  revision: 57dbf3f7e83aa8c5c980387a2216d7bb87e4e7cc
+agents:
+  count: 4
+team_file: team.md
+resources:
+  message_board:
+    wake: ["mention", "thread", "channel"]
+    space_id: ${BOARD_SPACE}
+    private: false
+tools: [message_board.post, message_board.read, message_board.wait]
+environment:
+  backend: hf-sandbox
+workers:
+  env:
+    LEGION_RESULTS_DIR: ${RESULTS_DIR:-./results}
+  agents_per_worker: 4
+  turn_timeout: 6m
+loop:
+  prompt: Continue solving and ensure /app/answer.txt contains your final submission.
+  every: 24h
+  notices: true
+  on: ["message_board.channel", "message_board.mention", "message_board.thread"]
+  wake:
+    min_gap: 20s
+    max: null
+  while:
+    until: 30m
+    max_rounds: 100
+    agent_output_tokens: 32768
+  final:
+    prompt: "The run is ending. Make sure /app/answer.txt holds just your final answer, then stop."
+limits:
+  run_timeout_seconds: 2400
+  agent_max_turns: 60
