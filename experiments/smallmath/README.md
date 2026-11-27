@@ -54,4 +54,4 @@ Pass one or more result roots, each containing `<swarm>/<agent>/trials/<trial>/r
 uv run python experiments/smallmath/score.py "$RESULTS_DIR" --manifest /path/to/tasks/manifest.json > scores.json
 ```
 
-Omit `--manifest` to download the pinned dataset manifest. The output contains solo and unique-plurality `maj@N` accuracy overall, by team size, and by difficulty level. Accepted integer spellings such as `+001` and `1` vote together; rejected submissions retain their spelling and do not inherit the grade of a canonical integer. Missing answers abstain and ties score zero. Empty strata have a null mean.
+Omit `--manifest` to download the pinned dataset manifest. The output contains solo and unique-plurality `maj@N` accuracy overall, by team size, and by difficulty level. Plain signed integer spellings such as `+001` and `1` vote together regardless of correctness, provided the stripped answer is at most 1,000 characters (the verifier's cleaned-answer limit). Longer or non-integer submissions retain their spelling. Missing answers abstain and ties score zero. Empty strata have a null mean.

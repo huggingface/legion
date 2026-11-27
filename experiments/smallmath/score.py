@@ -11,12 +11,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from math_eval_common import load_runs, majority, offline_reward, read_text, summary
 
 REVISION = "57dbf3f7e83aa8c5c980387a2216d7bb87e4e7cc"
+# The pinned verifier's MAX_LEN and MAX_INT_DIGITS are both 1000. This is a
+# conservative subset of its grammar: an optional sign followed by ASCII digits.
+MAX_INTEGER_LEN = 1000
 
 
-def canonical(answer, accepted):
+def canonical(answer):
     answer = answer.strip()
-    # Preserve rejected text: an oversized or invalid spelling must not inherit a correct grade.
-    if accepted and re.fullmatch(r"[+-]?[0-9]+", answer):
+    if len(answer) <= MAX_INTEGER_LEN and re.fullmatch(r"[+-]?[0-9]+", answer):
         negative = answer.startswith("-")
         digits = answer.lstrip("+-").lstrip("0") or "0"
         return "-" + digits if negative and digits != "0" else digits
@@ -35,8 +37,8 @@ def score(roots, manifest):
             raise ValueError(f"Missing valid difficulty for {team['task']}")
         rows = []
         for agent in team["agents"]:
+            answer = canonical(read_text(agent["verifier"] / "answer.txt"))
             correct = offline_reward(agent)
-            answer = canonical(read_text(agent["verifier"] / "answer.txt"), correct)
             rows.append({"agent": agent["agent"], "answer": answer, "correct": correct})
         winner = majority([row["answer"] for row in rows])
         votes = [row["correct"] for row in rows if row["answer"] == winner] if winner else []

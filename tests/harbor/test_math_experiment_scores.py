@@ -323,3 +323,26 @@ def test_problem_and_reference_from_dataset_checkout(tmp_path):
     (task_dir / "instruction.md").write_text("Only consider n >= 3.")
     assert mod.reference(task, tmp_path)["answer"] == "yes"
     assert mod.dataset_file(task, tmp_path, "instruction.md") == "Only consider n >= 3."
+
+
+def test_smallmath_votes_do_not_depend_on_correctness(tmp_path):
+    mod = module("smallmath")
+    task = "smallmath-0015"
+    for agent, answer, reward in [("a", "83", 1), ("b", "+083", 1),
+                                   ("c", "1", 0), ("d", "+001", 0)]:
+        trial(tmp_path, task, agent, answer, reward)
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"tasks": [{"task": task, "level": 6}]}))
+    team = mod.score([tmp_path], manifest)["teams"][0]
+    assert [row["answer"] for row in team["agents"]] == ["83", "83", "1", "1"]
+    assert team["majority_answer"] is None
+    assert team["maj_at_n"] == 0
+
+
+def test_smallmath_integer_canonicalization_respects_verifier_bounds():
+    mod = module("smallmath")
+    assert mod.canonical("0" * 999 + "1") == "1"
+    assert mod.canonical("+" + "0" * 998 + "1") == "1"
+    assert mod.canonical("+" + "0" * 999 + "1") == "+" + "0" * 999 + "1"
+    assert mod.canonical("1" * 5000) == "1" * 5000
+    assert mod.canonical("1.0") == "1.0"
