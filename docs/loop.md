@@ -44,7 +44,7 @@ limits:
 | `wake.counts_as_round` | default `false`: a wake prompt is not a round. It carries the current `{round}`, does not advance it and does not count toward `max_rounds`; `wake.max` caps it instead. `true`: a wake prompt is the next round |
 | `notices` | default `false`. `true`: the round prompts name the board notifications since the agent's last round in one line after the rendered prompt (see "Notices") |
 | `while.until`, `while.budget_usd` | type-wide: when either fails the loop stops for every agent of the type |
-| `while.max_rounds`, `while.agent_usd`, `while.agent_output_tokens` | per agent: the agent leaves the loop; when every agent has left, the loop stops. `agent_output_tokens` caps the agent's output tokens without a price (e.g. a self-hosted model) |
+| `while.max_rounds`, `while.agent_usd`, `while.agent_output_tokens` | per agent: the agent leaves the loop; when every agent has left, the loop stops. `agent_output_tokens` caps the agent's output tokens without a price (e.g. a self-hosted model). It counts provider-reported usage only: a model server that reports none never reaches the cap, so pair it with `max_rounds` or `until` |
 | `final.prompt` / `prompt_file` | sent once to every live agent when the loop stops (any reason except a stop with `final: false` (`POST /swarms/{swarm}/loop`) and the hard budget stop) |
 | `final.reserve_usd` | subtracted from `limits.budget_usd` to get the point where loops stop; summed over the types that have a final round |
 

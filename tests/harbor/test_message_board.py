@@ -1,13 +1,16 @@
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tarfile
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from msgboard.client import BoardError, Client
 
 from legion.harbor.config import BUILTIN
+from legion.harbor.instructions import build_agent_instructions
 from legion.harbor.tools.bundle import build_tool_bundle
 from legion.harbor.tools.runner import load_module
 
@@ -74,13 +77,81 @@ async def test_post_from_a_file_and_unread_compact_reads(board, tmp_path, monkey
         board_tools.post("both", path=str(message))
 
     monkeypatch.setenv("MSGBOARD_TOKEN", b["token"])
-    assert board_tools.read(unread=True, compact=True) == {
-        "messages": [f"#{first['id']} agent-001: {first['body']}"]}
+    assert board_tools.read(unread=True, compact=True)["messages"] == [
+        f"#{first['id']} agent-001: {first['body']}"]
     assert board_tools.read(unread=True)["messages"] == []  # its place is kept
     mine = board_tools.post("I get 7", reply_to=first["id"])
-    assert board_tools.wait(timeout=0, unread=True, compact=True) == {
-        "messages": [f"#{mine['id']} agent-002 (you) (reply to #{first['id']}): I get 7"]}
+    assert board_tools.wait(timeout=0, unread=True, compact=True)["messages"] == [
+        f"#{mine['id']} agent-002 (you) (reply to #{first['id']}): I get 7"]
     assert len(board_tools.read()["messages"]) == 2  # the default read is unchanged
+
+
+async def test_failed_compact_unread_call_leaves_its_page_unread(board, tmp_path, monkeypatch):
+    monkeypatch.setattr(board_tools, "UNREAD_DIR", tmp_path / "unread")
+    a, b = board.provision(["agent-001", "agent-002"])
+    monkeypatch.setenv("MSGBOARD_TOKEN", a["token"])
+    posted = [board_tools.post(f"m{i}")["id"] for i in range(3)]
+    monkeypatch.setenv("MSGBOARD_TOKEN", b["token"])
+
+    def me_fails(self):  # the board answers /me with an error after the page was fetched
+        raise BoardError(500, "internal", "boom")
+
+    for call in (lambda: board_tools.read(unread=True, compact=True),
+                 lambda: board_tools.wait(timeout=0, unread=True, compact=True)):
+        with monkeypatch.context() as broken:
+            broken.setattr(Client, "me", me_fails)
+            with pytest.raises(BoardError):
+                call()
+        shown = call()["messages"]
+        assert [int(line.split()[0][1:]) for line in shown] == posted
+        for place in board_tools.UNREAD_DIR.glob("*.seq"):  # unread again for the next call
+            place.unlink()
+
+
+async def test_concurrent_unread_reads_show_each_message_once(board, tmp_path, monkeypatch):
+    monkeypatch.setattr(board_tools, "UNREAD_DIR", tmp_path / "unread")
+    a, b = board.provision(["agent-001", "agent-002"])
+    monkeypatch.setenv("MSGBOARD_TOKEN", a["token"])
+    posted = [board_tools.post(f"m{i}")["id"] for i in range(24)]
+    monkeypatch.setenv("MSGBOARD_TOKEN", b["token"])
+
+    def drain():
+        ids = []
+        while messages := board_tools.read(unread=True, limit=1)["messages"]:
+            ids += [m["id"] for m in messages]
+        return ids
+
+    with ThreadPoolExecutor(6) as pool:
+        shown = [i for ids in pool.map(lambda _: drain(), range(6)) for i in ids]
+    assert sorted(shown) == posted  # none twice, none skipped
+    assert not list(board_tools.UNREAD_DIR.glob("*.tmp"))
+
+
+async def test_compact_read_keeps_pagination(board, tmp_path, monkeypatch):
+    a = board.provision(["agent-001"])[0]
+    monkeypatch.setenv("MSGBOARD_TOKEN", a["token"])
+    board_tools.create_channel("other")
+    board_tools.post("elsewhere", "other")  # message ids and general's seqs now differ
+    first, second = board_tools.post("one")["id"], board_tools.post("two")["id"]
+    page = board_tools.read(limit=1, compact=True)
+    full = board_tools.read(limit=1)
+    assert (page["next_cursor"], page["has_more"]) == (full["next_cursor"], True)
+    assert page["messages"][0].startswith(f"#{first} ")
+    after = board_tools.read(after=page["next_cursor"], limit=1, compact=True)
+    assert after["messages"][0].startswith(f"#{second} ") and not after["has_more"]
+
+
+async def test_instruction_examples_run_as_written(board, tmp_path):
+    directory = extract_bundle(tmp_path, ["message_board.*"])
+    manifest = json.loads((directory / "manifest.json").read_text())
+    text = build_agent_instructions("agent-001", {"agent-001": None}, manifest)
+    example = next(line for line in text.splitlines()
+                   if "Example: `legion-tool message_board.post " in line)
+    command = shlex.split(example.split("`")[1])
+    identity = board.provision(["agent-001"])[0]
+    env = {"MSGBOARD_URL": board.url, "MSGBOARD_TOKEN": identity["token"]}
+    result = invoke_bundle(directory, command[1], json.loads(command[3]), env)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def extract_bundle(tmp_path, names):

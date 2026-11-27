@@ -1,6 +1,8 @@
 """Message-board operations; connection settings come from the agent environment."""
 
+import fcntl
 import os
+from contextlib import contextmanager
 from pathlib import Path
 
 import httpx
@@ -22,20 +24,43 @@ def _client(max_retries=10):
 
 
 # read/wait with unread=True keep, per channel, the last message the agent was shown: one container per
-# agent, and each tool call is its own process, so the place lives in a file.
+# agent, and each tool call is its own process, so the place lives in a file. It lives in the container's
+# /tmp, outside the saved session: a new Trial or worker starts again from the channel's first message.
 UNREAD_DIR = Path("/tmp/legion-board")
 
 
-def _last_seen(channel_id: int) -> int:
+@contextmanager
+def _unread_place(channel_id: int):
+    """Hold the channel's place for one load, fetch and commit: concurrent calls take turns. Yields the
+    last seen seq and a function that saves a new one (atomically, so a reader never sees a partial file)."""
+    UNREAD_DIR.mkdir(parents=True, exist_ok=True)
     path = UNREAD_DIR / f"{channel_id}.seq"
-    return int(path.read_text()) if path.exists() else 0
+    with open(UNREAD_DIR / f"{channel_id}.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+
+        def commit(seq: int):
+            temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+            temporary.write_text(str(seq))
+            os.replace(temporary, path)
+
+        yield (int(path.read_text()) if path.exists() else 0), commit
 
 
-def _messages(board, channel_id: int, page: dict, unread: bool, compact: bool) -> dict:
-    """The page as read returns it; unread: remember its last message; compact: one line per message."""
-    if unread and page["messages"]:
-        UNREAD_DIR.mkdir(parents=True, exist_ok=True)
-        (UNREAD_DIR / f"{channel_id}.seq").write_text(str(page["messages"][-1]["seq"]))
+def _fetch(board, channel: str, after: int, unread: bool, compact: bool, **read_options) -> dict:
+    """Read a page of `channel`. unread: start after the agent's place instead of `after`, and move the
+    place past the page only once it has been formatted. compact: one line per message, pagination kept."""
+    channel_id = board.channel_id(channel)
+    if not unread:
+        return _format(board, board.read(channel_id, after=after, **read_options), compact)
+    with _unread_place(channel_id) as (last_seen, commit):
+        page = board.read(channel_id, after=last_seen, **read_options)
+        result = _format(board, page, compact)  # may fail (/me): the page then stays unread
+        if page["messages"]:
+            commit(page["messages"][-1]["seq"])
+        return result
+
+
+def _format(board, page: dict, compact: bool) -> dict:
     if not compact:
         return page
     me = _identity_id(board)
@@ -46,7 +71,7 @@ def _messages(board, channel_id: int, page: dict, unread: bool, compact: bool) -
         head += " (you)" if sender["id"] == me else ""
         head += f" (reply to #{m['reply_to']})" if m.get("reply_to") else ""
         lines.append(f"{head}: {m['body']}")
-    return {"messages": lines}
+    return {**page, "messages": lines}
 
 
 def _identity_id(board):
@@ -75,16 +100,15 @@ def read(
     unread: bool = False,
     compact: bool = False,
 ) -> dict:
-    """Read messages after a channel sequence number; limit must be 1 through 100. unread: only the
-    messages you have not been shown yet (the tool keeps your place; `after` is ignored). compact: one
-    line per message, "#<id> <sender>: <text>", your own posts marked."""
+    """Read messages after a channel sequence number; limit must be 1 through 100. Continue with
+    after=next_cursor while has_more. unread: only the messages you have not been shown yet (the tool
+    keeps your place; `after` is ignored); the place lives in your container, so a restart of your run
+    can show earlier messages again. compact: one line per message, "#<id> <sender>: <text>" (the
+    message id, for reply_to), your own posts marked."""
     if not 1 <= limit <= 100:
         raise ValueError("limit must be between 1 and 100")
     with _client() as board:
-        channel_id = board.channel_id(channel)
-        start = _last_seen(channel_id) if unread else after
-        page = board.read(channel_id, after=start, limit=limit)
-        return _messages(board, channel_id, page, unread, compact)
+        return _fetch(board, channel, after, unread, compact, limit=limit)
 
 
 def post(
@@ -179,10 +203,11 @@ def wait(
             return board.activity_page(
                 after=cursor, wait=timeout, channels="joined", limit=100
             )
-        channel_id = board.channel_id(channel)
-        page = board.read(channel_id, after=_last_seen(channel_id), limit=100, wait=timeout)
-        return _messages(board, channel_id, page, unread, compact)
+        return _fetch(board, channel, 0, True, compact, limit=100, wait=timeout)
 
+
+# post's arguments are all optional, but it needs one of text or path.
+EXAMPLES = {"post": {"text": "..."}}
 
 TOOLS = {
     "whoami": whoami,
