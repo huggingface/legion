@@ -183,12 +183,43 @@ def test_vllm_rejects_occupied_port(tmp_path):
     assert "serving " not in r.stdout
 
 
-@pytest.mark.parametrize("response,server,expected", [
-    ('{"data": [{"id": "alias"}]}', "/bin/sleep 1", True),
-    ('{"data": [{"id": "other"}]}', "/bin/sleep 1", False),
-    ('{"data": [{"id": "alias"}]}', "exit 1", False),
+def test_vllm_preflight_allows_time_wait(tmp_path):
+    # Close the accepted connection first, leaving the server side in TIME_WAIT.
+    with socket.socket() as listener, socket.socket() as client:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        client.connect(("127.0.0.1", port))
+        conn, _ = listener.accept()
+        conn.close()
+        assert client.recv(1) == b""
+    stubs = tmp_path / "bin"
+    stubs.mkdir()
+    for name, body in {"srun": "exit 1", "mkdir": "exit 0", "sleep": "exit 0"}.items():
+        path = stubs / name
+        path.write_text(f"#!/bin/sh\n{body}\n")
+        path.chmod(0o755)
+    r = subprocess.run(["bash", str(GENERIC / "serve-vllm.sbatch"), "requested"],
+                       env={**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}",
+                            "PORT": str(port), "USER": "test"},
+                       capture_output=True, text=True, timeout=10, check=False)
+    assert r.returncode != 0
+    assert "exited during startup" in r.stderr, r.stdout + r.stderr
+    assert "Cannot start vLLM on port" not in r.stderr
+
+
+@pytest.mark.parametrize("response,server,expected,args,override", [
+    ('{"data": [{"id": "alias"}]}', "/bin/sleep 1", True, ["--served-model-name", "alias"], ""),
+    ('{"data": [{"id": "alias"}]}', "/bin/sleep 1", True,
+     ["--served_model_name", "old", "--served-model-name=alias"], ""),
+    ('{"data": [{"id": "alias"}]}', "/bin/sleep 1", True,
+     ["--served-model-name", "old", "--served_model_name", "alias", "another"], ""),
+    ('{"data": [{"id": "alias"}]}', "/bin/sleep 1", True, ["--config", "config.yaml"], "alias"),
+    ('{"data": [{"id": "other"}]}', "/bin/sleep 1", False, ["--served-model-name", "alias"], ""),
+    ('{"data": [{"id": "alias"}]}', "exit 1", False, ["--served-model-name", "alias"], ""),
 ])
-def test_vllm_readiness_checks_model_and_process(tmp_path, response, server, expected):
+def test_vllm_readiness_checks_model_and_process(tmp_path, response, server, expected, args, override):
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -204,8 +235,9 @@ def test_vllm_readiness_checks_model_and_process(tmp_path, response, server, exp
         path.write_text(f"#!/bin/sh\n{body}\n")
         path.chmod(0o755)
     r = subprocess.run(["bash", str(GENERIC / "serve-vllm.sbatch"), "requested",
-                        "--served-model-name", "alias"],
-                       env={**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}", "PORT": str(port), "USER": "test"},
+                        *args],
+                       env={**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}", "PORT": str(port),
+                            "USER": "test", "READINESS_MODEL_ID": override},
                        capture_output=True, text=True, timeout=10, check=False)
     assert ("serving requested" in r.stdout) is expected, r.stdout + r.stderr
     assert (r.returncode == 0) is expected, r.stdout + r.stderr

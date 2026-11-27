@@ -10,6 +10,8 @@
 # (default 8000) and IMAGE (a vLLM .sqsh) likewise. The weights go to the node's own disk.
 # VLLM_PARSER_ARGS: the tool-call and reasoning flags, by default Qwen's (below); set your
 # model's, or empty (VLLM_PARSER_ARGS= sbatch ...) for none. sbatch passes the environment.
+# If --config sets served-model-name, set READINESS_MODEL_ID to the effective API model ID
+# (including any command-line override); the config file is read inside the container.
 # The log is vllm-<job id>.log (%x-%j.log: -J renames it) in the directory sbatch ran from,
 # Slurm's default working directory (-o elsewhere/%x-%j.log moves it). It ends with:
 #   serving <model> at http://<node address>:<port>/v1
@@ -26,20 +28,28 @@ PORT=${PORT:-8000}
 IMAGE=${IMAGE:-/fsx/anton/shared/images/vllm-openai-v0.32.0.sqsh}
 QWEN_PARSERS="--enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3"
 read -ra PARSER_ARGS <<< "${VLLM_PARSER_ARGS-$QWEN_PARSERS}"  # set but empty: none
-# vLLM uses the first --served-model-name as the API model ID, or MODEL by default.
+# vLLM accepts underscores in option names and the last occurrence wins.
 SERVED_MODEL=$MODEL
-args=("$@")
+args=("${PARSER_ARGS[@]}" "$@")
 for ((i=0; i<${#args[@]}; i++)); do
-  case ${args[i]} in
-    --served-model-name) SERVED_MODEL=${args[i+1]:-$MODEL}; break;;
-    --served-model-name=*) SERVED_MODEL=${args[i]#*=}; break;;
-  esac
+  option=${args[i]%%=*}
+  option=${option//_/-}
+  if [[ $option == --served-model-name ]]; then
+    if [[ ${args[i]} == *=* ]]; then
+      SERVED_MODEL=${args[i]#*=}
+    else
+      SERVED_MODEL=${args[i+1]:-$MODEL}
+      ((i+=1))
+    fi
+  fi
 done
+SERVED_MODEL=${READINESS_MODEL_ID:-$SERVED_MODEL}
 # Do not mistake a pre-existing server for this job's server, even when it serves the same ID.
 python3 - "$PORT" <<'PYPORT' || exit 1
 import socket, sys
 try:
     with socket.socket() as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind(("0.0.0.0", int(sys.argv[1])))
 except OSError as exc:
     print(f"Cannot start vLLM on port {sys.argv[1]}: {exc}", file=sys.stderr)
