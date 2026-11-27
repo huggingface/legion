@@ -57,7 +57,7 @@ def build_agent_instructions(
         [
             "",
             "## Tools",
-            "Use the selected tools below through your shell. They return JSON.",
+            "The tools below are shell commands, not native agent tools. Invoke each through `legion-tool` in your shell; they return JSON.",
             'Errors print {"error": "..."} and exit with code 1.',
             "Run `legion-tool NAME --json '{...}'` or pass JSON through stdin with `--json -`.",
             "Examples show required arguments. Run `legion-tool --list` for full argument schemas, including optional parameters and defaults.",
