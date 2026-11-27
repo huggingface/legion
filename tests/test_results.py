@@ -91,7 +91,31 @@ def test_a_failed_submission_is_not_a_replacement(tmp_path):
 def test_a_crash_before_an_agent_arrived_is_not_its_own(tmp_path):
     """A local worker that crashed, was relaunched and then took a new agent: the relaunched
     agent is worker_replaced, the new one completed (the records say where each ran)."""
-    bundle = tmp_path / ".legion" / "r-20261127-100000"
+    local_bundle(tmp_path, [(1, ["a"], None), (2, ["a", "b"], "drained")])  # 1: killed
+    r = results.load(tmp_path)  # the folder holding the bundle
+    assert {a.name: (a.outcome, a.reward) for a in r.agents} == {
+        "a": (Outcome.WORKER_REPLACED, 1.0), "b": (Outcome.COMPLETED, 1.0)}
+    assert r.reasons == ["a: worker_replaced, worker w0"]
+
+
+def test_a_worker_without_records_keeps_its_launch_evidence(tmp_path):
+    """Records are trusted per worker: one worker's record does not hide another worker's two
+    launches when that worker's record writes failed."""
+    run = slurm_run(tmp_path)
+    write(run / "launch" / f"w0-{1:032x}.env", "WORKER_ID=w0\n")
+    record(run / "results/r/_workers", "w0", 1, ["agent-001", "agent-002"], "drained")
+    for n in (2, 3):
+        write(run / "launch" / f"w1-{n:032x}.env", "WORKER_ID=w1\n")
+    r = results.load(run)
+    assert (r.outcome, r.reasons) == (
+        Outcome.WORKER_REPLACED, ["worker w1: worker_replaced (2 launches), agents unknown"])
+    assert [(w.id, len(w.incarnations)) for w in r.workers] == [("w0", 1), ("w1", 2)]
+
+
+def local_bundle(root: Path, records: list[tuple[int, list[str], str | None]]) -> Path:
+    """A local run: agents a and b on worker w0, which crashed once; its `records`; and a
+    completed Trial each."""
+    bundle = root / ".legion" / "r-20261127-100000"
     write(bundle / "run.json", {
         "swarm": "r", "started_at": "2026-11-27T10:00:00+00:00",
         "ended_at": "2026-11-27T11:00:00+00:00", "stop_reason": "idle",
@@ -99,14 +123,20 @@ def test_a_crash_before_an_agent_arrived_is_not_its_own(tmp_path):
         "agents": [{"name": "a", "worker": "w0"}, {"name": "b", "worker": "w0"}],
         "workers": [{"id": "w0", "crashes": 1}]})
     harbor = bundle / "agents" / "_harbor"
-    record(harbor / "_workers", "w0", 1, ["a"], None)  # killed
-    record(harbor / "_workers", "w0", 2, ["a", "b"], "drained")
+    for n, agents, exit in records:
+        record(harbor / "_workers", "w0", n, agents, exit)
     for agent in ("a", "b"):
         write(harbor / agent / "trials" / f"r-{agent}-t1" / "result.json", DONE)
-    r = results.load(tmp_path)  # the folder holding the bundle
-    assert {a.name: (a.outcome, a.reward) for a in r.agents} == {
-        "a": (Outcome.WORKER_REPLACED, 1.0), "b": (Outcome.COMPLETED, 1.0)}
-    assert r.reasons == ["a: worker_replaced, worker w0"]
+    return bundle
+
+
+def test_a_failed_assignment_record_falls_back_to_the_worker(tmp_path):
+    """run.json places b on w0, whose records never name it (the write at its assignment
+    failed): b is judged on all of w0's history (a crash, an unclosed record)."""
+    local_bundle(tmp_path, [(1, ["a"], None), (2, ["a"], "drained")])
+    r = results.load(tmp_path)
+    assert {a.name: a.outcome for a in r.agents} == {
+        "a": Outcome.WORKER_REPLACED, "b": Outcome.WORKER_REPLACED}
 
 
 def test_one_local_bundle_wins_over_a_run_dir_layout(tmp_path):

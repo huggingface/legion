@@ -134,8 +134,10 @@ the agents placed on the worker as they arrive. It is completed with `ended_at` 
 the worker has drained (its Trials ended and were verified) or has been preempted. A worker that
 was killed leaves its record without an exit. Runs from before these records exist still show
 relaunches through their `launch/` env files, but which agents the worker held is unknown, so
-the run itself is `worker_replaced`. A run with records ignores those files, because one is
-written before `sbatch` and stays when a submission is refused. Spec errors are reported by
+the run itself is `worker_replaced`. Records are trusted per worker: a worker with records
+ignores its launch files, because one is written before `sbatch` and stays when a submission is
+refused, while a worker whose record writes failed keeps its launch evidence. An agent that no
+record names, though `run.json` places it on a worker, is judged on that worker's whole history. Spec errors are reported by
 field and kind only (`spec: inference.api_key_env: value_error`), never with the resolved value.
 
 Keeping Trial results across a relaunch is still open

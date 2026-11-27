@@ -284,11 +284,14 @@ def _agent(name: str, trials: list[TrialResult], workers: list[WorkerResult]) ->
     """Its infrastructure outcome, from every worker launch it was placed on (a re-placed agent
     restarts its Trial names on the new worker too), else its latest Trial's."""
     held = [w for w in workers if name in w.agents]
-    recorded = [i for w in held for i in w.incarnations if i.recorded]
-    if recorded:  # the launches it was placed on: crashes before it arrived are not its own
-        infra = _infra([i for i in recorded if name in i.agents])
-    else:  # no records (older runs): the whole worker's history
-        infra = _infra([i for w in held for i in w.incarnations], sum(w.crashes for w in held))
+    incs, crashes = [], 0
+    for w in held:  # each worker on its own evidence
+        if mine := [i for i in w.incarnations if i.recorded and name in i.agents]:
+            incs += mine  # the launches it was placed on: crashes before it arrived are not its own
+        else:  # no record names it (none written, or its assignment's write failed): all of it
+            incs += w.incarnations
+            crashes += w.crashes
+    infra = _infra(incs, crashes)
     last = trials[-1] if trials else None
     return AgentResult(name=name, workers=[w.id for w in held], trials=trials,
                        outcome=infra or (last.outcome if last else Outcome.UNKNOWN),
@@ -443,17 +446,15 @@ def _slurm(root: Path) -> RunResult:
     base = results / swarm
     trials = _trials(root, base)
     records = _incarnations(base / WORKERS)
-    # A launch env file is written before sbatch, also for a submission that fails: only a run
-    # without records (older) counts its launches from them
+    # A launch env file is written before sbatch, also for a submission that fails: a worker with
+    # records is read from them, one without (an older run, a failed write) from its launches
     launches: dict[str, list[str]] = {}
-    for path in [] if records else sorted((root / "launch").glob("*.env")):
+    for path in sorted((root / "launch").glob("*.env")):
         if m := _LAUNCH.fullmatch(path.name):
             launches.setdefault(m[1], []).append(m[2])
     workers = {}
     for wid in sorted(set(records) | set(launches)):
-        incs = records.get(wid, [])
-        known = {i.id for i in incs}
-        incs += [Incarnation(id=i, recorded=False) for i in launches.get(wid, []) if i not in known]
+        incs = records.get(wid) or [Incarnation(id=i, recorded=False) for i in launches[wid]]
         workers[wid] = WorkerResult(id=wid, incarnations=incs,
                                     agents=sorted({a for i in incs for a in i.agents}))
     for w in workers.values():  # an older run: no records say which agents it held
