@@ -7,7 +7,9 @@ short text signals (`ANT_COMMS=text`), seen by nearby ants; sandboxes keep open 
 this is the only in-world channel, not an enforced one. One episode per world job: about 7 minutes of world
 time once every ant is ready.
 
-Each agent is a Trial of the Harbor task `antbench-ant` (`task/tasks/antbench-ant`) in its own
+The Harbor task `antbench-ant` and the world job's script, `world-job.sh`, live in the dataset
+`HuggingFaceSwarms/antbench` (private), pinned by commit in `run.env` (`ANTBENCH_TASK_REVISION`).
+Each agent is a Trial of `antbench-ant` in its own
 E2B sandbox (`python:3.12-slim`), with one worker and the controller on HF Jobs
 (`compute: hf-jobs`). Agents never hold an ant's credential or a key: their sandboxes call the
 worker's gateway, which adds each agent's own ant credential (docs/world.md, "Env worlds").
@@ -16,7 +18,7 @@ port, so only the workers reach it. `agent-001` plays ant 0, `agent-002` ant 1, 
 Each credential is derived from `ANTBENCH_ENV_SECRET` and the agent's name, by the gateway and
 by the world job's launcher (`python -m legion.harbor.env`) alike. The transcript stays in the
 world job; at the episode's end it logs AntBench's result and copies the transcript to
-`$BUCKET_ID` under `antbench/<RUN_NAME>/`. The job script is `world-job.sh`. AntBench keeps
+`$BUCKET_ID` under `antbench/<RUN_NAME>/`. AntBench keeps
 serving after the episode, so late agents can still read `done`; `ANT_DRAIN_S` (120) seconds
 after the transcript is saved, the job stops AntBench and ends.
 
@@ -37,8 +39,9 @@ before the clock starts apply when it starts.
 - `E2B_API_KEY`: your E2B key; the worker starts the sandboxes with it.
 - `ANTBENCH_ENV_SECRET`: the run's secret, new for each run (`openssl rand -hex 24`); the
   worker and the world job get it as a job secret.
-- `ANTBENCH_TASK_REPO`, `ANTBENCH_TASK_REVISION`: the dataset `task/` is uploaded to
-  (`HuggingFaceSwarms/antbench`), and that commit. The dataset is private: if `legion launch`
+- `ANTBENCH_TASK_REPO`, `ANTBENCH_TASK_REVISION`: the task dataset
+  (`HuggingFaceSwarms/antbench`) and the commit to run, for the task and the world job's script
+  alike. The dataset is private: if `legion launch`
   cannot clone it, give git your Hub login (`hf auth login --add-to-git-credential`).
 - `BUCKET_ID` (`<your-username>/<name>`: the world job mounts its `antbench/` folder);
   optional `RUN_NAME`. `legion init` writes every `${VAR}` of the spec
@@ -67,22 +70,22 @@ Use an `hf` CLI whose `hf jobs run` has `--network-group` and `--network-alias`
 (huggingface_hub 2.5 has both).
 
 ```sh
-# 1. the task, once per change: note the commit SHA it prints
-hf upload HuggingFaceSwarms/antbench experiments/antbench/task . --repo-type dataset
-# 2. legion's wheel from this checkout, and the run folder; fill in run.env
+# 1. legion's wheel from this checkout, and the run folder; fill in run.env (ANTBENCH_TASK_REVISION:
+#    the dataset commit to run)
 W=$(uv run scripts/publish-wheel.sh "hf://buckets/<your-username>/legion/dist")
 uv run legion init $PWD/runs/antbench-1 --from experiments/antbench
-# 3. the world job, in the run's network group as `antbench` (the spec's upstream); nothing public
+# 2. the world job, in the run's network group as `antbench` (the spec's upstream); nothing public
 set -a; . runs/antbench-1/run.env; set +a
 export LEGION_NETWORK_GROUP=antbench-1
 hf jobs run --detach --name antbench-world --flavor cpu-basic --timeout 3h \
   --network-group "$LEGION_NETWORK_GROUP" --network-alias antbench \
   --secrets ANTBENCH_ENV_SECRET -e RUN_NAME="${RUN_NAME:-antbench-1}" \
+  -v "hf://datasets/$ANTBENCH_TASK_REPO@$ANTBENCH_TASK_REVISION:/job" \
   -v hf://spaces/HuggingFaceSwarms/AntBench@5c3ce1ee2827cbbb4a8eede633c375020a62645c:/antbench \
   -v "${W%/*}:/wheel:ro" -v runs/antbench-1/experiment:/spec \
   -v "hf://buckets/$BUCKET_ID/antbench:/out:rw" \
-  python:3.12-slim bash /spec/world-job.sh
-# 4. the swarm, in the same group: a controller job starts too (docs/deploy-job.md)
+  python:3.12-slim bash /job/world-job.sh
+# 3. the swarm, in the same group: a controller job starts too (docs/deploy-job.md)
 export LEGION_RUN_DIR=$PWD/runs/antbench-1 LEGION_WHEEL_URL=$W
 uv run legion launch runs/antbench-1/experiment
 ```
@@ -102,8 +105,8 @@ so it is installed by the time the sandboxes are.
 **Stop**
 
 ```sh
-uv run legion stop antbench-1 --release   # ends the Trials (and sandboxes), then the controller
-hf jobs cancel <job id>                   # the world job
+uv run legion stop antbench-1 --interrupt --release   # ends turns and Trials, then the controller
+hf jobs cancel <job id>   # the world job, if it has not ended itself after the episode's drain
 ```
 
 Another episode needs a new world job (a new `run_id` and `ANTBENCH_ENV_SECRET`) and a new run.

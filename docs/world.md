@@ -443,7 +443,8 @@ ANTBENCH_ENV_SECRET=... python -m legion.harbor.env spec.yaml -- python ant_serv
   and errors, and none is logged.
 - The manifest's version is a hash of the tools, so it changes when they do. An env world has
   no health check, metrics or hooks; anything else the env needs (a start deadline, saving a
-  result) is the env job's own, as in experiments/antbench/world-job.sh.
+  result) is the env job's own, as in the AntBench experiment's world job
+  (experiments/antbench/README.md).
 
 ## Checklist for world authors
 
