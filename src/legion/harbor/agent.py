@@ -158,7 +158,9 @@ class LegionPi(Pi):
                 prompt = await self._next_prompt(environment, deadline)
                 if prompt is None:
                     return
-                text = f"{instruction}\n\n{prompt}" if fresh else prompt
+                # an empty first prompt (`loop.prompt: ""`): the task's instruction alone, as
+                # the upstream launcher sends it
+                text = (f"{instruction}\n\n{prompt}" if prompt else instruction) if fresh else prompt
                 ended, used, model_error = await self._turn(text, fresh, environment, totals)
                 transient = ended.data.get("reason") == "model_transport"
                 # the model's own error (a 500) says nothing about the restored sessions

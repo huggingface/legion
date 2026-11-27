@@ -108,7 +108,7 @@ def build_trial_config(
             skip_model_parsing=True,
             base_url=agent_url(inference.endpoint_for(run, name), backend),
             model_api_key_name=key_name,
-            model_api_format="openai_chat_completions",
+            model_api_format=inference.api_format,
             env={
                 key_name: api_key,
                 "LEGION_TOOLS_MANIFEST": TOOLS_MANIFEST,

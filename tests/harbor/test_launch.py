@@ -44,6 +44,37 @@ def test_reasoning_effort_reaches_native_pi(monkeypatch, tmp_path, effort):
     assert agent.options.max_turns == spec.limits.agent_max_turns
 
 
+@pytest.mark.parametrize(("api_format", "url", "pi_api"), [
+    ("openai_chat_completions", "http://model-compat:8003/v1", "openai-completions"),
+    ("openai_responses", "http://model-compat:8003/v1", "openai-responses"),
+    ("anthropic_messages", "http://model-compat:8003", "anthropic-messages"),
+])
+def test_api_format_reaches_native_pi(monkeypatch, tmp_path, api_format, url, pi_api):
+    from harbor.agents.factory import AgentFactory
+
+    from legion.models import Inference
+
+    spec = Config.load(EXAMPLES / "pi-hf.yaml")
+    spec.inference = Inference(urls=[url], api_key_env="GATEWAY_KEY", api_format=api_format,
+                               preflight=False)
+    monkeypatch.setenv("GATEWAY_KEY", "test-inference-secret")
+    spec.check_model_connection(spec.api_key())  # the upstream launcher's check, on that API
+    resolved = ResolvedTask(
+        GitTaskId(git_url=spec.task.repo, git_commit_id=spec.task.revision,
+                  path=Path("tasks") / spec.task.selector),
+        spec.task.revision,
+        "test",
+    )
+    config = launch.build_trial_config(
+        spec, resolved, tmp_path, "agent-001", "instructions", spec.api_key()
+    )
+    assert config.agent.model_api_format == api_format
+    agent = AgentFactory.create_agent_from_config(config.agent, logs_dir=tmp_path / "logs")
+    [provider] = agent._build_custom_models_json(
+        agent.model_connection, spec.model)["providers"].values()
+    assert (provider["api"], provider["baseUrl"]) == (pi_api, url)
+
+
 @pytest.fixture
 def prepared(monkeypatch, tmp_path, message_board_provider):
     spec = Config.load(EXAMPLES / "pi-hf.yaml")

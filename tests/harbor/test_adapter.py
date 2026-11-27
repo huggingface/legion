@@ -327,6 +327,16 @@ async def test_one_trial_across_bursts(fakes, tmp_path):
     assert len(session.read_text().splitlines()) == 2
 
 
+async def test_an_empty_first_prompt_sends_the_instruction_alone(fakes, tmp_path):
+    a = adapter(tmp_path)
+    sid, events = await start(a)
+    await a.send("")
+    assert (await read(events, "turn_ended"))[-1].status == "completed"
+    (session,) = a.session_files(sid)
+    prompt = json.loads(session.read_text().splitlines()[0])["prompt"]
+    assert prompt == "TASK\n\n" + fakes.trials[0].config.extra_instructions[0]  # nothing after it
+
+
 def pi_models(fakes, n=0):
     """The models.json the n-th Trial's Pi was last given (LegionPi's copy)."""
     (provider,) = json.loads((fakes.trials[n].agent.logs_dir / "models.json").read_text())[

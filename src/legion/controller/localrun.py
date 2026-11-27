@@ -758,9 +758,11 @@ def main(
             typer.echo(f"--until: {e} (or `idle`)", err=True)
             raise typer.Exit(2) from None
     if preflight is None:
-        preflight = provider_backed(spec)
-    elif not preflight and (models := unprobed(spec)):
+        preflight = provider_backed(spec) or strict
+    if apply and not preflight and (models := unprobed(spec)):
         _warn_unverified(models, "preflight skipped")
+        if strict:
+            raise typer.Exit(1)
     opts = RunOptions(spec=spec, data_dir=Path(data_dir), until=seconds, until_idle=idle,
                       prompt=prompt_text, preflight=preflight, strict=strict, grace=grace,
                       tools=bundle.data if bundle is not None else None, apply=apply,

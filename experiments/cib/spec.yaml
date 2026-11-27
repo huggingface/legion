@@ -1,0 +1,50 @@
+# CIB: one Pi agent is the evaluated teammate in one Collaborative Intelligence episode.
+# The Harbor task runs everything else: the scripted and live teammates (`team`) and the
+# model gateway (`model-compat`) through which the agent reaches its model.
+#   uv run legion launch experiments/cib/spec.yaml       # one case (CASE), Gemini by default
+# Secrets stay in the launching shell, never in this file: the evaluated model's key (named by
+# MODEL_KEY_ENV), CI_PRIVATE_READOUT_API_KEY (the same key, for the team's private final-answer
+# call) and the team's partner and judge credentials. Local workers inherit the shell's env, and
+# docker/podman compose reads them from there. README.md has the variables per model.
+name: ${RUN_NAME:-cib}
+model: ${MODEL:-gemini-3.8-flash}  # the raw id the gateway forwards: no Harbor provider prefix
+inference:
+  urls:
+    - ${GATEWAY_URL:-http://model-compat:8003/v1}  # a service of the Trial's own compose project
+  api_key_env: ${MODEL_KEY_ENV:-GEMINI_API_KEY}
+  api_format: ${API_FORMAT:-openai_chat_completions}  # anthropic_messages: GATEWAY_URL without /v1
+  preflight: false  # only the Trial resolves model-compat: no controller check or probe
+  reasoning_effort: ${EFFORT:-low}
+task:
+  repo: https://huggingface.co/datasets/HuggingFaceSwarms/collaborative-intelligence-benchmark
+  revision: 2404577cc0b03402a86b7195ac62500664f3a75e
+  selector: ${CASE:-ci-sharing-h2-r-choosing-the-safe-field-station-solo-s0}
+agents:
+  count: 1  # the task supplies the teammates
+environment:
+  backend: ${BACKEND:-podman}  # BACKEND=docker on a machine that runs dockerd
+workers:
+  turn_timeout: 60m  # one turn is the whole episode: the benchmark's one-hour guard
+  env:  # read by the task's docker-compose.yaml (no secrets here)
+    CI_EVALUATED_MODEL: ${MODEL:-gemini-3.8-flash}
+    CI_MODEL_UPSTREAM: ${CI_MODEL_UPSTREAM:-https://generativelanguage.googleapis.com/v1beta/openai}
+    CI_MODEL_HEADERS: ${CI_MODEL_HEADERS:-}
+    CI_MODEL_BODY: ${CI_MODEL_BODY:-}
+    CI_PRIVATE_READOUT_API: ${CI_PRIVATE_READOUT_API:-google-openai-chat}
+    CI_PRIVATE_READOUT_BASE_URL: http://model-compat:8003/v1
+    CI_PRIVATE_READOUT_EFFORT: ${EFFORT:-low}
+    # What the team service records about the evaluated agent. The private final-answer call
+    # checks its model and reasoning effort. parity.py validates and records the gateway options.
+    CI_AGENT_CONFIGURATION: '{"scaffold": "pi", "runner": "legion-launch", "version": "1.5.0",
+      "model": "${MODEL:-gemini-3.8-flash}", "endpoint": "${GATEWAY_URL:-http://model-compat:8003/v1}",
+      "parameters": {"api_format": "${API_FORMAT:-openai_chat_completions}",
+      "reasoning_effort": "${EFFORT:-low}", "max_turns": 256},
+      "model_gateway": ${CIB_GATEWAY_CONFIGURATION:-null}}'
+loop:
+  prompt: ""  # turn 1 is the task's instruction alone, as the upstream launcher sends it
+  every: turn_end
+  while:
+    max_rounds: 1  # one Pi run, then the run ends and the verifier grades it
+limits:
+  run_timeout_seconds: 3600  # the benchmark's one-hour guard
+  agent_max_turns: 256

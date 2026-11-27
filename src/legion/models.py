@@ -239,6 +239,10 @@ class HFJobs(BaseModel):
         return v
 
 
+# Pi's wire APIs (Harbor's ModelApiFormat), as `inference.api_format` names them
+ApiFormat = Literal["openai_chat_completions", "openai_responses", "anthropic_messages"]
+
+
 class Inference(BaseModel):
     """Where a model runs (design.md 'Inference'): the HF router (`hf_router`, the default),
     OpenAI-compatible servers you run (`urls`) or vLLM servers legion starts on HF Jobs
@@ -267,6 +271,12 @@ class Inference(BaseModel):
     metrics: bool = False
     # Pi's `--thinking` level; None: Pi's default
     reasoning_effort: Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"] | None = None
+    # The wire API Pi speaks to the endpoints, which the model check and preflight use too.
+    # anthropic_messages: each URL is the base without `/v1` (Pi calls `<url>/v1/messages`).
+    api_format: ApiFormat = "openai_chat_completions"
+    # False: the controller never calls the endpoints (no model check, no preflight), for
+    # endpoints that exist only inside the Trial, such as a task's own model gateway
+    preflight: bool = True
 
     @field_validator("urls", mode="before")
     @classmethod
@@ -312,8 +322,13 @@ class Inference(BaseModel):
             raise ValueError(f"set one of hf_router, urls or hf_jobs, not {' and '.join(given)}")
         if not given:
             self.hf_router = HFRouter()
+        if self.hf_router is not None and self.api_format != "openai_chat_completions":
+            raise ValueError("hf_router requires api_format: openai_chat_completions")
         if self.metrics and self.urls is None:
             raise ValueError("metrics scrapes your servers' vLLM metrics: it needs urls")
+        if self.metrics and not self.preflight:
+            raise ValueError("metrics is scraped by the controller, which preflight: false "
+                             "keeps off these endpoints")
         return self
 
     def held(self) -> Inference:

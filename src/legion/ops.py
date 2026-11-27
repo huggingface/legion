@@ -227,7 +227,9 @@ def check_spec(spec: SwarmSpec, spec_file: str):
 
 
 def provider_backed(spec: SwarmSpec) -> bool:
-    return any(ts.resolved_model is not None for ts in spec.types.values())
+    """A type's model is on a block preflight probes (not `preflight: false`)."""
+    return any(ts.resolved_model is not None and ts.resolved_model.inference.preflight
+               for ts in spec.types.values())
 
 
 def has_servers(spec: SwarmSpec) -> bool:
@@ -317,11 +319,13 @@ def probe_targets(spec: SwarmSpec) -> set[tuple]:
     """What preflight probes per type: its model on its block, sent as `request_model` to its
     endpoints, with the block's key and headers. An update probes again when this changes."""
     return {(r.qualified, r.request_model, tuple(r.inference.endpoints), r.inference.key_env,
-             tuple(sorted(r.headers.items())))
-            for ts in spec.types.values() if (r := ts.resolved_model) is not None}
+             r.inference.api_format, tuple(sorted(r.headers.items())))
+            for ts in spec.types.values()
+            if (r := ts.resolved_model) is not None and r.inference.preflight}
 
 
 def unprobed(spec: SwarmSpec) -> list[str]:
+    """The models requiring a preflight result, including configuration opt-outs."""
     return sorted({ts.resolved_model.qualified for ts in spec.types.values()
                    if ts.resolved_model is not None})
 
@@ -549,6 +553,10 @@ def update(api: Client, spec: SwarmSpec, spec_file: str, *, env_files=(),
         if bad:
             raise SpecError([*bad, ("preflight failed: not updating (fix the provider or pass "
                                     "--skip-preflight)")])
+    elif strict and ((check and unprobed(spec)) or any(
+            (r := ts.resolved_model) is not None and not r.inference.preflight
+            for ts in spec.types.values())):
+        raise SpecError(["--strict: not updating unverified models"])
     spec.tools_version = None
     names: tuple[list[str], list[str]] | None = None
     if bundle is not None:

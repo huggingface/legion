@@ -46,12 +46,14 @@ inference:
   context_window: 131072           # used only when the servers report none
   reasoning_effort: low            # Pi's --thinking level
   metrics: true                    # urls only: scrape each server's vLLM /metrics (docs/health.md)
+  api_format: openai_chat_completions  # Pi's wire API (default)
+  preflight: true                     # check the models and probe tool calling (default)
 ```
 
 | Field | Meaning |
 |---|---|
 | `hf_router.provider` | A router provider (`deepinfra`, `cerebras`, ...), or a selection policy: `fastest`, `cheapest`, `preferred`. Unset: the router's default (`fastest`). legion sends `<model>:<provider>`. |
-| `urls` | One or more base URLs ending in `/v1`, all serving `model`. A comma-separated string works too (`urls: ${VLLM_URLS}`). |
+| `urls` | One or more base URLs for the selected [API format](#api-format), all serving `model`. A comma-separated string works too (`urls: ${VLLM_URLS}`). |
 | `hf_jobs.flavor` | Required. The GPU flavor of each server's job, e.g. `l4x1`, `a100-large`, `h200`. |
 | `hf_jobs.tool_call_parser` | Required. vLLM's `--tool-call-parser` (`qwen3_coder` for Qwen3.5 and Qwen3.8); legion always adds `--enable-auto-tool-choice`. |
 | `hf_jobs.reasoning_parser` | vLLM's `--reasoning-parser` (`qwen3`). |
@@ -65,6 +67,8 @@ inference:
 | `context_window` | The model's context window in tokens, for servers that do not report one. |
 | `reasoning_effort` | Pi's `--thinking` level (`off` ... `max`). |
 | `metrics` | `urls` only: scrape each server's vLLM `/metrics` into the health snapshots. |
+| `api_format` | The API Pi speaks to the endpoints: `openai_chat_completions` (the default), `openai_responses` or `anthropic_messages` ([below](#api-format)). |
+| `preflight` | `false`: the controller never calls the endpoints, for ones that exist only inside the Trial ([below](#endpoints-inside-the-trial)). Default `true`. |
 
 A spec sets one of `hf_router`, `urls` and `hf_jobs`. A role (Harbor spec) or a type (swarm spec) may set its own `model`, on the run's endpoints, and
 its own `inference`, which replaces the run's block as a whole. `pricing` stays where it was: the
@@ -79,7 +83,42 @@ and bucket write access there. See [billing and storage](billing.md) for token d
 
 `legion launch` compiles a Harbor spec's block into the swarm spec as it is. Each type's
 `resolved_model` then pins the block it runs on, its price and, at apply, the context window
-(below). Harbor's Pi speaks OpenAI **Chat Completions** (`POST {url}/chat/completions`).
+(below). Harbor's Pi speaks the block's `api_format`, OpenAI **Chat Completions**
+(`POST {url}/chat/completions`) by default.
+
+### API format
+
+`api_format` picks the wire API Pi uses for every request, and the model check and preflight
+use the same one:
+
+| `api_format` | Pi calls | `urls` look like | key header |
+|---|---|---|---|
+| `openai_chat_completions` (default) | `POST {url}/chat/completions` | `https://api.example.com/v1` | `Authorization: Bearer` |
+| `openai_responses` | `POST {url}/responses` | `https://api.openai.com/v1` | `Authorization: Bearer` |
+| `anthropic_messages` | `POST {url}/v1/messages` | `https://api.anthropic.com` (no `/v1`) | `x-api-key` |
+
+Legion's `hf_router` block supports Chat Completions. With `urls`, select the format the
+endpoint serves. If the endpoint's model metadata omits the context window, set
+`context_window`.
+
+```yaml
+model: claude-opus-5-5
+inference:
+  urls: [https://api.anthropic.com]
+  api_key_env: ANTHROPIC_API_KEY
+  api_format: anthropic_messages
+  context_window: 200000
+```
+
+### Endpoints inside the Trial
+
+Some tasks serve the model to the agent themselves, e.g. a gateway service in the task's own
+compose project (`http://model-compat:8003/v1`, experiments/cib). Only the Trial can resolve
+that name, so the controller's model check and preflight would fail. `preflight: false` keeps the
+controller off the endpoints and disables `metrics` for the block. Preflight reports the model
+as unverified, which `--strict` treats as a failure. The
+context window is `context_window`, or Pi's default without one. Pi and the agent's allowlist
+still get the URLs as written, and the first turn is the first real call.
 
 ## The HF router (`hf_router`)
 
@@ -346,7 +385,8 @@ servers across runs by itself.
 
 ## Model check and context window
 
-At apply the controller reads `GET <url>/models` from each endpoint, as written:
+At apply the controller reads model metadata from each endpoint's `GET <url>/models`. The Messages
+API uses `GET <url>/v1/models/<model>` so the provider can resolve aliases.
 
 - **The router** must list `model`. A named `provider` must serve it with tool support; the
   apply lists the providers that do when it does not.
@@ -357,7 +397,8 @@ It then pins the context window the model is served with into the spec
 providers a request may reach (the named one, or under a policy every one with tool support).
 Each counts with its own window (vLLM's and SGLang's `max_model_len`, the router's
 `context_length`), or `inference.context_window` when it reports none; one without either
-refuses the apply, naming it. Pi's model config gets it as `contextWindow`, so Pi
+refuses the apply, naming it. A block with `preflight: false` is not checked: its window is
+`context_window`, else Pi's default. Pi's model config gets it as `contextWindow`, so Pi
 compacts before the server refuses a request, and `legion status` shows it per model. A re-apply
 with the same block and model keeps the pinned value without asking the servers again.
 
@@ -372,7 +413,8 @@ name:
 | worker job secrets | the controller, for the types on that block | read by the worker |
 | the agent's Trial | the worker (Harbor) | Pi's requests |
 
-How the key travels: `Authorization: Bearer <key>`. Controller secrets to set: every
+How the key travels: `Authorization: Bearer <key>` (`x-api-key: <key>` with
+`api_format: anthropic_messages`). Controller secrets to set: every
 `api_key_env` your blocks name (or `HF_TOKEN` for the router and `hf_jobs` by default), plus the
 `secrets` your types list, plus `LEGION_TOKEN`; with `hf_jobs`, also `HF_TOKEN`, which starts the
 jobs. A Trial's environment is the task's plus the inference key, the
@@ -401,8 +443,10 @@ block (`zero_usage_agents`) with a "cost unknown" warning.
 
 `legion update --check` on a running swarm (or `POST /swarms/{swarm}/preflight` with the spec as
 the body) makes the controller probe each distinct model and inference block the way a harness
-starts. First the model check above, then two non-streamed Chat Completions turns, as Pi calls
-it (a tool call written as text is no tool call, since Pi takes only `tool_calls`): turn one asks
+starts. First the model check above, then two non-streamed turns on the block's `api_format`, as Pi
+calls it (a tool call written as text is no tool call, since Pi takes only the API's structured
+calls: `tool_calls`, `function_call` items or `tool_use` blocks). Blocks with `preflight: false`
+are reported as unverified without a network call. Turn one asks
 for a call to a trivial `get_time` tool; turn two sends the model's output back with the tool's
 result and must complete. Per model it reports `ok`, `tool_call_seen`, `follow_up_ok`,
 `usage_reported`, `latency_ms`, `error` and `warning`. `ok` needs both turns: a server that
@@ -412,7 +456,7 @@ that reports zero token usage passes with a warning, since legion then cannot co
 launch` runs preflight and refuses to apply on a failure; `--skip-preflight` bypasses it.
 
 Preflight never passes silently. A model that was not probed (its key is not in the
-controller's environment, or `--skip-preflight`) is reported as `unverified` with a warning
+controller's environment, `preflight: false`, or `--skip-preflight`) is reported as `unverified` with a warning
 line. `launch` blocks on definite problems (a failed probe) and proceeds on missing evidence
 (unverified), unless `--strict` is passed, which counts unverified as failure (`legion update
 --check --strict` exits 1 the same way).
