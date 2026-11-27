@@ -59,7 +59,19 @@ class Docker(_EnvOffArgv, DockerEnvironment):
 
 
 class Podman(_EnvOffArgv, PodmanEnvironment):
-    pass
+    """Harbor 0.25's docker environment runs `compose exec --no-TTY` (the egress sidecar's
+    `network-policy` call, for a task with a non-public network policy), which podman-compose
+    rejects (it knows only `-T`), so such a task failed at start. Its exec gets `-T` instead,
+    in the flags before the service only: the command run in the container is left alone."""
+
+    async def _run_docker_compose_command(self, command, *args, **kwargs):
+        if command[:1] == ["exec"]:
+            command, i = list(command), 1
+            while i < len(command) and command[i].startswith("-"):  # flags, then service
+                if command[i] == "--no-TTY":
+                    command[i] = "-T"
+                i += 2 if command[i] in ("-w", "-e", "-u") else 1
+        return await super()._run_docker_compose_command(command, *args, **kwargs)
 
 
 def sandbox_name(session_id: str, image: str) -> str:

@@ -98,6 +98,7 @@ REPO=/shared/legion/repo                 # optional: a legion checkout, mounted 
 SECRETS_FILE=/shared/legion/secrets.env  # optional, mode 600, sourced by every job before run.env
 CONTAINER_IMAGE=/shared/legion/images/worker.sqsh   # optional: Enroot/Pyxis image for the workers
 CONTAINER_MOUNTS=/shared/uv/python       # comma-separated, read-only at the same path, besides VENV, REPO and the run's slurm/
+CONTAINERS_REGISTRIES_CONF=/shared/legion/registries.conf  # optional: podman's registries for harbor workers; unset: the run's slurm/registries.conf (Docker Hub via mirror.gcr.io)
 ```
 
 Who reads what: the specs read `SLURM_PARTITION`, `WORKER_CPUS`, `WORKER_MEM`. The controller

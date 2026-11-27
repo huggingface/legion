@@ -14,7 +14,7 @@ from harbor.environments import e2b, hf_sandbox
 from harbor.environments.base import ExecResult
 from harbor.environments.docker import docker
 from harbor.environments.factory import EnvironmentFactory
-from harbor.models.task.config import EnvironmentConfig
+from harbor.models.task.config import EnvironmentConfig, NetworkMode, NetworkPolicy
 from harbor.models.trial.config import EnvironmentConfig as TrialEnvironmentConfig
 from harbor.models.trial.paths import TrialPaths
 
@@ -99,11 +99,12 @@ async def _done():
 
 def test_the_copied_start_matches_the_pinned_harbor():
     """HFSandbox.start is Harbor 0.25.0's, copied: a Harbor upgrade must re-copy it (and check
-    that _EnvOffArgv still sees `compose exec -e NAME=value`)."""
+    that _EnvOffArgv still sees `compose exec -e NAME=value`, and whether Podman still needs
+    `--no-TTY` rewritten)."""
     assert importlib.metadata.version("harbor") == "0.25.0"
 
 
-def compose(monkeypatch, tmp_path, backend, secret_names):
+def compose(monkeypatch, tmp_path, backend, secret_names, **env_kwargs):
     """legion's docker or podman environment, as a Trial builds it, on a fake subprocess; the
     list gets each compose call's (argv, env)."""
     runs = []
@@ -125,7 +126,7 @@ def compose(monkeypatch, tmp_path, backend, secret_names):
                                kwargs={"secret_names": secret_names}),
         environment_dir=tmp_path / "environment", environment_name="t", session_id="s",
         trial_paths=TrialPaths(tmp_path / "trial"),
-        task_env_config=EnvironmentConfig(docker_image="python:3.12"))
+        task_env_config=EnvironmentConfig(docker_image="python:3.12"), **env_kwargs)
 
 
 @pytest.mark.parametrize("backend", ["docker", "podman"])
@@ -151,3 +152,19 @@ async def test_no_secret_value_in_any_argv(monkeypatch, tmp_path, backend):
     # only the agent's own names move: a task's PATH or STORAGE_DRIVER never steers the host
     assert env_a.get("PATH") != "/t/bin" and "STORAGE_DRIVER" not in env_a
     assert "-e" in b and "PLAIN" not in env_b and "HF_TOKEN" not in env_ps
+
+
+@pytest.mark.parametrize("backend, flag", [("docker", "--no-TTY"), ("podman", "-T")])
+async def test_network_policy_exec_flag(monkeypatch, tmp_path, backend, flag):
+    """Harbor's `compose exec --no-TTY` (a non-public network policy, set on the egress sidecar)
+    reaches podman-compose, which rejects `--no-TTY`, as `-T`; docker keeps `--no-TTY`."""
+    # the probe runs a container on the engine's kernel
+    monkeypatch.setattr(docker.DockerEnvironment, "_egress_control_kernel_support",
+                        classmethod(lambda cls: True))
+    runs, env = compose(monkeypatch, tmp_path, backend, [],
+                        network_policy=NetworkPolicy(network_mode=NetworkMode.NO_NETWORK))
+    await env.set_network_policy(NetworkPolicy(network_mode=NetworkMode.ALLOWLIST,
+                                               allowed_hosts=["example.com"]))
+    (argv, _), = runs
+    assert argv[argv.index("exec"):] == ("exec", flag, "harbor-docker-egress-control-sidecar",
+                                         "network-policy", "allow", "example.com")

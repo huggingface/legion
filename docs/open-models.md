@@ -152,7 +152,7 @@ nodes' (4.9) can. `scripts/slurm/podman-node.sh` sets up podman in a shell on a 
 `worker.sbatch` does for Slurm workers (storage under `/tmp`, no user systemd).
 
 ```sh
-sbatch -p hopper-b200 serve-vllm.sbatch Qwen/Qwen3.5-0.8B
+sbatch -p hopper-b200 scripts/slurm/serve-vllm.sbatch Qwen/Qwen3.5-0.8B
 # its log ends with: serving Qwen/Qwen3.5-0.8B at http://<node address>:8000/v1
 srun -p hopper-cpu -n 1 -c 8 --mem=16G --pty bash
 source .venv/bin/activate && source scripts/slurm/podman-node.sh
@@ -160,38 +160,16 @@ SERVER_URL=http://<node address>:8000/v1 legion launch experiments/mini-swarm/ur
 legion status mini-swarm-urls
 ```
 
-`serve-vllm.sbatch`, one vLLM server on one GPU (the Slurm recipe below uses it too):
-
-```bash
-#!/bin/bash
-#SBATCH --job-name=vllm
-#SBATCH --gpus=1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=96G
-#SBATCH --time=4:00:00
-#SBATCH --output=%x-%j.log
-set -uo pipefail
-MODEL=${1:-Qwen/Qwen3.5-0.8B}
-PORT=${PORT:-8000}
-IMAGE=${IMAGE:-/fsx/anton/shared/images/vllm-openai-v0.32.0.sqsh}
-export HF_HOME=/hf
-mkdir -p "/scratch/$USER/hf"  # the weights, on the node's own disk
-srun --overlap --container-image="$IMAGE" --no-container-mount-home \
-  --container-mounts="/scratch/$USER/hf:/hf" --container-env=HF_HOME \
-  vllm serve "$MODEL" --port "$PORT" \
-  --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3 &
-until curl -sf -o /dev/null "localhost:$PORT/v1/models"; do
-  sleep 10
-  kill -0 $! 2>/dev/null || { echo "vLLM exited during startup"; exit 1; }
-done
-echo "serving $MODEL at http://$(hostname -I | awk '{print $1}'):$PORT/v1"
-wait
-```
+[`scripts/slurm/serve-vllm.sbatch`](../scripts/slurm/serve-vllm.sbatch) is one vLLM server on
+one GPU, in Pyxis (the Slurm recipe below uses it too). Arguments after the model go to
+`vllm serve`, e.g. `--default-chat-template-kwargs '{"enable_thinking": false}'`; `PORT` and
+`IMAGE` (a vLLM `.sqsh`) come from the environment. `podman-node.sh` and Slurm workers pull
+Docker Hub images through `mirror.gcr.io` ([`scripts/slurm/registries.conf`](../scripts/slurm/registries.conf)).
 
 ### Slurm
 
 Big models are servers you run: start them with your own job script (one per server, e.g.
-`serve-vllm.sbatch` above, or a multi-node one behind a router), then list their URLs from a
+`scripts/slurm/serve-vllm.sbatch`, or a multi-node one behind a router), then list their URLs from a
 `compute: slurm` spec (docs/slurm.md). Its workers run on the cluster, so they reach the nodes'
 addresses:
 
