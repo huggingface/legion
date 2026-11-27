@@ -23,18 +23,35 @@ def test_math_spec(name, revision, filename):
                                 "SERVER_URL": "https://example.com/v1"})
     assert spec.task.revision == revision
     assert spec.team_file == path.parent / "team.md"
-    compile_spec(spec, {"repo": "example", "selector": "example", "revision": revision})
+    compiled = compile_spec(spec, {"repo": "example", "selector": "example", "revision": revision})
+    assert compiled.types["agent"].env["LEGION_RESULTS_DIR"] == "./results"
     if filename == "spec.yaml":
         assert spec.inference.urls == ["https://example.com/v1"]
         return
     command = vllm_command(spec.model, spec.inference.hf_jobs, spec.inference.max_working, 1)
-    assert command[:3] == ["vllm", "serve", "Qwen/Qwen3.8-27B"]
+    expected = ["vllm", "serve", "Qwen/Qwen3.8-27B", "--host", "0.0.0.0", "--port", "8000",
+                "--served-model-name", "Qwen/Qwen3.8-27B", "--enable-auto-tool-choice",
+                "--tool-call-parser", "qwen3_coder"]
     if filename == "hf-jobs-thinking.yaml":
-        assert command[command.index("--reasoning-parser") + 1] == "qwen3"
+        expected += ["--reasoning-parser", "qwen3"]
         assert spec.inference.reasoning_effort == "high"
-        assert "--default-chat-template-kwargs" not in command
-    else:
-        assert "--reasoning-parser" not in command
-        assert command[command.index("--default-chat-template-kwargs") + 1] == (
-            '{"enable_thinking": false}'
-        )
+    expected += ["--tensor-parallel-size", "1", "--max-num-seqs", "4",
+                 "--max-model-len", "131072"]
+    if filename == "hf-jobs-nothink.yaml":
+        expected += ["--default-chat-template-kwargs", '{"enable_thinking": false}']
+    assert command == expected
+
+
+@pytest.mark.parametrize("name", BENCHMARKS)
+def test_shared_server_for_different_tasks(name):
+    path = ROOT / name / "spec.yaml"
+    base = {"BOARD_SPACE": "test-board", "SERVER_URL": "https://example.com/v1",
+            "REASONING_EFFORT": "high"}
+    first = Spec.load(path, env={**base, "TASK_ID": "task-one"})
+    second = Spec.load(path, env={**base, "TASK_ID": "task-two"})
+    assert first.task.selector != second.task.selector
+    for spec in (first, second):
+        swarm = compile_spec(spec, {"repo": "example", "selector": spec.task.selector,
+                                    "revision": BENCHMARKS[name]})
+        assert swarm.inference.urls == ["https://example.com/v1"]
+        assert swarm.inference.reasoning_effort == "high"
