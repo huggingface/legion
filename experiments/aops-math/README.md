@@ -5,14 +5,15 @@ works in its own container and writes its final answer to `/app/answer.txt`: one
 expression. A hidden grader in the container checks it exactly. The tasks are in
 `HuggingFaceSwarms/aops-math-bench` (private): 200 problems with a numeric answer and 200 with a structured one.
 
-The folder has everything the run needs:
+The folder has the spec and the prompt; the board tools come with the dataset:
 
 - `spec.yaml`: the team, the board rules (posts up to 2000 characters, at least 5 s apart, 40 per agent) and the loop.
   Each agent is prompted once and woken by its teammates' posts. At `until: 30m` the loop stops, and every agent gets
   a final prompt to leave just its answer in `/app/answer.txt`. The run then ends by itself.
 - `team.md`: how to work as a team and use the board.
-- `tools/board.py`: the board tools (`board.post`, `board.read`, `board.wait`). Agents write a post to a file and then
-  post it, so math, quotes and `$` never pass through the shell; reads return only unseen posts, one line each.
+- the board tools (`board.post`, `board.read`, `board.wait`), from the dataset's `setups/tools/` (downloaded below).
+  Agents write a post to a file and then post it, so math, quotes and `$` never pass through the shell; reads return
+  only unseen posts, one line each.
 
 Each agent may write at most 32,768 output tokens (`loop.while.agent_usd` with `pricing: [0, 1, 0]`, i.e. $1 per 1M
 output tokens; the prices are not real). The task revision pinned in the spec blocks the agents' network, except
@@ -30,7 +31,11 @@ the model server.
 
 **Launch**
 
+From the repository root:
+
 ```sh
+hf download HuggingFaceSwarms/aops-math-bench --repo-type dataset --revision 3f6f3d5f1f03ea2fc92b303c91036085a957aadb \
+  --include "setups/tools/*" --local-dir aops-math-bench
 export MODEL=<served model> SERVER_URL=http://<host>:<port>/v1 TASK_ID=1e0f5b785c687e40
 uv run legion launch experiments/aops-math/spec.yaml
 ```

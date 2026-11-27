@@ -22,7 +22,7 @@ resources:
       min_post_gap: 5s
       max_posts: 40
       max_channels: 1
-tools_dir: tools
+tools_dir: ../../aops-math-bench/setups/tools   # downloaded with the dataset (README); legion's message_board.* once they post from a file
 tools: [board.post, board.read, board.wait]
 environment:
   backend: podman
