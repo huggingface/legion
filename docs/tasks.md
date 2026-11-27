@@ -57,6 +57,16 @@ paths from the publishing machine. Build and verify it with Harbor before
 publishing, including a known successful submission and an incorrect submission.
 Commit the task to the dataset and record the full commit SHA.
 
+## Where things live
+
+- **The dataset** holds plain Harbor tasks: `tasks/<task-name>/`, plus any generators, graders
+  and checks that run through Harbor. It has no legion specs, imports, tool modules or drivers,
+  and nothing that reads `.legion/`, so it runs under Harbor alone.
+- **Legion's `experiments/<exp>/`** holds everything legion-specific for it: `spec.yaml` (and
+  variant specs), `team.md`, `tools/`, sweep scripts, scorers and a README
+  ([experiments/README.md](../experiments/README.md)). The spec pins the dataset with
+  `task.revision`; no path in it points into a dataset download.
+
 ## Select it in Legion
 
 Add this block to a working experiment spec:
@@ -98,10 +108,30 @@ credentials with read access. Configure your existing HF login for Git, for
 example with `hf auth login --add-to-git-credential`. Do not put tokens in the URL
 or commit them in the spec.
 
+## Pass values to a task (`workers.env`)
+
+A task's `task.toml` can read values from the worker under `[environment.env]`, as
+`NAME = "${NAME}"`: Harbor fills them from the worker process's environment. `workers.env`
+in the spec (or a role's `workers.env`) sets those values on every worker of the type:
+
+```yaml
+workers:
+  env:
+    PYBOT_REPO: '${PYBOT_REPO}'  # filled from the launching shell or run.env when the spec loads
+```
+
+`workers.env` is stored in the spec and reaches the worker job as plain environment, so names
+Harbor treats as sensitive are refused: those containing `KEY`, `TOKEN` (but not `TOKENS`),
+`SECRET`, `PASSWORD`, `CREDENTIAL` or `AUTH`. A task
+secret goes in the worker host's environment instead: on Slurm add `NAME=value` to `run.env`,
+which every worker job sources ([Slurm](slurm.md)). The
+[pybot spec](../experiments/pybot/spec.yaml) is a working example.
+
 ## Choose a compatible environment
 
-- `environment.backend: docker` or `podman` runs task containers on the worker's
-  machine. Install the corresponding container runtime and Compose support.
+- `environment.backend: podman` (the default) runs task containers in rootless podman on the
+  worker's machine; it is the one engine on Slurm and the HF cluster. `docker` does the same for
+  `compute: local` on a machine that already runs dockerd ([Local runs](local.md#local-runs)).
 - `environment.backend: hf-sandbox` needs a prebuilt public `docker_image` in the
   task configuration. Local mounts and multi-container Compose tasks are not
   supported. Use a Space or existing HTTP board rather than a local socket board.
@@ -160,14 +190,15 @@ the parallel-exploration task of [s³](https://arxiv.org/abs/2611.08615): each o
 searches its own copy of one tree of rooms for the exit with `maze look` and `maze move ROOM`,
 on a budget of 210 moves that one agent rarely finds it in, and the board lets the team split
 the search. Each agent's Trial is a compose stack, its container and a `maze` service that alone
-holds the tree, so it runs on docker or podman, not HF Sandboxes. The
+holds the tree, so it runs on podman, not HF Sandboxes. The
 [example](../experiments/s3-maze/spec.yaml) runs one team (`TREE`, default `maze-t01`, and `N`,
 default 4) on the HF cluster: one Slurm worker on hopper-cpu in rootless podman, with a local
 board, and `stop_on_success` with the service's `success_check`, so the first agent out ends
 the run. The example includes a protocol hint in its team text (`team.md`, the spec's
 `team_file`), so each agent reads the board and claims a door before it goes through one; remove
 `team_file` for the neutral condition of the earlier sweep. It needs the dataset on the shared
-disk for its `registries.conf` (podman pulls Docker Hub images through `mirror.gcr.io`),
+disk for its `eval/metrics.py` (podman pulls Docker Hub images through `mirror.gcr.io` with
+legion's own `scripts/slurm/registries.conf`, the workers' default),
 `HF_TOKEN` with read access to `HuggingFaceSwarms/s3-maze` and bucket create/write access in
 your personal account, a separate `HF_INFERENCE_TOKEN` with personal Inference Providers
 permission for the agents, and
@@ -182,8 +213,7 @@ See [billing and storage](billing.md) for personal permissions and optional org 
 ```sh
 DS=/fsx/$USER/s3-maze
 hf download HuggingFaceSwarms/s3-maze --repo-type dataset --revision 3421ea2d46e8963e59cf3690da6ea47739eefb2f --local-dir $DS
-printf 'SLURM_PARTITION=hopper-cpu\nSLURM_MAX_MEM_PER_CPU_MB=2000\nVENV=%s\nCONTAINERS_REGISTRIES_CONF=%s\n' \
-  "$PWD/.venv" "$DS/flock/registries.conf" > cluster.env
+printf 'SLURM_PARTITION=hopper-cpu\nSLURM_MAX_MEM_PER_CPU_MB=2000\nVENV=%s\n' "$PWD/.venv" > cluster.env
 # secrets.env (mode 600): HF_TOKEN, HF_INFERENCE_TOKEN, BUCKET_ID
 uv run legion init $PWD/runs/maze-t01-n04 --from experiments/s3-maze --profile cluster.env --secrets secrets.env
 echo RUN_NAME=maze-t01-n04 >> runs/maze-t01-n04/run.env

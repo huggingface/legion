@@ -65,6 +65,7 @@ from legion.controller.store import Store, agent_tokens
 from legion.current import CURRENT_FILE, clear_current, write_current
 from legion.models import DrainCommand, SwarmSpec, SwarmStatus, TokenUsage
 from legion.ops import SpecError, environment, prepare_bucket
+from legion.worker.agents import VERIFY_WAIT
 from legion.world.host import WorldHost
 
 log = logging.getLogger("legion.run")
@@ -83,7 +84,7 @@ class RunOptions:
     prompt: str | None = None  # sent once to every agent of every type at start
     preflight: bool = False
     strict: bool = False
-    grace: float = 10.0  # s for in-flight turns at stop
+    grace: float = VERIFY_WAIT + 30  # s for in-flight turns at stop
     # s between view frames and stop-condition checks (LEGION_LOCAL_REFRESH; tests use less)
     refresh: float = field(default_factory=lambda: float(os.environ.get("LEGION_LOCAL_REFRESH", "2")))
     reconcile_interval: float = field(  # LEGION_RECONCILE_INTERVAL, as for legion-controller
@@ -390,6 +391,7 @@ def write_bundle(run_dir: Path, store: Store, spec: SwarmSpec, *, started: datet
         "totals": totals,
         "loops": loops,
         "budget": budget,
+        "success": store.get_control(spec.swarm, "success"),
         "agents": per_agent,
         "removed_agents": removed,
         "workers": [{"id": w["id"], "type": w["type"], "crashes": w["crashes"],
@@ -633,6 +635,9 @@ async def run_local(opts: RunOptions) -> RunResult:
             if budget is not None and snap["cost"] >= budget:
                 reason = "budget"
                 break
+            if opts.until_idle and store.get_control(spec.swarm, "success"):
+                reason = "success"
+                break
             idle_streak = idle_streak + 1 if opts.until_idle and tracker.idle(snap) else 0
             if idle_streak >= 2:  # two frames in a row: a just-delivered prompt shows up
                 reason = "idle"
@@ -676,13 +681,13 @@ async def run_local(opts: RunOptions) -> RunResult:
             uv_log.setLevel(logging.CRITICAL)
             await server.stop()
             uv_log.setLevel(level)
-            clear_current(data_dir, os.getpid())
             if state is not None:
                 try:
                     await asyncio.to_thread(state.push, store, force=True, final=True)
                 except Exception:
                     log.exception("final state push failed")
             store.close()
+            clear_current(data_dir, os.getpid())
             logging.getLogger().removeHandler(handler)
             handler.close()
     say(f"run {run_dir.name}: {reason}; {totals.get('agents', 0)} agents, "
@@ -725,7 +730,7 @@ def main(
         None, "--preflight/--skip-preflight",
         help="Probe provider-backed models first (default: on when the spec has any)."),
     strict: bool = typer.Option(False, "--strict", help="Unverified models count as failures."),
-    grace: float = typer.Option(10.0, "--grace",
+    grace: float = typer.Option(VERIFY_WAIT + 30, "--grace",
                                 help="Seconds in-flight turns get to finish at stop."),
     apply: bool = typer.Option(True, "--apply/--no-apply",
                                help="--no-apply: only serve (`legion launch` creates the swarm)."),
@@ -753,9 +758,11 @@ def main(
             typer.echo(f"--until: {e} (or `idle`)", err=True)
             raise typer.Exit(2) from None
     if preflight is None:
-        preflight = provider_backed(spec)
-    elif not preflight and (models := unprobed(spec)):
+        preflight = provider_backed(spec) or strict
+    if apply and not preflight and (models := unprobed(spec)):
         _warn_unverified(models, "preflight skipped")
+        if strict:
+            raise typer.Exit(1)
     opts = RunOptions(spec=spec, data_dir=Path(data_dir), until=seconds, until_idle=idle,
                       prompt=prompt_text, preflight=preflight, strict=strict, grace=grace,
                       tools=bundle.data if bundle is not None else None, apply=apply,

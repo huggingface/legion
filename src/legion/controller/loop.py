@@ -39,7 +39,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from legion.controller.reconcile import agent_state, swarm_stream
-from legion.controller.store import Row, Store
+from legion.controller.store import Row, Store, agent_tokens
 from legion.models import (
     AgentState,
     Event,
@@ -906,6 +906,7 @@ class LoopEngine:
             self._wakes.pop(name, None)
         workers = {w["id"]: w for w in self.store.list_workers(spec.swarm, type_name)}
         cap = agent_cap(ts)
+        max_output = lp.while_.agent_output_tokens
         max_rounds = lp.while_.max_rounds
         every = lp.every_s
         flags = self.store.swarm_flags(spec.swarm)
@@ -930,6 +931,11 @@ class LoopEngine:
                 continue
             if cap is not None and a["cost"] >= cap:
                 self._agent_done(a, st, L, "agent_usd", now)
+                changed.add(name)
+                continue
+            if max_output is not None and sum(
+                    u.output for u in agent_tokens(a).values()) >= max_output:
+                self._agent_done(a, st, L, "agent_output_tokens", now)
                 changed.add(name)
                 continue
             if st["phase"] == "new":

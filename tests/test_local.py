@@ -12,6 +12,7 @@ import re
 import sys
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 
 import httpx
 import pytest
@@ -19,7 +20,7 @@ import yaml
 from typer.testing import CliRunner
 
 from legion import cli
-from legion.client import connect
+from legion.client import Client, connect
 from legion.controller import local, localrun
 from legion.controller.api import create_app
 from legion.controller.local import LocalJobsClient
@@ -362,6 +363,7 @@ def test_write_bundle(tmp_path):
     store = Store(tmp_path / "data")
     spec = local_spec(env={"X_TOKEN": "hunter2", "OPENAI_API_KEY": "sk-1", "MODE": "fast"})
     store.put_swarm(spec, time.time())
+    store.put_control("loc", "success", {"agent": "w-0000"})
     store.insert_agent("w-0000", "loc", "w", 0, time.time())
     store.insert_agent("w-0001", "loc", "w", 1, time.time())
     _events(store, "w-0001", "turn_started", "turn_ended")
@@ -373,6 +375,7 @@ def test_write_bundle(tmp_path):
     assert totals["agents"] == 2 and totals["turns_completed"] == 2 and totals["events"] == 4
     doc = json.loads((tmp_path / "run" / "run.json").read_text())
     assert doc["stop_reason"] == "idle" and doc["compute"] == "local"
+    assert doc["success"] == {"agent": "w-0000"}
     assert doc["spec"]["types"]["w"]["env"] == {"X_TOKEN": "<redacted>",
                                                 "OPENAI_API_KEY": "<redacted>", "MODE": "fast"}
     assert "hunter2" not in (tmp_path / "run" / "run.json").read_text()
@@ -479,3 +482,49 @@ def test_launch_ends_the_local_run_it_started_on_ctrl_c(tmp_path, monkeypatch):
     monkeypatch.setattr("legion.ops._launch", interrupted)
     runner.invoke(cli.app, ["launch", "spec.yaml", "--skip-preflight"])
     assert ended == [run]
+
+
+async def test_until_idle_stops_on_recorded_success(tmp_path):
+    spec = SwarmSpec.model_validate({
+        "swarm": "success", "compute": "local", "inference": FAKE,
+        "types": {"w": {**TYPE, "replicas": 0}}})
+    out = io.StringIO()
+    task = asyncio.create_task(localrun.run_local(localrun.RunOptions(
+        spec=spec, data_dir=tmp_path, until=30, until_idle=True, refresh=0.05, grace=0, out=out)))
+    current = tmp_path / "current"
+    while not current.exists():
+        assert not task.done(), out.getvalue()
+        await asyncio.sleep(0.02)
+    info = json.loads(current.read_text())
+    external = Store(Path(info["run_dir"]) / "controller")
+    external.put_control("success", "success", {"agent": "winner"})
+    external.close()
+    result = await asyncio.wait_for(task, 10)
+    assert result.reason == "success"
+    assert json.loads((result.run_dir / "run.json").read_text())["success"] == {"agent": "winner"}
+
+
+def test_default_grace_allows_verifier_to_finish():
+    from legion.worker.agents import VERIFY_WAIT
+
+    assert localrun.RunOptions(spec=local_spec()).grace >= VERIFY_WAIT + 30
+
+
+@pytest.mark.parametrize("finish_at", [200, None])
+def test_stop_waits_for_local_shutdown_and_reports_timeout(monkeypatch, finish_at):
+    from legion import ops
+
+    now = [0.0]
+    run = {"pid": 123, "swarm": "loc", "run_dir": "/tmp/local-run"}
+    monkeypatch.setattr(ops.os, "kill", lambda *args: None)
+    monkeypatch.setattr(ops.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(ops, "_sleep", lambda _: now.__setitem__(0, now[0] + 1))
+    monkeypatch.setattr(ops, "local_run", lambda env: None if finish_at and now[0] >= finish_at else run)
+    api = Client(env={})
+    if finish_at:
+        assert ops.stop(api, "loc", delete=True) == {"ended": run}
+        assert now[0] == finish_at
+    else:
+        with pytest.raises(ops.SpecError, match="shutdown is still in progress"):
+            ops.stop(api, "loc", delete=True)
+        assert now[0] >= ops.LOCAL_STOP_S >= 330

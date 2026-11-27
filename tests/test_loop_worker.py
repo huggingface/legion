@@ -203,6 +203,10 @@ async def test_a_wake_outside_the_round_count_keeps_the_round(tmp_path):
 class StoppedAdapter(ScriptedAdapter):
     """Turn 1 calls `done` with a summary; later turns call tools and stop at max_turns."""
 
+    def __init__(self, *args, status, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.status = status
+
     async def _finish(self):
         await asyncio.sleep(self.turn_time)
         if len(self.sent) == 1:
@@ -214,15 +218,16 @@ class StoppedAdapter(ScriptedAdapter):
                 self._q.put(AdapterEvent("message", message={"role": "assistant", "content": [
                     {"type": "text", "text": "let me check"},
                     {"type": "toolCall", "id": name, "name": name, "arguments": {}}]}))
-            self._q.put(AdapterEvent("turn_ended", status="error", error="max_turns exceeded",
+            self._q.put(AdapterEvent("turn_ended", status=self.status,
                                      data={"reason": "max_turns"}))
         self._turn = None
 
 
-async def test_a_turn_stopped_without_done_replaces_the_stale_summary(tmp_path):
+@pytest.mark.parametrize("status", ["error", "completed"])
+async def test_a_turn_stopped_without_done_replaces_the_stale_summary(tmp_path, status):
     """A loop turn that ends at max_turns replaces `last_summary`, so later prompts do not repeat
     an older turn's `done` summary."""
-    rt, ad = runtime(tmp_path, idle_grace="5s", adapter=StoppedAdapter(tmp_path / "h"))
+    rt, ad = runtime(tmp_path, idle_grace="5s", adapter=StoppedAdapter(tmp_path / "h", status=status))
     await rt.setup(restore=False)
     rt.start_loop(start("round {round}: {last_summary}", max_rounds=3))
     await until(lambda: custom(rt, "loop_stopped"), timeout=5)

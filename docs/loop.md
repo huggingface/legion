@@ -25,6 +25,7 @@ loop:                          # a Harbor spec's run loop; a role's own `agents.
     max_rounds: 400          # loop prompts per agent
     budget_usd: 12           # the type's total cost (type-wide)
     agent_usd: 0.05          # per agent; alternatively use a mapping by model id (see below)
+    agent_output_tokens: 32768  # per agent: output tokens, every model counted
   final:                     # optional: one last prompt per live agent once the loop stops
     prompt: "Final round: submit your best result with submit_final."
     # or prompt_file: prompts/final.md
@@ -43,7 +44,7 @@ limits:
 | `wake.counts_as_round` | default `false`: a wake prompt is not a round. It carries the current `{round}`, does not advance it and does not count toward `max_rounds`; `wake.max` caps it instead. `true`: a wake prompt is the next round |
 | `notices` | default `false`. `true`: the round prompts name the board notifications since the agent's last round in one line after the rendered prompt (see "Notices") |
 | `while.until`, `while.budget_usd` | type-wide: when either fails the loop stops for every agent of the type |
-| `while.max_rounds`, `while.agent_usd` | per agent: the agent leaves the loop; when every agent has left, the loop stops |
+| `while.max_rounds`, `while.agent_usd`, `while.agent_output_tokens` | per agent: the agent leaves the loop; when every agent has left, the loop stops. `agent_output_tokens` caps the agent's output tokens without a price (e.g. a self-hosted model). It counts provider-reported usage only: a model server that reports none never reaches the cap, so pair it with `max_rounds` or `until` |
 | `final.prompt` / `prompt_file` | sent once to every live agent when the loop stops (any reason except a stop with `final: false` (`POST /swarms/{swarm}/loop`) and the hard budget stop) |
 | `final.reserve_usd` | subtracted from `limits.budget_usd` to get the point where loops stop; summed over the types that have a final round |
 
@@ -104,7 +105,7 @@ handover to the workers, the budget stop) their rounds are taken back: only deli
 count.
 
 **Stopping.** The loop stops when a type-wide condition fails (`until`, `budget_usd`, the
-budget threshold), when every agent has left it (`max_rounds`, `agent_usd`,
+budget threshold), when every agent has left it (`max_rounds`, `agent_usd`, `agent_output_tokens`,
 `errors`; the reason is theirs if they agree, else `agents_done`), on `legion stop --final`, or
 when `loop:` is removed from the spec (no final round then). Stopping drops the type's
 undelivered loop prompts and sends `loop_stop` to worker-side loops.

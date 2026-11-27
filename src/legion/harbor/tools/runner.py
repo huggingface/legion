@@ -150,6 +150,12 @@ def load_selected(directory, names):
                 raise ValueError(f"Unknown tool: {name}")
             functions[name] = function
             definitions[name] = describe_tool(function)
+            # A tool whose required arguments alone are not a valid call (one of two is
+            # needed) names an explicit example for the agent instructions.
+            example = getattr(modules[module_name], "EXAMPLES", {}).get(export)
+            if example is not None:
+                validate_value(example, definitions[name]["parameters"], name)
+                definitions[name]["example"] = example
     return functions, definitions, modules
 
 

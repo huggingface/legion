@@ -366,8 +366,7 @@ class AgentRuntime:
         except Exception as e:
             log.exception("%s: burst failed", self.name)
             self.emit("error", {"error": f"{type(e).__name__}: {e}", "dropped_prompts": len(self.buffer)})
-            self.buffer.clear()
-            self._loop_inflight = None  # a dropped final prompt exempts no later turn
+            self._defer_buffer("start_failed")
         finally:
             self.phase = "stopping"
             await self.adapter.stop()
@@ -439,7 +438,8 @@ class AgentRuntime:
                                          **extra,
                                          **{k2: v for k2, v in ev.data.items() if k2 != "tokens"}})
                 summary = self._turn_summary or self._turn_text
-                if self._turn_summary is None and ev.status not in (None, "completed"):
+                if self._turn_summary is None and (hit_max_turns(ev.data)
+                                                   or ev.status not in (None, "completed")):
                     summary = self._unfinished_summary(ev.data)  # not a stale or half-way text
                 if summary:
                     self.state.last_summary = summary

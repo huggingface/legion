@@ -13,16 +13,17 @@ from pathlib import Path
 import pytest
 
 GENERIC = Path(__file__).parent.parent / "scripts" / "slurm"
+SHELL = sorted(p for p in GENERIC.iterdir() if p.suffix in (".sh", ".sbatch"))  # not registries.conf
 
 
-@pytest.mark.parametrize("name", sorted(p.name for p in GENERIC.iterdir()))
+@pytest.mark.parametrize("name", [p.name for p in SHELL])
 def test_generic_scripts_parse(name):
     assert subprocess.run(["bash", "-n", str(GENERIC / name)], check=False).returncode == 0
 
 
 @pytest.mark.skipif(shutil.which("shellcheck") is None, reason="shellcheck not installed")
 def test_generic_scripts_pass_shellcheck():
-    r = subprocess.run(["shellcheck", "-x", "-S", "warning", *sorted(GENERIC.iterdir())],
+    r = subprocess.run(["shellcheck", "-x", "-S", "warning", *SHELL],
                        cwd=GENERIC, capture_output=True, text=True, check=False)
     assert r.returncode == 0, r.stdout
 

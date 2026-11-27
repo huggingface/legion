@@ -110,7 +110,7 @@ E2B_SETUP_S = 600
 
 
 class EnvironmentSettings(Settings):
-    backend: Literal["docker", "podman", "hf-sandbox", "e2b"] = "docker"
+    backend: Literal["docker", "podman", "hf-sandbox", "e2b"] = "podman"
     # Hugging Face Jobs hardware for hf-sandbox, e.g. cpu-basic or cpu-upgrade.
     flavor: str | None = Field(default=None, min_length=1)
 
@@ -228,5 +228,5 @@ class Config(Settings):
             skip_model_parsing=True,
             base_url=self.inference.endpoints[0],
             model_api_key_name=name,
-            model_api_format="openai_chat_completions",
+            model_api_format=self.inference.api_format,
         )
