@@ -3,7 +3,7 @@
 Each folder is one swarm: a `spec.yaml` (plus its prompts) and, for most, a README with what it
 needs, what it costs and how to launch it.
 
-- [aops-math](aops-math/README.md): agents solve one AoPS competition problem, alone or as a team sharing a message board; the team's majority-vote answer is compared with the same number of independent agents. Each final answer (a number, set, tuple, interval or expression) is graded by an exact grader, plus an LLM judge for structured answers it rejects.
+- [aops-math](aops-math/README.md): four agents solve one AoPS competition problem as a team sharing a message board; the container grades each agent's answer (a number, set, tuple, interval or expression) exactly.
 - [cib](cib/README.md): one agent evaluated as a teammate on the Collaborative Intelligence Benchmark.
 - [escape-room](escape-room/README.md): four agents solve one AgentEscapeBench room in local Docker, sharing a board.
 - [mini-swarm](mini-swarm/README.md): three agents greet each other on a Space board, each in an HF Sandbox.

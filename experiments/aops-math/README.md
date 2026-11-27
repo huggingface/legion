@@ -1,11 +1,22 @@
 # aops-math
 
-Agents solve one AoPS competition problem, alone or as a team sharing a message board (one `#general` channel). Each
-agent works in its own container and writes its final answer to `/app/answer.txt`: one number, or a set, tuple,
-interval or expression. A hidden grader checks it exactly; for structured answers it rejects, an LLM judge decides.
-A team's answer is the majority vote of its agents. We compare a team of N with N agents working alone (same vote) and
-with one agent given the team's total tokens. The tasks, every setup and the details are in the dataset card of
-`HuggingFaceSwarms/aops-math-bench` (private); `spec.yaml` here is its `setups/team_4.yaml`.
+Four agents solve one AoPS competition problem as a team sharing a message board (one `#general` channel). Each agent
+works in its own container and writes its final answer to `/app/answer.txt`: one number, or a set, tuple, interval or
+expression. A hidden grader in the container checks it exactly. The tasks are in
+`HuggingFaceSwarms/aops-math-bench` (private): 200 problems with a numeric answer and 200 with a structured one.
+
+The folder has everything the run needs:
+
+- `spec.yaml`: the team, the board rules (posts up to 2000 characters, at least 5 s apart, 40 per agent) and the loop.
+  Each agent is prompted once and woken by its teammates' posts. At `until: 30m` the loop stops, and every agent gets
+  a final prompt to leave just its answer in `/app/answer.txt`. The run then ends by itself.
+- `team.md`: how to work as a team and use the board.
+- `tools/board.py`: the board tools (`board.post`, `board.read`, `board.wait`). Agents write a post to a file and then
+  post it, so math, quotes and `$` never pass through the shell; reads return only unseen posts, one line each.
+
+Each agent may write at most 32,768 output tokens (`loop.while.agent_usd` with `pricing: [0, 1, 0]`, i.e. $1 per 1M
+output tokens; the prices are not real). The task revision pinned in the spec blocks the agents' network, except
+the model server.
 
 **Needs**
 
@@ -15,21 +26,16 @@ with one agent given the team's total tokens. The tasks, every setup and the det
   card has the vLLM command we used (Qwen3.5: presence penalty 0, higher values break tool calls).
 - `HF_TOKEN` with read access to the dataset. Git must be able to clone it, e.g. `hf auth login --add-to-git-credential`.
 
-**Cost**: the agents cost nothing beyond your own server; `score.py --judge` costs about $0.001 per structured answer
-the exact grader rejects. One task with a team of 4 takes about 5-15 min.
+**Cost**: nothing beyond your own model server. One task takes about 30 min (the loop's `until`).
 
 **Launch**
 
 ```sh
-LEGION=$PWD
-hf download HuggingFaceSwarms/aops-math-bench --repo-type dataset --include "setups/*" --local-dir aops-math-bench
-cd aops-math-bench/setups
-export MODEL=<served model> SERVER_URL=http://<host>:<port>/v1 TASK_ID=1e0f5b785c687e40 TASK_REV=<dataset commit>
-uv run --project $LEGION python pacer.py --rounds 1 --allowance 32768 &
-uv run --project $LEGION python -m legion.controller.localrun team_4.yaml --until idle --grace 150
-OPENAI_API_KEY=... uv run --project $LEGION python score.py --judge
+export MODEL=<served model> SERVER_URL=http://<host>:<port>/v1 TASK_ID=1e0f5b785c687e40
+uv run legion launch experiments/aops-math/spec.yaml
 ```
 
-`pacer.py` ends the run once every agent has been idle for 45 s, with one final prompt; the run and its bundle are
-under `.legion/`. `score.py --judge` prints each agent's grade and the team's vote. Other setups (one agent, teams of
-2-16, one agent with a team's tokens) are in the card.
+`uv run legion status` shows progress. The run bundle, with each agent's answer and grade, is written under
+`.legion/` when the run ends. Scoring the team (majority vote over the agents' answers, plus an optional LLM judge for
+structured answers the exact grader rejects), other team sizes, a single agent and one agent given a team's tokens are
+in the dataset card (`setups/`).

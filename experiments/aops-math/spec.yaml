@@ -1,4 +1,4 @@
-# team_4: a team of 4 on one task, sharing a message board
+# A team of 4 on one AoPS problem, sharing a message board. What it needs and how to launch: README.md.
 name: ${RUN_NAME:-team-4}
 model: ${MODEL}
 pricing: [0, 1, 0]     # not real prices: with $1 per 1M output tokens, agent_usd below is a per-agent output-token cap
@@ -9,7 +9,7 @@ inference:
 task:
   repo: https://huggingface.co/datasets/HuggingFaceSwarms/aops-math-bench
   selector: math-${TASK_ID}
-  revision: ${TASK_REV:-main}
+  revision: ${TASK_REV:-3f6f3d5f1f03ea2fc92b303c91036085a957aadb}   # agents' network blocked except the model server
 agents:
   count: 4
 team_file: team.md
@@ -18,7 +18,7 @@ resources:
     channels: [general]
     wake: ["mention", "thread", "channel"]
     rules:
-      max_len: 1000
+      max_len: 2000
       min_post_gap: 5s
       max_posts: 40
       max_channels: 1
