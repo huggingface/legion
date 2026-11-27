@@ -3,6 +3,7 @@
 Each folder is one swarm: a `spec.yaml` (plus its prompts) and, for most, a README with what it
 needs, what it costs and how to launch it.
 
+- [antbench](antbench/README.md): ten agents each steer one ant of a real-time AntBench world, in E2B sandboxes, on HF Jobs.
 - [aops-math](aops-math/README.md): four agents solve one AoPS competition problem as a team sharing a message board; the container grades each agent's answer (a number, set, tuple, interval or expression) exactly.
 - [cib](cib/README.md): one agent evaluated as a teammate on the Collaborative Intelligence Benchmark.
 - [escape-room](escape-room/README.md): four agents solve one AgentEscapeBench room in local Docker, sharing a board.

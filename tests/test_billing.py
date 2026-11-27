@@ -288,6 +288,6 @@ def test_existing_bucket_creation_uses_hub_exist_ok_without_visibility_update(
     launch(api, read_spec(path), path, preflight=False)
     assert create.call_count == 1
     request = create.calls[0].request
-    assert json.loads(request.content) == {"private": True}
+    assert json.loads(request.content) == {"visibility": "private"}
     assert request.headers["authorization"] == "Bearer fake-hub-token"
     assert len(respx_mock.calls) == 1  # no PATCH to change an existing bucket's visibility

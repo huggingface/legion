@@ -14,16 +14,16 @@ from itertools import islice
 from pathlib import Path
 from typing import Literal
 
-import httpx
 from huggingface_hub import HfApi, set_client_factory
 from huggingface_hub.community import deserialize_event
+from huggingface_hub.utils import httpx  # httpx2: the client huggingface_hub 2 expects
 
 # PR APIs need no native Xet transfer client. Package SDK/YAML Python files and
 # metadata, rather than their native optional dependencies. Metadata is retained
 # for SDK version checks. RECORD is omitted by the portable bundler, so files()
 # can return None when this declaration is evaluated inside an agent.
 DEPENDENCIES = [
-    "httpx",
+    "httpx2",
     "filelock",
     "fsspec",
     "packaging",

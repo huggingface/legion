@@ -135,6 +135,9 @@ def spec_keys(data: Any, cluster: Mapping[str, str] | None = None) -> dict[str, 
               if isinstance(b, dict)]
     named += [(o.get("token_env"), f"resources.{n}.token_env")
               for n, o in (data.get("resources") or {}).items() if isinstance(o, dict)]
+    named += [(o["env"].get("secret_env"), f"resources.{n}.env.secret_env")  # an env world's
+              for n, o in (data.get("resources") or {}).items()
+              if isinstance(o, dict) and isinstance(o.get("env"), dict)]
     named += [(s, f"types.{n}.secrets") for n, t in (data.get("types") or {}).items()
               if isinstance(t, dict) for s in t.get("secrets") or []]
     cluster = cluster or {}

@@ -12,10 +12,12 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 import legion.harbor
 from legion import secrets_file
+from legion.harbor import agent as legion_agent
 from legion.harbor import launch, sources
 from legion.harbor.spec import Spec, compile_spec
 from legion.harbor.tools.bundle import build_tool_bundle
@@ -23,9 +25,13 @@ from legion.worker.adapters.harbor import make_adapter
 from legion.worker.harbor import HarborHost
 
 from .. import fake_msgboard
+from ..worker_fakes import until
+from . import test_gateway
 from .test_adapter import TASK, FakeEnv, Fakes, Trial, read
 
 BOARD = Path(legion.harbor.__file__).with_name("builtin") / "resources" / "message_board.py"
+GATEWAY = BOARD.with_name("gateway.py")
+Model, model = test_gateway.Model, test_gateway.model  # the fake model server and its fixture
 
 SPEC = """
 name: host
@@ -175,7 +181,8 @@ async def test_twenty_agents_share_the_host_and_their_sandbox_commands_overlap(w
         assert trial.config.agent.env["FAKE_TOKEN"] == f"tok-{a.agent}"
         assert trial.config.task.path == host.task_path
         assert trial.config.environment.import_path == "legion.harbor.envs:HFSandbox"
-    assert adapters[0].trial_status() == {"id": "agent-0000-t1", "attempt": 1, "alive": True}
+    status = adapters[0].trial_status()
+    assert status.pop("last_seen") and status == {"id": "agent-0000-t1", "attempt": 1, "alive": True}
 
     await asyncio.gather(*(a.close() for a in adapters))
     assert all(t.verified for t in world.trials) and not adapters[0].trial_status()["alive"]
@@ -458,5 +465,77 @@ async def test_secrets_from_the_workers_secrets_file_reach_the_trial(world, tmp_
     assert world.trials[0].config.agent.env["HF_INFERENCE_TOKEN"] == "key-from-file"
     assert host.resources.providers["tokened"].token == "op-from-file"
     assert not {"HF_INFERENCE_TOKEN", "FAKE_OPERATOR_TOKEN"} & set(os.environ)
+    await a.close()
+    await host.close()
+
+
+class GatewayEnv(FakeEnv):
+    """A Pi turn makes one streamed call as Pi would from its models.json, `$NAME` header values
+    resolved from its env, without `Authorization` (the jobs proxy drops it)."""
+
+    async def exec(self, command, **kw):
+        if " pi --print " in command:
+            trial = self.fakes.trials[-1]
+            (provider,) = json.loads((trial.agent.logs_dir / "models.json").read_text())[
+                "providers"].values()
+            headers = {k: kw["env"][v[1:]] if v.startswith("$") else v
+                       for k, v in provider["headers"].items()}
+            ask = {"model": provider["models"][0]["id"], "stream": True, "messages": []}
+            Model.go.set()
+            async with httpx.AsyncClient() as client:
+                r = await client.post(f"{provider['baseUrl']}/chat/completions", json=ask,
+                                      headers=headers)
+                r.raise_for_status()
+        return await super().exec(command, **kw)
+
+
+async def test_a_gateway_keeps_the_key_and_counts_each_call_once(world, model, tmp_path,
+                                                                 monkeypatch):
+    """On e2b with resources.gateway the Trial holds only its gateway token and URL; Pi's call
+    is counted by the gateway (the host's emit), not again at the turn's end (metered)."""
+    monkeypatch.setattr(launch.Trial, "create", lambda config: create(config))
+
+    async def create(config):
+        trial = Trial(config, world)
+        trial.agent_environment = GatewayEnv(trial.agent_environment.logs_dir, world)
+        world.trials.append(trial)
+        return trial
+
+    shutil.copy(GATEWAY, tmp_path / "resources" / "gateway.py")
+    spec = (SPEC.replace("{fake: {mount: MOUNT}}", "{fake: {mount: false}, gateway: {port: 0}}")
+            .replace("backend: hf-sandbox", "backend: e2b")
+            .replace("inference: {api_key_env: HF_INFERENCE_TOKEN}",
+                     "inference: {urls: ['https://models.example/v1'], "
+                     "api_key_env: HF_INFERENCE_TOKEN}")
+            + "compute: hf-jobs\nnamespace: ns\nbucket_id: ns/b\n")
+    (tmp_path / "spec.yaml").write_text(spec)
+    ts = compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK,
+                      build_tool_bundle(tmp_path / "tools", ["sample.*"],
+                                        tmp_path / "launcher-tools.tar.gz")).types["agent"]
+    ts.resolved_model.inference.urls = [f"{model}/v1"]  # the fake model server, on this machine
+    monkeypatch.setattr(legion_agent, "PROBE", 0.02)  # an idle Trial probes its sandbox often
+    usage = []
+    host = HarborHost(tmp_path / "work" / "_harbor" / "_worker",
+                      emit=lambda agent, event: usage.append((agent, event)))
+    a = make_adapter(tmp_path / "work" / "agent-0000", "agent-0000", ts, host=host)
+    await a.start(a.workdir, None, a.spec)
+    events = a.events()
+    await a.send("go")
+    assert "usage" not in [e.kind for e in await read(events, "turn_ended")]
+    gateway = host.resources.providers["gateway"]
+    agent = world.trials[0].config.agent
+    assert agent.base_url == f"{gateway.url}/inference" and Model.seen[0]["headers"][
+        "Authorization"] == "Bearer test-inference-secret"
+    held = json.dumps([agent.env, world.pi_env, (a.trial.agent.logs_dir / "models.json")
+                       .read_text()])
+    assert "test-inference-secret" not in held
+    assert usage == [("agent-0000", {"resource": "gateway", "kind": "usage", "data": {
+        "input": 1000, "output": 100, "cache_read": 500, "cache_write": 0, "reasoning": 40}})]
+    world.probe_ok = False  # the sandbox stops answering: the Trial ends, and so does its token
+    await until(lambda: not a.alive())
+    async with httpx.AsyncClient() as client:
+        r = await client.get(f"{gateway.url}/world/manifest",
+                             headers={"X-World-Token": agent.env[agent.model_api_key_name]})
+    assert r.status_code == 401
     await a.close()
     await host.close()
