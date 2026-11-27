@@ -8,7 +8,16 @@ from pathlib import Path
 from huggingface_hub import hf_hub_download
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from math_eval_common import judge_json, load_runs, majority, offline_reward, read_text, summary
+from math_eval_common import (
+    compare_binary,
+    judge_json,
+    load_runs,
+    majority,
+    offline_reward,
+    output_tokens,
+    read_text,
+    summary,
+)
 
 REPO = "HuggingFaceSwarms/IMO-AnswerBench"
 REVISION = "40d9d407c8b5e4b62c6b2047e21c807214f2a068"
@@ -75,7 +84,7 @@ def score(roots, args):
                     stage2 = equivalent(answer, ref["answer"], ref["kind"], problem, args)
                     correct = int(stage2)
             rows.append({"agent": agent["agent"], "answer": answer, "correct": correct,
-                         "stage2_accepted": stage2})
+                         "stage2_accepted": stage2, "output_tokens": output_tokens(agent)})
         winner = majority([row["answer"] for row in rows])
         votes = [row["correct"] for row in rows if row["answer"] == winner] if winner else []
         if len(set(votes)) > 1:
@@ -84,7 +93,7 @@ def score(roots, args):
                       "agents": rows, "n": len(rows), "majority_answer": winner,
                       "maj_at_n": votes[0] if votes else 0,
                       "best_of_n": max(row["correct"] for row in rows)})
-    return {"teams": teams, "solo": summary(row["correct"] for t in teams for row in t["agents"]),
+    return {"comparison": compare_binary(teams, getattr(args, "k", 4)), "teams": teams, "solo": summary(row["correct"] for t in teams for row in t["agents"]),
             "maj_at_n": summary(t["maj_at_n"] for t in teams),
             "best_of_n": summary(t["best_of_n"] for t in teams),
             "by_n": {str(n): {"maj_at_n": summary(t["maj_at_n"] for t in teams if t["n"] == n),
@@ -95,12 +104,15 @@ def score(roots, args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("runs", nargs="+", help="Legion results directories; one per run")
+    parser.add_argument("--k", type=int, default=4)
     parser.add_argument("--judge", action="store_true")
     parser.add_argument("--judge-model")
     parser.add_argument("--judge-base-url")
     parser.add_argument("--judge-api-key-env", default="HF_INFERENCE_TOKEN")
     parser.add_argument("--reference-dir")
     args = parser.parse_args()
+    if args.k < 1:
+        parser.error("--k must be positive")
     if args.judge and not args.judge_model:
         parser.error("--judge requires --judge-model")
     print(json.dumps(score(args.runs, args), indent=2, ensure_ascii=False))

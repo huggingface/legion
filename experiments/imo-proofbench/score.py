@@ -5,7 +5,15 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from math_eval_common import judge_json, load_runs, majority, read_text, summary
+from math_eval_common import (
+    compare_proof,
+    judge_json,
+    load_runs,
+    majority,
+    output_tokens,
+    read_text,
+    summary,
+)
 
 
 def grade(proof, ref, args):
@@ -48,7 +56,8 @@ def score(roots, args):
                 value, reason = 0, "No structurally valid proof submitted"
             rows.append({"type": "proof", "run": team["run"], "swarm": team["swarm"],
                          "task": team["task"], "task_id": team["task_id"], "agent": agent["agent"], "score": value,
-                         "percent_of_7": 100 * value / 7, "reason": reason, "proof": proof})
+                         "percent_of_7": 100 * value / 7, "reason": reason, "proof": proof,
+                         "output_tokens": output_tokens(agent)})
         selected = [r for r in rows if r["agent"] == args.selected_agent]
         if args.selected_agent and not selected:
             raise ValueError(f"Selected agent {args.selected_agent} absent from {team['task']}")
@@ -64,6 +73,8 @@ def score(roots, args):
                         "selected": selected[0]["score"] if selected else None,
                         "selected_agent": args.selected_agent,
                         "scale_max": 7,
+                        "output_tokens": (sum(r["output_tokens"] for r in rows)
+                                          if all(r["output_tokens"] is not None for r in rows) else None),
                         "mean_percent_of_7": 100 * sum(r["score"] for r in rows) / (7 * len(rows)),
                         "max_percent_of_7": 100 * max(r["score"] for r in rows) / 7,
                         "consensus_percent_of_7": (100 * sum(consensus_scores) / (7 * len(consensus_scores))
@@ -75,6 +86,7 @@ def score(roots, args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("runs", nargs="+")
+    parser.add_argument("--k", type=int, default=4)
     parser.add_argument("--judge-model", required=True)
     parser.add_argument("--provider", choices=["openai", "gemini"], default="openai")
     parser.add_argument("--judge-base-url")
@@ -82,9 +94,13 @@ def main():
     parser.add_argument("--selected-agent", help="Agent whose proof was selected before grading")
     parser.add_argument("--output", help="Write JSONL to this file instead of stdout")
     args = parser.parse_args()
+    if args.k < 1:
+        parser.error("--k must be positive")
     if not args.judge_api_key_env:
         args.judge_api_key_env = "GEMINI_API_KEY" if args.provider == "gemini" else "HF_INFERENCE_TOKEN"
-    lines = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in score(args.runs, args))
+    records = score(args.runs, args)
+    records.extend(compare_proof(records, args.k))
+    lines = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in records)
     if args.output:
         Path(args.output).write_text(lines)
     else:

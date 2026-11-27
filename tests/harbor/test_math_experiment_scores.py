@@ -346,3 +346,102 @@ def test_smallmath_integer_canonicalization_respects_verifier_bounds():
     assert mod.canonical("+" + "0" * 999 + "1") == "+" + "0" * 999 + "1"
     assert mod.canonical("1" * 5000) == "1" * 5000
     assert mod.canonical("1.0") == "1.0"
+
+
+def test_binary_comparison_solos_team_and_tokens(tmp_path):
+    mod = module("smallmath")
+    task = "smallmath-0015"
+    roots = []
+    for idx, (answer, reward) in enumerate([("83", 1), ("+083", 1), ("1", 0), ("+001", 0)]):
+        root = tmp_path / f"solo-{idx}"
+        verifier = trial(root, task, "a", answer, reward)
+        result = verifier.parent / "result.json"
+        data = json.loads(result.read_text())
+        data["agent_result"] = {"n_output_tokens": 10 * (idx + 1)}
+        result.write_text(json.dumps(data))
+        roots.append(root)
+    team = tmp_path / "team"
+    for idx, (answer, reward) in enumerate([("83", 1), ("83", 1), ("1", 0), ("2", 0)]):
+        trial(team, task, f"a{idx}", answer, reward)
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"tasks": [{"task": task, "level": 6}]}))
+    comparison = mod.score([*roots, team], manifest)["comparison"]
+    result = comparison["tasks"][0]
+    assert result["solo"]["pass_at_1"] == 0.5
+    assert result["solo"]["pass_at_k"] == 1
+    assert result["solo"]["indep_maj_at_k"] == 0
+    assert result["solo"]["mean_output_tokens"] == {"count": 4, "mean": 25}
+    assert result["team"]["maj_at_k"]["mean"] == result["team"]["pass_at_k"]["mean"] == 1
+    assert result["team"]["mean_output_tokens"]["mean"] is None
+    assert comparison["levels"]["6"]["solo_pass_at_1"]["mean"] == 0.5
+    assert comparison["levels"]["1"]["solo_pass_at_1"]["mean"] is None
+    partial = mod.score(roots[:3], manifest)["comparison"]["tasks"][0]["solo"]
+    assert partial["pass_at_k"] is None and partial["indep_maj_at_k"] is None
+
+
+def test_answer_comparison_unbiased_pass_at_four(tmp_path):
+    mod = module("imo-answerbench")
+    task = "imo-bench-algebra-001"
+    roots = []
+    for idx in range(5):
+        root = tmp_path / str(idx)
+        trial(root, task, "a", "3" if idx == 0 else "2", int(idx == 0))
+        roots.append(root)
+    comparison = mod.score(roots, answer_args())["comparison"]["tasks"][0]["solo"]
+    assert comparison["n"] == 5
+    assert comparison["pass_at_1"] == 0.2
+    assert comparison["pass_at_k"] == pytest.approx(0.8)
+    assert comparison["indep_maj_at_k"] == 0
+
+
+@respx.mock
+def test_proof_comparison_solo_and_team(tmp_path, monkeypatch):
+    mod = module("imo-proofbench")
+    monkeypatch.setenv("TEST_JUDGE_KEY", "test")
+    roots = []
+    for idx in range(4):
+        root = tmp_path / f"solo-{idx}"
+        trial(root, "pb-basic-001", "a", proof="proof", reward=1)
+        roots.append(root)
+    team = tmp_path / "team"
+    for idx in range(4):
+        trial(team, "pb-basic-001", f"a{idx}", proof="proof", reward=1)
+    respx.post("https://judge/v1/chat/completions").mock(side_effect=[
+        openai_reply({"score": n, "reason": "ok"}) for n in (1, 3, 6, 7, 4, 4, 6, 7)])
+    records = mod.score([*roots, team], proof_args())
+    result = mod.compare_proof(records)[0]
+    assert result["solo"]["pass_at_1_percent_of_7"]["mean"] == pytest.approx(100 * 17 / 28)
+    assert result["solo"]["pass_at_k_ge_6"] == 1
+    assert result["solo"]["max_observed_percent_of_7"] == 100
+    assert result["team"]["pass_at_k_ge_6"]["mean"] == 1
+    assert result["team"]["max_percent_of_7"]["mean"] == 100
+
+
+def test_team_token_sum_and_missing_solo_token(tmp_path):
+    mod = module("smallmath")
+    task = "smallmath-0015"
+    team = tmp_path / "team"
+    for idx in range(4):
+        verifier = trial(team, task, f"a{idx}", "83", 1)
+        result = verifier.parent / "result.json"
+        data = json.loads(result.read_text())
+        data["agent_result"] = {"n_output_tokens": 12}
+        result.write_text(json.dumps(data))
+    solo = tmp_path / "solo"
+    trial(solo, task, "a", "83", 1)
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"tasks": [{"task": task, "level": 6}]}))
+    result = mod.score([solo, team], manifest)["comparison"]["tasks"][0]
+    assert result["team"]["mean_output_tokens"] == {"count": 1, "mean": 48}
+    assert result["solo"]["mean_output_tokens"] == {"count": 0, "mean": None}
+    assert result["solo"]["pass_at_k"] is None
+
+
+def test_proof_comparison_insufficient_samples():
+    mod = module("imo-proofbench")
+    rows = [{"type": "team", "task_id": "pb-basic-001", "n": 1, "mean": 5,
+             "output_tokens": None}]
+    result = mod.compare_proof(rows)[0]
+    assert result["solo"]["pass_at_k_ge_6"] is None
+    assert result["solo"]["max_observed_percent_of_7"] == 500 / 7
+    assert result["team"]["n_runs"] == 0

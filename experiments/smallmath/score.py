@@ -8,7 +8,15 @@ from pathlib import Path
 from huggingface_hub import hf_hub_download
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from math_eval_common import load_runs, majority, offline_reward, read_text, summary
+from math_eval_common import (
+    compare_binary,
+    load_runs,
+    majority,
+    offline_reward,
+    output_tokens,
+    read_text,
+    summary,
+)
 
 REVISION = "57dbf3f7e83aa8c5c980387a2216d7bb87e4e7cc"
 # The pinned verifier's MAX_LEN and MAX_INT_DIGITS are both 1000. This is a
@@ -25,7 +33,7 @@ def canonical(answer):
     return answer
 
 
-def score(roots, manifest):
+def score(roots, manifest, k=4):
     if manifest is None:
         manifest = hf_hub_download("HuggingFaceSwarms/SmallMath", "tasks/manifest.json",
                                    repo_type="dataset", revision=REVISION)
@@ -39,7 +47,8 @@ def score(roots, manifest):
         for agent in team["agents"]:
             answer = canonical(read_text(agent["verifier"] / "answer.txt"))
             correct = offline_reward(agent)
-            rows.append({"agent": agent["agent"], "answer": answer, "correct": correct})
+            rows.append({"agent": agent["agent"], "answer": answer, "correct": correct,
+                         "output_tokens": output_tokens(agent)})
         winner = majority([row["answer"] for row in rows])
         votes = [row["correct"] for row in rows if row["answer"] == winner] if winner else []
         if len(set(votes)) > 1:
@@ -52,16 +61,19 @@ def score(roots, manifest):
                 "maj_at_n": summary(t["maj_at_n"] for t in group),
                 "by_n": {str(n): summary(t["maj_at_n"] for t in group if t["n"] == n)
                          for n in sorted({t["n"] for t in group})}}
-    return {"overall": metrics(teams), "levels": {str(n): metrics([t for t in teams
+    return {"comparison": compare_binary(teams, k), "overall": metrics(teams), "levels": {str(n): metrics([t for t in teams
             if t["level"] == n]) for n in range(1, 7)}, "teams": teams}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("runs", nargs="+")
+    parser.add_argument("--k", type=int, default=4)
     parser.add_argument("--manifest", help="Pinned SmallMath tasks/manifest.json")
     args = parser.parse_args()
-    print(json.dumps(score(args.runs, args.manifest), indent=2))
+    if args.k < 1:
+        parser.error("--k must be positive")
+    print(json.dumps(score(args.runs, args.manifest, args.k), indent=2))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,35 @@
+name: ${RUN_NAME:-smallmath-solo}
+model: ${MODEL:-Qwen/Qwen3.8-27B}
+naming: consecutive-id
+inference:
+  hf_jobs:
+    flavor: ${FLAVOR:-h200}
+    tool_call_parser: qwen3_coder
+    vllm_args:
+      - max_model_len=${MAX_MODEL_LEN:-131072}
+      - 'default_chat_template_kwargs={"enable_thinking": false}'
+    startup_timeout: 30m
+  api_key_env: HF_INFERENCE_TOKEN
+  max_working: 1
+task:
+  repo: https://huggingface.co/datasets/HuggingFaceSwarms/SmallMath
+  selector: ${TASK_ID}
+  revision: 57dbf3f7e83aa8c5c980387a2216d7bb87e4e7cc
+agents:
+  count: 1
+environment:
+  backend: hf-sandbox
+workers:
+  env:
+    LEGION_RESULTS_DIR: ${RESULTS_DIR:-./results}
+  agents_per_worker: 1
+  turn_timeout: 6m
+loop:
+  prompt: Continue solving and ensure /app/answer.txt contains your final submission.
+  every: turn_end
+  while:
+    until: 30m
+    max_rounds: 100
+limits:
+  run_timeout_seconds: 2400
+  agent_max_turns: 60
