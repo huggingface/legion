@@ -336,6 +336,35 @@ async def test_quiet_window_opens_when_the_idle_heartbeat_comes_not_at_the_old_a
     assert got  # round 1 went out
 
 
+async def test_delayed_idle_heartbeat_does_not_hide_a_new_turn(sim):
+    await sim.apply({"prompt": "p", "every": "24h", "while": {"until": "1h", "quiet": "45s"},
+                     "final": {"prompt": "fin"}})
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    for agent in (A0, A1):
+        await sim.turn(agent, got[agent])
+    await sim.heartbeat(idle_since=sim.clock())
+    sim.tick()  # quiet window starts
+    sim.tick(44)
+    old_idle = hb_body(sim.clock, W0, [AgentHeartbeat(name=n, state="idle", idle_since=sim.clock())
+                                     for n in (A0, A1)])
+    assert (await sim.c.post(f"/agents/{A0}/prompt", json={"text": "hand"})).status_code == 200
+    assert A0 in prompts(await sim.commands())
+    sim.clock.advance(0.1)
+    await sim.events(A0, ("turn_started", {}))
+    await sim.heartbeat(working=(A0,))  # even a newer working report must retain the evidence
+    assert (await sim.c.post(f"/workers/{W0}/heartbeat", json=old_idle)).status_code == 200
+    sim.tick(0.9)
+    assert await sim.commands() == []
+    assert (await sim.c.get("/swarms/demo/loop")).json()[0]["state"] == "running"
+    await sim.events(A0, ("turn_ended", {"status": "completed"}))
+    await sim.heartbeat(idle_since=sim.clock())
+    sim.tick()
+    sim.tick(45)
+    assert prompts(await sim.commands())[A0]["loop"]["why"] == "final: quiet"
+
+
 async def test_a_pending_notice_keeps_the_loop_from_going_quiet(sim):
     # review #2: a board notice not named in a round yet is pending work (here no `on:` wake)
     await sim.apply({"prompt": "p", "every": "2m", "notices": True,

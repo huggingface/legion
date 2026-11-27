@@ -725,8 +725,9 @@ def create_app(
     # Admission overlay (max_working): what the controller learned about an agent's turn since
     # its last heartbeat. agent -> (state, when): "admitted" (handed a prompt to start a turn),
     # "working" (turn_started seen) or "idle" (turn_ended / turn_interrupted / prompt_deferred
-    # seen). A heartbeat that reports the agent replaces it (see `heartbeat_seen`).
+    # seen). Heartbeats reconcile the overlay with worker observations (see `heartbeat_seen`).
     live: dict[str, tuple[str, float]] = {}
+    turn_started_at: dict[str, float] = {}  # worker clock, comparable to heartbeat idle_since
     notifier = Notifier()
     store.listener = lambda kind, key: notifier.notify(f"{kind}:{key}")
     set_token_key(store, token)
@@ -1505,8 +1506,7 @@ def create_app(
         learned since that heartbeat (`live`): a prompt handed out takes the slot at once (so
         two polls between heartbeats cannot both take the last slot), and a turn_ended /
         turn_interrupted event releases it at once, without waiting for the next heartbeat.
-        Still soft by about one heartbeat: a heartbeat built before the worker saw an event
-        can briefly overrule it (see `heartbeat_seen`)."""
+        A heartbeat captured before an observed turn start cannot release its slot."""
         if not prompts:
             return prompts
         sw = store.get_swarm(w["swarm"])
@@ -1547,6 +1547,7 @@ def create_app(
         state = was[0] if was else None
         for ev in evs:
             if ev.type == "turn_started":
+                turn_started_at[a["name"]] = ev.ts.timestamp()
                 state = "working"
             elif ev.type == "prompt_deferred" or (
                 ev.type in ("turn_ended", "turn_interrupted") and state != "admitted"
@@ -1558,9 +1559,9 @@ def create_app(
         return state == "idle"
 
     def heartbeat_seen(hb: WorkerHeartbeat, now: float) -> bool:
-        """A heartbeat is the source of truth again for the agents it reports, except a
-        fresh admission (< ADMIT_GRACE) it reports idle: that heartbeat was most likely
-        built before the worker received the prompt. True if it released a slot."""
+        """Reconcile heartbeats with later turn observations. A fresh admission gets a grace
+        period, and an observed start remains working until a later idle interval or end event.
+        True if a slot was released."""
         released = False
         for ah in hb.agents:
             seen = live.get(ah.name)
@@ -1568,6 +1569,15 @@ def create_app(
                 continue
             if seen[0] == "admitted" and ah.state != "working" and now - seen[1] < ADMIT_GRACE:
                 continue
+            if seen[0] == "working":
+                # Keep the event evidence even after a working heartbeat: an older idle
+                # payload can still arrive later. Only an idle interval after this start
+                # proves the turn has ended; missing timestamps are not evidence.
+                started = turn_started_at.get(ah.name)
+                if ah.state == "working" or started is None or ah.idle_since is None or (
+                    ah.idle_since.timestamp() <= started
+                ):
+                    continue
             del live[ah.name]
             released |= seen[0] != "idle" and ah.state != "working"
         return released
@@ -1643,14 +1653,16 @@ def create_app(
             raise HTTPException(409, "worker incarnation is not the slot's current job")
         if hb.worker != worker_id:
             raise HTTPException(400, "heartbeat worker does not match the path")
-        if not record_heartbeat(store, worker_id, hb, clock()):
-            raise HTTPException(409, "worker slot has no live job")
+        with loops.ingesting():  # publish the heartbeat and its overlay as one observation
+            if not record_heartbeat(store, worker_id, hb, clock()):
+                raise HTTPException(409, "worker slot has no live job")
+            released = heartbeat_seen(hb, clock().timestamp())
         w = store.get_worker(worker_id)
         sw = store.get_swarm(w["swarm"]) if w else None
         pools = caps(sw["spec"], w["type"]) if sw else []
         if sw is not None:
             loops.task_success(sw["spec"], worker_id, w["incarnation"], hb.agents)
-        if heartbeat_seen(hb, clock().timestamp()) and pools:
+        if released and pools:
             wake_window(w["swarm"], pools)
         if sw is not None and (ets := sw["spec"].types.get(w["type"])) and ets.ephemeral:
             reap_ephemeral(hb)
