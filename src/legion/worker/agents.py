@@ -576,7 +576,12 @@ class AgentRuntime:
     def start_loop(self, cmd: LoopStartCommand) -> None:
         """`loop_start`: send the loop prompt now if idle, then after every completed turn. A
         new run (a loop `start`) counts rounds from the command's; a repeat of the same
-        run keeps the higher count."""
+        run keeps the higher count. A `refresh` (new clock and deadline) only updates a loop of
+        its run that is still running: it never restarts one that ended, nor resets its errors."""
+        if cmd.refresh:
+            if self.loop is not None and self.loop.run == cmd.run:
+                self.loop = cmd
+            return
         self.loop = cmd
         if cmd.run is not None and cmd.run != self.state.loop_run:
             self.state.loop_run, self.state.loop_round = cmd.run, cmd.meta.round or 0

@@ -256,6 +256,12 @@ class LoopEngine:
             self.store.append_events(swarm, agent, [Event(type=kind, ts=now, agent=agent, data=data)])
 
     # ------------------------------------------------------------------ public seams
+    def ingesting(self) -> threading.RLock:
+        """Held around one agent's event batch: its turn state going public (`turn_seen`) and
+        `on_events` happen with no tick in between, so `while.quiet` never sees an agent idle
+        before the activity of the turn that just ended."""
+        return self._lock
+
     def wake(self, agent: str, reason: str) -> bool:
         """Queue the agent's loop prompt (debounced WAKE_DEBOUNCE s, held until `wake.min_gap`
         after its last wake prompt, skip_pending), e.g. for a comms mention. Only for a running
@@ -524,11 +530,13 @@ class LoopEngine:
             if ts is None or ts.loop is None or L is None:
                 return
             now = self.clock().timestamp()
-            if (L.get("first_turn_at") is None and L["state"] == "running"
-                    and any(ev.type == "turn_started" for ev in events)):
-                self._first_turn(spec, a, ts, L, now)
+            # after this batch's own reports (a worker loop that ended in it is not refreshed)
+            first = (L.get("first_turn_at") is None and L["state"] == "running"
+                     and any(ev.type == "turn_started" for ev in events))
             st = self.store.get_loop_agent(a["name"])
             if st is None:
+                if first:
+                    self._first_turn(spec, a, ts, L, now)
                 return
             stop_reason = None
             for ev in events:
@@ -583,6 +591,8 @@ class LoopEngine:
             if stop_reason and st["phase"] == "looping":
                 self._agent_done(a, st, L, stop_reason, now)
             self.store.put_loop_agent(a["name"], a["swarm"], a["type"], st)
+            if first:
+                self._first_turn(spec, a, ts, L, now)
 
     def _first_turn(self, spec: SwarmSpec, a: Row, ts: TypeSpec, L: dict, now: float) -> None:
         """The type's first turn in this run of the loop (any agent's, whatever prompted it):
@@ -605,7 +615,7 @@ class LoopEngine:
                     or st["stop_sent"] or not b["worker"] or b["removing"]
                     or self.store.held(b, flags)):
                 continue  # no worker loop running, or a stop on its way: not undone here
-            self._loop_start(spec, a["type"], ts, L, b, st, now)
+            self._loop_start(spec, a["type"], ts, L, b, st, now, refresh=True)
             self.store.put_loop_agent(b["name"], a["swarm"], a["type"], st)
 
     def _fetched(self, a: Row, arm: dict, now: float) -> bool:
@@ -898,7 +908,9 @@ class LoopEngine:
 
     def _agent_done(self, a: Row, st: dict, L: dict, reason: str, now: float) -> None:
         st["phase"], st["done_reason"] = "done", reason
-        self._wakes.pop(a["name"], None)  # out of the loop: a queued wake is never sent
+        # out of the loop: a queued wake, the notices and an unused notice line are never sent
+        self._wakes.pop(a["name"], None)
+        st["notices"], st["notice_armed"] = [], None
         if L.get("mode") == "worker" and st["wstarted"] and not st["acked"] and a["worker"]:
             self.store.enqueue_command(
                 a["worker"], LoopStopCommand(agent=a["name"], reason=reason).model_dump_json())
@@ -918,7 +930,7 @@ class LoopEngine:
             cap_usd=agent_cap(ts), why=why, counted=counted, wake=wake)
 
     def _loop_start(self, spec: SwarmSpec, type_name: str, ts: TypeSpec, L: dict, a: Row,
-                    st: dict, now: float) -> None:
+                    st: dict, now: float, refresh: bool = False) -> None:
         lp = ts.loop
         assert lp is not None and lp.prompt is not None
         until = lp.while_.until
@@ -934,7 +946,8 @@ class LoopEngine:
             start_text=None if lp.start_prompt is None else with_notices(lp.start_prompt, line),
             # until_from: first_turn before the first turn: no deadline yet; the controller's
             # `until` stop (loop_stop) ends the worker's loop
-            deadline=_ts(until_deadline(until, start)) if until and start is not None else None)
+            deadline=_ts(until_deadline(until, start)) if until and start is not None else None,
+            refresh=refresh)
         self.store.enqueue_command(a["worker"], cmd.model_dump_json())
         st["wstarted"], st["acked"], st["last_activity"] = now, False, now
         st["stop_sent"] = None  # an earlier stop (a pause hold) is answered by this start
@@ -977,9 +990,10 @@ class LoopEngine:
 
     def _settled(self, spec: SwarmSpec, type_name: str, L: dict) -> tuple[bool, float]:
         """Every agent of the type idle with nothing on its way: no undelivered prompt, no
-        `loop_start` in its worker's queue, no worker-side loop running, no queued wake (an
-        agent out of the loop never gets one), no board notice not yet named in a round
-        (`loop.notices`), no hold. An agent working, not placed yet, unknown or dead is not
+        `loop_start` in its worker's queue, no worker-side loop running or stopping (its
+        `loop_stop` not confirmed, for at most ACK_TIMEOUT s), no queued wake and no board notice
+        not yet named in a round (`loop.notices`; neither counts for an agent out of the loop,
+        which never gets them), no hold. An agent working, not placed yet, unknown or dead is not
         settled. Also returns the latest activity time among them."""
         now = self.clock().timestamp()
         agents = [a for a in self.store.list_agents(spec.swarm, type_name) if not a["removing"]]
@@ -996,9 +1010,13 @@ class LoopEngine:
             if st is None or not a["worker"] or pending.get(name) or name in starts:
                 return False, 0.0
             arm = st.get("notice_armed")
-            if ((st["phase"] != "done" and name in self._wakes) or st.get("notices")
-                    or (arm and not arm.get("used"))
-                    or (st["wstarted"] and not st["acked"]) or self.store.held(a, flags)
+            looping = st["phase"] != "done"  # a done agent's wakes and notices are never sent
+            if ((looping and (name in self._wakes or st.get("notices")
+                              or (arm and not arm.get("used"))))
+                    or (st["wstarted"] and not st["acked"])
+                    # a worker loop's stop not confirmed yet (a mode change, a done agent)
+                    or (st["stop_sent"] and not st["acked"] and now - st["stop_sent"] < ACK_TIMEOUT)
+                    or self.store.held(a, flags)
                     or self.turn_state(a, workers.get(a["worker"]), now) != AgentState.idle):
                 return False, 0.0
             last = max(last, st["last_activity"] or 0.0, a["idle_since"] or 0.0)

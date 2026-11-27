@@ -128,21 +128,27 @@ type in this run of the loop, whatever prompted it (round 1, a resume prompt, a 
 a team's clock starts with its first agent, not its last. Until then `until` cannot end the
 loop, loop prompts carry no start time (`{elapsed}` is 0) and worker-side loops get no
 deadline; at the first turn every running worker-side loop gets its `loop_start` again (same
-run, so its round count stays) with the start time and the deadline. A new run of the loop (`POST /swarms/{swarm}/loop` start) waits for a new first turn.
+run, so its round count stays) with the start time and the deadline, after the reports in the
+same event batch. That `loop_start` is a refresh (`refresh: true`): the worker applies it only
+to a loop of that run that is still running, keeping its error counters, and never restarts
+one that ended. A new run of the loop (`POST /swarms/{swarm}/loop` start) waits for a new first turn.
 `limits.run_timeout_seconds` still counts from the launch. `GET /swarms/{s}/loop` shows the
 time as `first_turn_at` (also with `launch`), and the swarm stream gets `loop_first_turn`.
 
 `quiet` stops the loop (reason `quiet`, then the final round) once every agent of the type has
 been settled for that long, as the controller sees it on every tick. Settled: idle, with no
-undelivered prompt, no `loop_start` in its worker's queue, no worker-side loop running, no
-queued wake, no board notice not yet named in a round (`notices: true`) and no hold. The
+undelivered prompt, no `loop_start` in its worker's queue, no worker-side loop running or
+stopping (a `loop_stop`, e.g. for a mode change, not confirmed yet; at most 60 s), no queued
+wake, no board notice not yet named in a round (`notices: true`) and no hold. The
 window opens at the first tick that sees every agent settled and restarts whenever one is
 not, or has activity (a loop prompt sent or taken, a turn's end, the idle time of its
 heartbeat), so time spent queued, unknown or working never counts, and an idle heartbeat
-that comes before its turn's events cannot backdate it. An agent that is working, not placed
+that comes before its turn's events cannot backdate it. An event batch's turn state and its
+loop bookkeeping are applied with no tick in between, so a turn that starts and ends between
+two ticks restarts the window. An agent that is working, not placed
 yet, unknown or dead keeps the loop going, so does a held one (a pause never ends a loop).
-Agents already out of the loop (`max_rounds`, ...) count as settled when idle; a wake queued
-for one is dropped when it leaves. A `turn_end` loop run by the workers never goes quiet while
+Agents already out of the loop (`max_rounds`, ...) count as settled when idle; the wake and
+the notices queued for one are dropped when it leaves (no round would deliver them). A `turn_end` loop run by the workers never goes quiet while
 those loops run (they re-prompt at once): `quiet` is for a board-driven team
 (`every: 24h`, `on: [message_board.*]`) that has stopped talking.
 
@@ -298,7 +304,7 @@ prompt outside the round count has `counted: false` in its `loop_prompt`. The co
 - `PromptCommand.loop: LoopMeta` (optional, omitted from the wire when unset): `text` is a
   template; `LoopMeta {kind, type, round, started_at, wall_s, cap_usd, why, counted, wake}` is what
   the worker renders it with. `round: null` lets the worker number it.
-- `LoopStartCommand {agent, text, start_text, meta, max_rounds, deadline, run}` and
+- `LoopStartCommand {agent, text, start_text, meta, max_rounds, deadline, run, refresh}` and
   `LoopStopCommand {agent, reason}`: worker-side `turn_end`. `start_text` (`loop.start_prompt`)
   is sent instead of `text` while the worker's round count for the run is 0. Workers never
   see the spec's `start_prompt`, `while.quiet` or `while.until_from` (`worker_type_spec`), so

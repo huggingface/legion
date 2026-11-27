@@ -1701,10 +1701,12 @@ def create_app(
             for ev in evs:
                 if ev.type == "resource":
                     comms_event(agent, ev)
-            if a is not None and a["worker"] == worker_id:
-                released |= turn_seen(a, evs, now)
+            with loops.ingesting():  # no loop tick between the state and the loop's bookkeeping
+                if a is not None and a["worker"] == worker_id:
+                    released |= turn_seen(a, evs, now)
+                if a is not None:
+                    loops.on_events(a, evs, sw["spec"] if sw and sw["name"] == a["swarm"] else None)
             if a is not None:
-                loops.on_events(a, evs, sw["spec"] if sw and sw["name"] == a["swarm"] else None)
                 try:
                     health.on_events(a, evs, now)
                 except Exception:  # counters never break event ingestion

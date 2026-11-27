@@ -1948,6 +1948,9 @@ class LoopStartCommand(BaseModel):
     deadline: datetime | None = None
     # `loop.start_prompt`: sent instead of `text` while the agent has had no round in this run
     start_text: str | None = None
+    # A timing refresh (the first turn's clock and deadline): applied only to a worker loop of
+    # the same run that is still running, keeping its counters; never restarts an ended loop
+    refresh: bool = False
     # One run of the loop (POST /swarms/{swarm}/loop start begins a new one): a new run resets the
     # worker's round counter; a repeat of the same run (lost command, live update) does not.
     run: str | None = None

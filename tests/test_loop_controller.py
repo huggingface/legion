@@ -6,6 +6,7 @@ loop / final ordering, `every` as a duration and as turn_end (worker- and contro
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timedelta
 
 import httpx
@@ -418,6 +419,121 @@ async def test_first_turn_reaches_the_running_worker_loops(sim):
     assert set(again) == {A0, A1} and {c["run"] for c in again.values()} == {cmds[0]["run"]}
     assert {at(c["meta"]["started_at"]) for c in again.values()} == {sim.clock()}
     assert {at(c["deadline"]) for c in again.values()} == {sim.clock() + timedelta(hours=1)}
+
+
+async def test_a_turn_ending_between_ticks_restarts_the_quiet_window(sim):
+    # review #2 #1: a hand-prompted turn starts and ends between the T44 and T45 ticks; the
+    # T45 tick lands while its events are being ingested (after the idle state went public)
+    await sim.apply({"prompt": "p", "every": "24h", "while": {"until": "1h", "quiet": "45s"},
+                     "final": {"prompt": "fin"}})
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    for a in (A0, A1):
+        await sim.turn(a, got[a])
+    sim.tick()  # T0: everybody settled, the window opens
+    await sim.heartbeat()
+    sim.tick(44)
+    assert (await sim.c.post(f"/agents/{A0}/prompt", json={"text": "hand"})).status_code == 200
+    assert list(prompts(await sim.commands())) == [A0]
+    sim.clock.advance(1)
+    racers, real = [], sim.loops.on_events
+
+    def on_events(a, evs, spec=None):  # a spy on the real method: the T45 tick starts here
+        t = threading.Thread(target=sim.loops.tick)
+        t.start()
+        t.join(0.3)  # it must wait for the batch's bookkeeping, not run in between
+        racers.append(t)
+        return real(a, evs, spec)
+
+    sim.loops.on_events = on_events
+    try:
+        await sim.events(A0, ("turn_started", {}),
+                         ("turn_ended", {"status": "completed", "tool_calls": 1}))
+    finally:
+        sim.loops.on_events = real
+    for t in racers:
+        t.join()
+    assert await sim.commands() == []  # no final: the turn's end restarted the window
+    assert (await sim.c.get("/swarms/demo/loop")).json()[0]["state"] == "running"
+    await sim.heartbeat()
+    sim.tick(44)
+    assert await sim.commands() == []
+    sim.tick(1)
+    assert prompts(await sim.commands())[A0]["loop"]["why"] == "final: quiet"
+
+
+async def test_notices_of_an_agent_leaving_the_loop_do_not_block_quiet(sim):
+    # review #2 #6: with notices, A0's mention dies with its loop (agent_output_tokens)
+    await sim.apply({"prompt": "p", "every": "24h", "notices": True,
+                     "on": ["message_board.mention"],
+                     "while": {"until": "1h", "quiet": "45s", "agent_output_tokens": 1000},
+                     "final": {"prompt": "fin"}})
+    await sim.heartbeat()
+    sim.tick()
+    got = prompts(await sim.commands())
+    await sim.events(A0, ("loop_prompt", {"kind": "loop", "round": 1, "why": "start"}),
+                     ("turn_started", {}))
+    await sim.events(A0, board("mention", {"thread": 7, "msg_id": 70, "from": A1}))
+    await sim.turn(A1, got[A1])
+    sim.cost[A0] = 1000
+    await sim.events(A0, ("turn_ended", {"status": "completed", "tool_calls": 1}))
+    await sim.heartbeat()
+    sim.tick(3)
+    st = (await sim.c.get("/swarms/demo/loop")).json()[0]
+    assert st["per_agent"][A0]["done_reason"] == "agent_output_tokens"
+    assert await sim.commands() == []
+    sim.tick(1)
+    await sim.heartbeat()
+    sim.tick(44)
+    assert await sim.commands() == []
+    sim.tick(1)
+    assert prompts(await sim.commands())[A1]["loop"]["why"] == "final: quiet"
+
+
+async def test_first_turn_refresh_spares_a_worker_loop_that_ended_in_the_same_batch(sim):
+    # review #2 #7: A0's first batch comes late: round 1, three failed turns, loop_stopped
+    await sim.apply({"prompt": "p", "while": {"until": "1h", "until_from": "first_turn"}})
+    await sim.heartbeat()
+    sim.tick()
+    assert {c["agent"] for c in await sim.commands()} == {A0, A1}
+    fail = ("turn_ended", {"status": "error", "tool_calls": 0})
+    await sim.events(A0, ("loop_prompt", {"kind": "loop", "round": 1, "why": "start"}),
+                     ("turn_started", {}), fail, ("turn_started", {}), fail,
+                     ("turn_started", {}), fail,
+                     ("loop_stopped", {"reason": "errors", "round": 1, "active": True}))
+    again = await sim.commands()
+    assert [(c["kind"], c["agent"]) for c in again] == [("loop_start", A1)]  # not A0's
+    assert again[0]["refresh"] is True
+    st = (await sim.c.get("/swarms/demo/loop")).json()[0]
+    assert st["per_agent"][A0]["done_reason"] == "errors"
+
+
+async def test_quiet_waits_for_a_mode_change_stop_to_be_confirmed(sim):
+    # review #2 #8: turn_end on the workers, then every: 24h; the loop_stops are not confirmed
+    loop = {"prompt": "p", "while": {"until": "1h", "quiet": "5s"}, "final": {"prompt": "fin"}}
+    await sim.apply(loop)
+    await sim.heartbeat()
+    sim.tick()
+    assert [c["kind"] for c in await sim.commands()] == ["loop_start", "loop_start"]
+    for a in (A0, A1):  # round 1 on the workers' loops
+        await sim.events(a, ("loop_prompt", {"kind": "loop", "round": 1, "why": "start"}),
+                         ("turn_started", {}), ("turn_ended", {"status": "completed"}))
+    await sim.apply({**loop, "every": "24h"})
+    sim.tick()
+    for _ in range(3):
+        sim.tick(5)
+    st = (await sim.c.get("/swarms/demo/loop")).json()[0]
+    assert (st["mode"], st["state"]) == ("controller", "running")
+    assert [c["kind"] for c in await sim.commands()] == ["loop_stop", "loop_stop"]  # fetched now
+    for a in (A0, A1):
+        await sim.events(a, ("loop_stopped", {"reason": "mode_change", "round": 0, "active": True}))
+    await sim.heartbeat()
+    sim.tick()  # confirmed: the window opens now
+    sim.tick(4)
+    assert await sim.commands() == []
+    sim.tick(1)
+    assert prompts(await sim.commands())[A0]["loop"]["why"] == "final: quiet"
 
 
 async def test_until_from_first_turn_counts_from_the_first_turn(sim):
