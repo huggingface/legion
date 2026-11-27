@@ -14,6 +14,7 @@ from typer.testing import CliRunner
 
 import legion.harbor
 from legion import cli, rundir
+from legion.harbor import env as env_world
 from legion.harbor import sources
 from legion.ops import SpecError, check_spec, read_spec
 
@@ -151,6 +152,18 @@ def test_the_pybot_spec_compiles(monkeypatch, pins):
                             "8b9329d60446fc9212ba32b24ee80353474ef1f9", env)
     assert (swarm.types["steward"].name_prefix, swarm.types["answers"].name_prefix) == (
         "steward-", None)
+
+
+def test_the_antbench_spec_compiles(monkeypatch, pins):
+    """The launcher compiles it; the world job's env launcher reads its block and roster."""
+    env = {"BUCKET_ID": "ns/runs", "ANTBENCH_TASK_REPO": "ns/tasks",
+           "ANTBENCH_TASK_REVISION": "c" * 40}
+    swarm = experiment_spec(monkeypatch, pins, "antbench", "c" * 40, env)
+    ts = swarm.types["agent"]
+    assert {"E2B_API_KEY", "ANTBENCH_ENV_SECRET"} <= set(ts.secrets)
+    config, _ = env_world.load(EXPERIMENTS / "antbench" / "spec.yaml", {})
+    # the worker expands the prefix: HF Jobs sets it only inside the network group
+    assert config.upstream == "http://${HF_NETWORK_GROUP_PREFIX}antbench:8000"
 
 
 def test_links_in_the_shipped_folders_and_init(tmp_path, pins):

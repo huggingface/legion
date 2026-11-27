@@ -13,6 +13,7 @@ from legion.models import TypeSpec
 
 TERMINAL_STAGES = frozenset({"COMPLETED", "CANCELED", "ERROR", "DELETED"})
 WORKER_COMMAND = ["legion-worker"]
+GATEWAY_PORT = 8790  # resources.gateway's default port
 # Default worker image when a type does not override `image`. Set by the deployment.
 # Unset (or LEGION_WORKER_BOOTSTRAP=1): bootstrap mode, see `bootstrap_command`.
 DEFAULT_WORKER_IMAGE = os.environ.get("LEGION_WORKER_IMAGE") or None
@@ -163,6 +164,9 @@ class HubJobsClient:
     def launch(self, worker_id, spec, env, secrets, labels, timeout, *, namespace) -> str:
         self.calls["run_job"] += 1
         group = {"network_group": self.network_group} if self.network_group else {}
+        if spec.harbor and (gateway := spec.harbor.resources.get("gateway")) is not None:
+            # sandboxes (e2b, hf-sandbox) reach the worker's gateway (resources.gateway) on this port
+            group["expose_public"] = [gateway.get("port", GATEWAY_PORT)]
         job = self.api.run_job(
             **self.launch_args(spec, env),
             **group,

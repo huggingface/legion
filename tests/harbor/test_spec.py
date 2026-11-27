@@ -625,3 +625,41 @@ def test_e2b_workers_get_the_e2b_key_not_the_hub_token(tmp_path):
     (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
     with pytest.raises(ValueError, match="compute slurm keeps E2B_API_KEY"):
         Spec.load(tmp_path / "spec.yaml", env={})
+
+
+def test_a_gateway_runs_on_sandbox_hf_jobs_workers(tmp_path):
+    data = load_spec_yaml(COMPILE)
+    data.update(environment={"backend": "e2b"}, compute="hf-jobs", namespace="ns", bucket_id="ns/b")
+    data["resources"]["world"] = {"url": "https://world.example", "transport": "gateway"}
+    for name in ("team.md", "answers.md", "round.md"):
+        (tmp_path / name).write_text("x")
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    with pytest.raises(ValueError, match="world transport gateway needs resources.gateway"):
+        Spec.load(tmp_path / "spec.yaml", env={})
+    data["resources"]["gateway"] = {}
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    Spec.load(tmp_path / "spec.yaml", env={})
+    data["environment"] = {"backend": "hf-sandbox"}  # the other sandbox backend
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    Spec.load(tmp_path / "spec.yaml", env={})
+    inference = data.get("inference")
+    data["inference"] = {"urls": ["https://m.example/v1"], "api_format": "openai_responses"}
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    with pytest.raises(ValueError, match="resources.gateway relays only openai_chat_completions"):
+        compile_spec(Spec.load(tmp_path / "spec.yaml", env={}), TASK)
+    data["inference"] = inference
+    data["environment"] = {"backend": "e2b"}
+    env = {"name": "ants", "upstream": "http://u", "secret_env": "ANT_ENV_SECRET",
+           "credential_env": "ANT_TOKEN_{seat}", "headers": {"Authorization": "{credential}"},
+           "tools": {"observe": {"method": "GET", "path": "/v1/observe"}}}
+    data["resources"]["world"] = {"transport": "gateway", "env": env}
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    with pytest.raises(ValueError, match="world.env needs naming: consecutive-id"):
+        Spec.load(tmp_path / "spec.yaml", env={})
+    data["naming"] = "consecutive-id"
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    Spec.load(tmp_path / "spec.yaml", env={})
+    data["compute"] = "local"  # sandboxes cannot reach this machine
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(data))
+    with pytest.raises(ValueError, match=r"resources.gateway needs a sandbox backend \(e2b, hf-sandbox\) on compute hf-jobs"):
+        Spec.load(tmp_path / "spec.yaml", env={})

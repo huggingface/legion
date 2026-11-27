@@ -76,8 +76,10 @@ def run_job_args(
     state_url: str,
     job_labels: str,
     secrets: Mapping[str, str],
+    public_status: bool = False,
 ) -> dict[str, Any]:
-    """Keyword arguments for `HfApi.run_job` that start the controller."""
+    """Keyword arguments for `HfApi.run_job` that start the controller. `public_status`: also
+    expose the read-only status page without authentication (opt-in)."""
     env = {
         "LEGION_MODE": "job",
         "LEGION_NETWORK_GROUP": group,
@@ -105,14 +107,14 @@ def run_job_args(
         "network_aliases": [ALIAS],
         "namespace": namespace,
     }
-    if public_status_supported():
+    if public_status and public_status_supported():
         out["expose_public"] = [STATUS_PORT]
     return out
 
 
 def public_status_supported() -> bool:
-    """huggingface_hub 1.33 (uv.lock's pin, Harbor's) has no `expose_public`; the public status
-    page is optional, so without it the controller starts and the page is just not exposed."""
+    """huggingface_hub before 2.1 (a bare checkout's, say) has no `expose_public`; the public
+    status page is optional, so without it the controller starts and the page is just not exposed."""
     import inspect
 
     from huggingface_hub import HfApi
@@ -188,6 +190,8 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] = os.environ) -> 
     p.add_argument("--replace", action="store_true",
                    help="cancel the group's running controller first (SIGTERM: final state push)")
     p.add_argument("--dry-run", action="store_true", help="print the launch, secret names only")
+    p.add_argument("--public-status", action="store_true",
+                   help="expose the read-only status page publicly, without authentication")
     a = p.parse_args(argv)
     if not a.wheel_url and not (a.down and a.state_url):
         p.error("a wheel url is required (or --down with --state-url)")
@@ -204,6 +208,7 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] = os.environ) -> 
         wheel_url=a.wheel_url, group=a.group, namespace=namespace, flavor=a.flavor,
         timeout=a.timeout, state_url=state_url,
         job_labels=env.get("JOB_LABELS", "experiment=legion-m1"), secrets=secrets,
+        public_status=a.public_status,
     )
     if a.dry_run:
         shown = {**kwargs, "secrets": sorted(kwargs["secrets"]), "command": "<bootstrap>"}
@@ -225,7 +230,7 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] = os.environ) -> 
     if "expose_public" in kwargs:
         print(f"status page (public, read-only):  https://{job.id}--{STATUS_PORT}.hf.jobs")
     else:
-        print("status page: not exposed (this huggingface_hub has no expose_public)")
+        print("status page: not public (--public-status; needs a huggingface_hub with expose_public)")
     print(f"workers: http://${{HF_NETWORK_GROUP_PREFIX}}{ALIAS}:{API_PORT} in group {a.group}")
     print(f"export LEGION_URL=https://{job.id}--{API_PORT}.hf.jobs")
     return 0

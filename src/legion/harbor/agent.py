@@ -34,6 +34,7 @@ from harbor.models.agent.context import AgentContext
 
 from legion.models import TokenUsage
 from legion.worker.adapters.base import AdapterEvent, pi_tokens, transient_error
+from legion.world.protocol import TOKEN_HEADER
 
 from .harnesses.pi import terminal_pi_error
 from .results import safe_error
@@ -76,6 +77,7 @@ class Channel:
     base_url: str | None = None
     context_window: int | None = None
     headers: dict[str, str] = field(default_factory=dict)
+    metered: bool = False  # the gateway counts each call (resources.gateway): no turn usage
 
 
 def read_turn(path):
@@ -115,7 +117,8 @@ class LegionPi(Pi):
     def _build_custom_models_json(self, access, model_id):
         """Harbor's models.json with the channel's endpoint: its base URL, the model's
         `contextWindow` (Pi's default is 128000, more than many servers take) and the
-        provider's `headers`. A copy (no secret: the key is a `$NAME` reference) goes to the
+        provider's `headers` (behind a gateway also X-World-Token, `$NAME` like the key: Pi
+        resolves header values as it does apiKey). A copy (no secret: the key is a `$NAME` reference) goes to the
         Trial's agent dir, for the operator."""
         models = super()._build_custom_models_json(access, model_id)
         ch = getattr(self, "channel", None)
@@ -126,6 +129,9 @@ class LegionPi(Pi):
                 provider["baseUrl"] = ch.base_url
             if ch.headers:
                 provider["headers"] = dict(ch.headers)
+            if ch.metered:  # the jobs proxy drops `Authorization`: the gateway token goes here too
+                provider["headers"] = {**provider.get("headers", {}),
+                                       TOKEN_HEADER: provider["apiKey"]}
             if ch.context_window:
                 for model in provider["models"]:
                     model["contextWindow"] = ch.context_window
@@ -250,7 +256,7 @@ class LegionPi(Pi):
             messages, usage = read_turn(output)
             for message in messages:
                 ch.emit(AdapterEvent("message", message=message))
-            if usage != TokenUsage():
+            if usage != TokenUsage() and not ch.metered:
                 ch.emit(AdapterEvent("usage", model=ch.model, usage=usage))
             totals.n_input_tokens += usage.input + usage.cache_read + usage.cache_write
             totals.n_output_tokens += usage.output

@@ -299,6 +299,9 @@ bucket holds the same stream that `/agents/{name}/events` serves.
 Tokens per model per turn come from the events; the controller prices each heartbeat's new
 tokens with the pinned price (or its price table), so a price change applies from then on and
 does not reprice history.
+Behind a gateway (docs/world.md "Gateway"), the worker counts each inference call as it ends,
+so heartbeats carry a running turn's tokens and `budget_usd` stops a run at most a heartbeat
+(30 s) plus a loop tick late.
 
 ## Failure handling
 
@@ -310,7 +313,9 @@ does not reprice history.
 | Launch refused (4xx) | `launch_refused` with the backend's message, no retries until re-apply |
 | Launch fails transiently | retry, 30 s doubling to 5 min; last error in status |
 | Turn exceeds its timeout | turn killed, agent `stuck` once, then idle |
+| A Trial's sandbox stops answering (pinged every 30 s during turns, none answered for 180 s) | Trial ended (`error`; the turn is interrupted), a new one started at the next prompt on the restored sessions; `trial.last_seen` in the heartbeat |
 | Session cannot resume | fresh session, `session_restarted`, `resumed: false` |
 | Controller restarts | restore its state (Checkpoint and resume), check workers against the backend's jobs, reattach to `hf_jobs` servers by label, wait for heartbeats |
 | An `hf_jobs` server fails to start | the launch stops with the reason and the job's last log lines; its jobs are cancelled |
 | Rate limits (429) | back off, honour `Retry-After`, keep launch spacing |
+| An agent behind a gateway reaches `loop.while.agent_usd` | its inference calls get 402 outside its final round; the loop marks it done |

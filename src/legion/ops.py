@@ -865,7 +865,8 @@ def _up_hf(api: Client, spec: SwarmSpec, vals: Mapping[str, str], say) -> dict:
             job = hf.run_job(**jd.run_job_args(
                 wheel_url=wheel, group=group, namespace=ns, flavor="cpu-upgrade", timeout="48h",
                 state_url=vals.get("LEGION_STATE_URL") or jd.default_state_url(wheel, group),
-                job_labels=vals.get("JOB_LABELS", ""), secrets=secrets)).id
+                job_labels=vals.get("JOB_LABELS", ""), secrets=secrets,
+                public_status=vals.get("LEGION_PUBLIC_STATUS") == "1")).id
             say(f"started controller job {job} (group {group})")
     except SystemExit as e:  # collect_secrets: a missing LEGION_TOKEN or HF_TOKEN
         raise SpecError([str(e)]) from None

@@ -245,6 +245,15 @@ class Spec(Config):
                              "(consecutive-id names are agent-001, ...)")
         if backend in SANDBOXES and "spawn" in self.resources:
             raise ValueError("resources.spawn needs a mount: use backend docker or podman")
+        gateway = "gateway" in self.resources
+        if gateway and (backend not in SANDBOXES or self.compute.kind != "hf-jobs"):
+            raise ValueError("resources.gateway needs a sandbox backend (e2b, hf-sandbox) on compute "
+                             "hf-jobs: sandboxes reach it on the worker job's public port")
+        if (self.resources.get("world") or {}).get("transport") == "gateway" and not gateway:
+            raise ValueError("resources.world transport gateway needs resources.gateway")
+        if (self.resources.get("world") or {}).get("env") and self.naming != "consecutive-id":
+            raise ValueError("resources.world.env needs naming: consecutive-id (agent i of the "
+                             "roster has the env's seat i-1)")
         if backend in SANDBOXES and (self.resources.get("message_board") or {}).get("rules"):
             # no mounts, no rule proxy: the board runs its rules unenforced and warns
             self.resources["message_board"].setdefault("transport", "http")
@@ -330,6 +339,9 @@ def compile_spec(spec: Spec, task: dict, bundle=None, folders: str | None = None
                              "sandboxes; the router's default key) and would reach every "
                              "agent's container: name an inference-only token, e.g. "
                              "HF_INFERENCE_TOKEN")
+        if "gateway" in spec.resources and inference.api_format != "openai_chat_completions":
+            raise ValueError(f"{where}.api_format: resources.gateway relays only "
+                             "openai_chat_completions")
     board = spec.resources.get("message_board") or {}
     if remote and board.get("space_id") and board.get("private") is not False:
         raise ValueError("resources.message_board.private: set it to false: a private Space's "
@@ -463,7 +475,8 @@ def pack_folders(tools_dir, resources_dir):
 def resource_secrets(spec: Spec) -> list[str]:
     """The env names resources read a token from on the worker: a plugin's `token_env` (its
     default too) when it connects to a `url` or `repo_id`, HF_TOKEN when it deploys
-    a Space (`space_id`). Missing modules are refused before workers or sandboxes start."""
+    a Space (`space_id`), an env world's `secret_env`. Missing modules are refused before
+    workers or sandboxes start."""
     from .resources import load_module
 
     names = []
@@ -478,6 +491,8 @@ def resource_secrets(spec: Spec) -> list[str]:
             names.append(settings.token_env)
         if getattr(settings, "space_id", None):
             names.append("HF_TOKEN")
+        if getattr(settings, "env", None) is not None:  # resources.world.env: the run's secret
+            names.append(settings.env.secret_env)
     return names
 
 

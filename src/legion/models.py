@@ -1760,7 +1760,7 @@ class AgentHeartbeat(BaseModel):
     rev: str | None = None  # `type_spec_rev` the agent applied at its last turn boundary
     start_rev: str | None = None  # the one its running harness process started with
     endpoint: str | None = None  # `host:port` of the model server it is pinned to (base_urls)
-    trial: dict[str, Any] | None = None  # harness harbor: {id, attempt, alive} of its Trial
+    trial: dict[str, Any] | None = None  # harness harbor: {id, attempt, alive, last_seen} of its Trial
 
 
 class WorkerMem(BaseModel):

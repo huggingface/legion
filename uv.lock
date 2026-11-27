@@ -2,7 +2,8 @@ version = 1
 revision = 5
 requires-python = ">=3.12"
 resolution-markers = [
-    "python_full_version >= '3.14'",
+    "python_full_version >= '3.15'",
+    "python_full_version == '3.14.*'",
     "python_full_version < '3.14'",
 ]
 
@@ -720,60 +721,6 @@ wheels = [
 ]
 
 [[package]]
-name = "legion"
-version = "0.0.1"
-source = { editable = "." }
-dependencies = [
-    { name = "exceptiongroup" },
-    { name = "fastapi" },
-    { name = "harbor", extra = ["e2b"] },
-    { name = "httpx" },
-    { name = "huggingface-hub" },
-    { name = "jinja2" },
-    { name = "msgboard", extra = ["hf"] },
-    { name = "packaging" },
-    { name = "podman-compose" },
-    { name = "pydantic" },
-    { name = "pyyaml" },
-    { name = "tomli" },
-    { name = "typer" },
-    { name = "uvicorn", extra = ["standard"] },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-xdist" },
-    { name = "respx" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "exceptiongroup", specifier = ">=1.3" },
-    { name = "fastapi", specifier = ">=0.115" },
-    { name = "harbor", extras = ["e2b"], specifier = "==0.25.0" },
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "huggingface-hub", specifier = ">=1.0" },
-    { name = "jinja2", specifier = ">=3.1" },
-    { name = "msgboard", extras = ["hf"], git = "https://github.com/huggingface/msgboard.git?rev=563911d586e3435f2aadb25d7a8f565cce828406" },
-    { name = "packaging", specifier = ">=24" },
-    { name = "podman-compose", specifier = "==1.5.0" },
-    { name = "pydantic", specifier = ">=2.7" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
-    { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3" },
-    { name = "pyyaml", specifier = ">=6" },
-    { name = "respx", marker = "extra == 'dev'", specifier = ">=0.21" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
-    { name = "tomli", specifier = ">=2" },
-    { name = "typer", specifier = ">=0.12" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
-]
-provides-extras = ["controller", "worker", "dev"]
-
-[[package]]
 name = "frozenlist"
 version = "1.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1127,22 +1074,22 @@ wheels = [
 
 [[package]]
 name = "huggingface-hub"
-version = "1.33.0"
+version = "2.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
     { name = "filelock" },
     { name = "fsspec" },
-    { name = "hf-xet", marker = "platform_machine == 'AMD64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'" },
-    { name = "httpx" },
+    { name = "hf-xet", marker = "platform_machine == 'AMD64' or platform_machine == 'ARM64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'" },
+    { name = "httpx2" },
     { name = "packaging" },
     { name = "pyyaml" },
     { name = "tqdm" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/25/2a/484d112c0d8fc5f665d7b65137ac9cdb2953c982391598c3597968a12ee7/huggingface_hub-1.33.0.tar.gz", hash = "sha256:367be21a201db9523eddf8aeac7048f2602c1b308691c97640d5e72ed188007e", size = 1043548, upload-time = "2026-09-24T09:49:29.971Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/12/47/6858d63643e66fb4f6585c3cfd4029c0b2bc1ae21688cee9b3335f20a10d/huggingface_hub-2.2.0.tar.gz", hash = "sha256:5d1b47537394e4215cb858aa12fd493d0f7ef7f58990f5dcd24bc173107b2871", size = 1041026, upload-time = "2026-10-08T15:30:59.971Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/fc/16/963096d224b80909432dc16561a615fd33d2d13beef3ce4c63fa25e40867/huggingface_hub-1.33.0-py3-none-any.whl", hash = "sha256:04e434b06e100eddbce9a6e817d72693a7884b10a79bd67ab48080d5c07eb899", size = 846435, upload-time = "2026-09-24T09:49:28.059Z" },
+    { url = "https://files.pythonhosted.org/packages/eb/b0/0f7b430fd100b3a3b037fdbb314878200241082e607b3383c63d91a13a72/huggingface_hub-2.2.0-py3-none-any.whl", hash = "sha256:1667f145dc56dc210d60966069397df9ecfca9607a5d43db88b308c89dae56b3", size = 839884, upload-time = "2026-10-08T15:30:57.914Z" },
 ]
 
 [[package]]
@@ -1328,15 +1275,70 @@ wheels = [
 ]
 
 [[package]]
+name = "legion"
+version = "0.0.1"
+source = { editable = "." }
+dependencies = [
+    { name = "exceptiongroup" },
+    { name = "fastapi" },
+    { name = "harbor", extra = ["e2b"] },
+    { name = "httpx" },
+    { name = "huggingface-hub" },
+    { name = "jinja2" },
+    { name = "msgboard", extra = ["hf"] },
+    { name = "packaging" },
+    { name = "podman-compose" },
+    { name = "pydantic" },
+    { name = "pyyaml" },
+    { name = "tomli" },
+    { name = "typer" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-xdist" },
+    { name = "respx" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "exceptiongroup", specifier = ">=1.3" },
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "harbor", extras = ["e2b"], specifier = "==0.25.0" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "huggingface-hub", specifier = ">=2.2" },
+    { name = "jinja2", specifier = ">=3.1" },
+    { name = "msgboard", extras = ["hf"], git = "https://github.com/huggingface/msgboard.git?rev=563911d586e3435f2aadb25d7a8f565cce828406" },
+    { name = "packaging", specifier = ">=24" },
+    { name = "podman-compose", specifier = "==1.5.0" },
+    { name = "pydantic", specifier = ">=2.7" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
+    { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3" },
+    { name = "pyyaml", specifier = ">=6" },
+    { name = "respx", marker = "extra == 'dev'", specifier = ">=0.21" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
+    { name = "tomli", specifier = ">=2" },
+    { name = "typer", specifier = ">=0.12" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
+]
+provides-extras = ["controller", "worker", "dev"]
+
+[[package]]
 name = "litellm"
-version = "1.108.0"
+version = "1.110.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
+    { name = "anyio" },
     { name = "boto3" },
     { name = "certifi" },
     { name = "click" },
-    { name = "fastuuid" },
+    { name = "fastuuid", marker = "python_full_version < '3.15'" },
     { name = "filelock" },
     { name = "httpx", extra = ["http2"] },
     { name = "huggingface-hub" },
@@ -1353,15 +1355,15 @@ dependencies = [
     { name = "tokenizers" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/6e/8f/44671cdf62fa1cf70a1bde9ffb672cc5a26e3e1853177ef7dd3d307e3699/litellm-1.108.0.tar.gz", hash = "sha256:531b2088cd9b0e95518b450ed8fd7fac4cdd81529af7930a0b5180e67d2b0c04", size = 21426989, upload-time = "2026-11-04T03:31:51.078Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/82/c4/7dce34b0598c5eb5af455e5200a97202644e077a65bd404439050cbb7a1a/litellm-1.110.0.tar.gz", hash = "sha256:6223f8385534dd544773e945284e2b4090d7f03393e3344fb3e5e57111076065", size = 25950954, upload-time = "2026-11-18T01:36:02.263Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/0b/62/05f2d9c3a03473f1ac00651b87ee8c81e00660986f8a898c774495b7b0c3/litellm-1.108.0-cp310-abi3-macosx_10_12_x86_64.whl", hash = "sha256:63602ea1243b22775af8484b8ef2a7da73b6b275491ac943377cb2bee9d5af1c", size = 35831637, upload-time = "2026-11-04T03:31:18.256Z" },
-    { url = "https://files.pythonhosted.org/packages/00/86/3e258edcf62c1c77aac31d0b650f84b98c84e3f7c1da2daf9e8b031487ad/litellm-1.108.0-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:3af9eccea1486a89c4f5c2216f728024114d6ae76b2efe9071f740b007e18706", size = 34944457, upload-time = "2026-11-04T03:31:23.442Z" },
-    { url = "https://files.pythonhosted.org/packages/fb/3c/bc319834a1cee721d4efe9f3412a3cb99777eb994e3a098fe2868c2f5476/litellm-1.108.0-cp310-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:d26bffd9c5562589873431e0dbcbb2f64b84d7d3f3a2cba049b6a3a186379fbf", size = 35448091, upload-time = "2026-11-04T03:31:28.026Z" },
-    { url = "https://files.pythonhosted.org/packages/c1/7a/83ef54a21531c4707791ad2438ea0b71fc11b52f1a6e56b36e3992be9e07/litellm-1.108.0-cp310-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:1ca5da602631ca4e149e2aba01a5d87e59fda8ce6c66bb5622c06f7ba34f6fb6", size = 36315040, upload-time = "2026-11-04T03:31:32.392Z" },
-    { url = "https://files.pythonhosted.org/packages/4b/81/d3f431c948d1c2e37a5d9ed492802f5b856c78e30fc6540867889259987b/litellm-1.108.0-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:960c78e6fe047d90f105d687475831d9b93726129c9411a8eced77757a488733", size = 35577114, upload-time = "2026-11-04T03:31:36.885Z" },
-    { url = "https://files.pythonhosted.org/packages/8e/25/2f2847c102ebe1376534b651f17b9f34b8b2071bfdefbd1f9f79f2aa455e/litellm-1.108.0-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:9a101e628c14f277eee1f1083415c6578214d7944275e185e12173bcf01a32d2", size = 36379711, upload-time = "2026-11-04T03:31:41.441Z" },
-    { url = "https://files.pythonhosted.org/packages/84/ab/c17c81740f101a4224487307204f58814e9025a980444f484d3be2ab60b2/litellm-1.108.0-cp310-abi3-win_amd64.whl", hash = "sha256:49ecd810e6ab7d149f3174e0d45e333ae3765acbd12862b49a034b4e6ea533ba", size = 36986423, upload-time = "2026-11-04T03:31:45.72Z" },
+    { url = "https://files.pythonhosted.org/packages/f8/9c/baf42a60642e793bcc9b2b2ff0e325c3bf17d5bdb49b45b82c4e6f98d744/litellm-1.110.0-cp310-abi3-macosx_10_12_x86_64.whl", hash = "sha256:96320523fbdff55d8095cf78876e30c9b80a9973e7a85f80bfcb00dbd4e0827d", size = 43304613, upload-time = "2026-11-18T01:35:35.709Z" },
+    { url = "https://files.pythonhosted.org/packages/52/55/82e0ddb4ac036e29882f15b62a34a120b399059fb4da8d2eb8312f906832/litellm-1.110.0-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:bc84f67e18e89e39996844378c1e8048aeaa49e3bbb93855df0ce04f97f64038", size = 42461943, upload-time = "2026-11-18T01:35:39.584Z" },
+    { url = "https://files.pythonhosted.org/packages/71/61/a2ab3353b8b5c9e68482200873628a1df813bb617af62b9c2450d9952b8e/litellm-1.110.0-cp310-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:99773888e8dd0d0b842fc8afa78eb5ed7a0b31c13f1b2d0a118cf0423bc5db8c", size = 43056156, upload-time = "2026-11-18T01:35:43.257Z" },
+    { url = "https://files.pythonhosted.org/packages/5b/21/b502e48603205b9482f4cb5403556600c7aa6dc77bd336bb79b4ba0c67d2/litellm-1.110.0-cp310-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:271e35741f8a944ee4bfabf31342edcd05385bdd20a9386d19c085cb2e4dc507", size = 43839005, upload-time = "2026-11-18T01:35:46.701Z" },
+    { url = "https://files.pythonhosted.org/packages/86/e4/7f6d0f5998b28b8e4507d65c1547f08b22e6808f73db758848abb96ab3d8/litellm-1.110.0-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:1c3ed7f04abd4f6a13fb3d3c9e36dc433fe4c6775384801d70a05f4f0a28ef10", size = 43168995, upload-time = "2026-11-18T01:35:50.488Z" },
+    { url = "https://files.pythonhosted.org/packages/9e/e0/7909896d78a5b2f6d17469de4e783aa78bedbc13b87878885c945d9d973a/litellm-1.110.0-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:1e56ea0d2768ae3201e044bee49d3a11553ed5546fe7f3e2470a161f6bffdfc8", size = 44118518, upload-time = "2026-11-18T01:35:53.837Z" },
+    { url = "https://files.pythonhosted.org/packages/45/1d/60216e1257202eb7be009fe97a8a73fa60ed2a472118e90d83ae71441a07/litellm-1.110.0-cp310-abi3-win_amd64.whl", hash = "sha256:114eb0a8ef8991771310cefa1d54ffd00377009001d54a31542e4fda8fe3bbe5", size = 45269598, upload-time = "2026-11-18T01:35:58.506Z" },
 ]
 
 [[package]]
@@ -1860,7 +1862,7 @@ name = "protobuf-py"
 version = "0.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "protobuf-py-ext", marker = "(platform_machine == 'arm64' and platform_python_implementation == 'CPython' and sys_platform == 'darwin') or (platform_machine == 'aarch64' and platform_python_implementation == 'CPython' and sys_platform == 'linux') or (platform_machine == 'x86_64' and platform_python_implementation == 'CPython' and sys_platform == 'linux') or (platform_machine == 'AMD64' and platform_python_implementation == 'CPython' and sys_platform == 'win32') or (platform_machine == 'ARM64' and platform_python_implementation == 'CPython' and sys_platform == 'win32')" },
+    { name = "protobuf-py-ext", marker = "platform_machine == 'arm64' and platform_python_implementation == 'CPython' and sys_platform == 'darwin' or (platform_machine == 'aarch64' or platform_machine == 'x86_64') and platform_python_implementation == 'CPython' and sys_platform == 'linux' or (platform_machine == 'AMD64' or platform_machine == 'ARM64') and platform_python_implementation == 'CPython' and sys_platform == 'win32'" },
     { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/71/2a/6a08d3a3ddbfd745f987c5ff22129a979ea74319fbfe5b9d59c7a6730d25/protobuf_py-0.6.0.tar.gz", hash = "sha256:be6b8d84ba54380ca5e5e50f20e4dd42df81c845cf9dc8c021f147d8c516b341", size = 161533, upload-time = "2026-09-30T06:45:41.388Z" }
