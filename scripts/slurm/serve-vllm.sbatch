@@ -25,9 +25,10 @@ srun --overlap --container-image="$IMAGE" --no-container-mount-home \
   --container-mounts="/scratch/$USER/hf:/hf" --container-env=HF_HOME \
   vllm serve "$MODEL" --port "$PORT" \
   --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3 "$@" &
+SRUN_PID=$!
 until curl -sf -o /dev/null "localhost:$PORT/v1/models"; do
   sleep 10
-  kill -0 $! 2>/dev/null || { echo "vLLM exited during startup"; exit 1; }
+  kill -0 "$SRUN_PID" 2>/dev/null || { echo "vLLM exited during startup"; exit 1; }
 done
 echo "serving $MODEL at http://$(hostname -I | awk '{print $1}'):$PORT/v1"
-wait
+wait "$SRUN_PID"  # the job fails when vLLM does
