@@ -183,13 +183,13 @@ def load(path: str | Path) -> RunResult:
     """The result of the run at `path`: a local run bundle, a folder holding exactly one (under
     `.legion/`), or a Slurm run directory. ValueError if it is none of those."""
     root = Path(path).resolve()
-    if _bundle(root) is not None:
-        return _local(root, _bundle(root))
+    if (run := _bundle(root)) is not None:
+        return _local(root, run)
+    bundles = [p.parent for p in sorted(root.glob(".legion/*/run.json")) if _bundle(p.parent)]
+    if len(bundles) == 1:  # before the Slurm layout: a local run dir may hold experiment/ too
+        return _local(bundles[0], _bundle(bundles[0]))
     if (root / "experiment").is_dir() or (root / "results").is_dir():
         return _slurm(root)
-    bundles = [p.parent for p in sorted(root.glob(".legion/*/run.json")) if _bundle(p.parent)]
-    if len(bundles) == 1:
-        return load(bundles[0])
     found = f"{len(bundles)} run bundles under .legion/" if bundles else "no run"
     raise ValueError(f"{root}: not a local run bundle or a Slurm run directory ({found})")
 
@@ -237,9 +237,12 @@ def _trial(root: Path, path: Path) -> TrialResult:
         out.rewards = {k: float(v) for k, v in rewards.items()}
         out.reward = out.rewards.get("reward", next(iter(out.rewards.values()))
                                      if len(out.rewards) == 1 else None)
-    info = doc.get("exception_info")
+    # a multi-step Trial may record a failed step only there, with the other steps' rewards
+    steps = [s.get("exception_info") for s in doc.get("step_results") or [] if isinstance(s, dict)]
+    info = next((i for i in [doc.get("exception_info"), *steps] if i), None)
     if info:
-        out.exception_type = str((info or {}).get("exception_type") or "Exception")
+        out.exception_type = str((info if isinstance(info, dict) else {}).get("exception_type")
+                                 or "Exception")
         out.outcome = Outcome.TIMEOUT if out.exception_type in TIMEOUTS else Outcome.HARNESS_ERROR
     elif out.rewards:
         out.outcome = Outcome.COMPLETED
@@ -281,8 +284,11 @@ def _agent(name: str, trials: list[TrialResult], workers: list[WorkerResult]) ->
     """Its infrastructure outcome, from every worker launch it was placed on (a re-placed agent
     restarts its Trial names on the new worker too), else its latest Trial's."""
     held = [w for w in workers if name in w.agents]
-    incs = [i for w in held for i in w.incarnations if name in i.agents or not i.recorded]
-    infra = _infra(incs, sum(w.crashes for w in held))
+    recorded = [i for w in held for i in w.incarnations if i.recorded]
+    if recorded:  # the launches it was placed on: crashes before it arrived are not its own
+        infra = _infra([i for i in recorded if name in i.agents])
+    else:  # no records (older runs): the whole worker's history
+        infra = _infra([i for w in held for i in w.incarnations], sum(w.crashes for w in held))
     last = trials[-1] if trials else None
     return AgentResult(name=name, workers=[w.id for w in held], trials=trials,
                        outcome=infra or (last.outcome if last else Outcome.UNKNOWN),
@@ -425,11 +431,11 @@ def _slurm(root: Path) -> RunResult:
             if (root / name).is_file():
                 env |= read_env_file(root / name)
         spec = Spec.load(root / "experiment" / "spec.yaml", env)
-    except ValidationError as e:  # where and why, never the (resolved, maybe secret) input
-        err = e.errors()[0]
-        reasons.append((Outcome.UNKNOWN, f"spec: {'.'.join(map(str, err['loc']))}: {err['msg']}"))
+    except ValidationError as e:  # where and which check: its message may quote the input,
+        err = e.errors(include_url=False, include_input=False)[0]  # a resolved secret
+        reasons.append((Outcome.UNKNOWN, f"spec: {'.'.join(map(str, err['loc']))}: {err['type']}"))
     except (OSError, TypeError, ValueError, yaml.YAMLError) as e:
-        why = safe_error(e, [v for v in env.values() if len(v) >= 8]).splitlines()[0]
+        why = safe_error(e, [v for v in env.values() if len(v) >= 4]).splitlines()[0]
         reasons.append((Outcome.UNKNOWN, f"spec: {why}"))
     results = root / "results"
     swarms = sorted(p.name for p in results.iterdir() if p.is_dir()) if results.is_dir() else []
@@ -437,8 +443,10 @@ def _slurm(root: Path) -> RunResult:
     base = results / swarm
     trials = _trials(root, base)
     records = _incarnations(base / WORKERS)
+    # A launch env file is written before sbatch, also for a submission that fails: only a run
+    # without records (older) counts its launches from them
     launches: dict[str, list[str]] = {}
-    for path in sorted((root / "launch").glob("*.env")):
+    for path in [] if records else sorted((root / "launch").glob("*.env")):
         if m := _LAUNCH.fullmatch(path.name):
             launches.setdefault(m[1], []).append(m[2])
     workers = {}

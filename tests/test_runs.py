@@ -121,12 +121,14 @@ def test_lifecycle(tiny):
     assert doc["totals"]["cost_usd"] == round(a["cost_usd"], 6)
 
 
-def worker_pid(worker: str) -> int | None:
-    """The pid of a local run's live worker process `worker`, if any."""
+def worker_pid(run: Path, worker: str) -> int | None:
+    """The pid of the live worker process `worker` of the local run in `run`, if any: tiny runs
+    in parallel tests reuse worker ids, so its WORK_ROOT (the run's agents/) must match too."""
+    want = {f"WORKER_ID={worker}".encode(), f"WORK_ROOT={run / 'agents'}".encode()}
     for d in Path("/proc").glob("[0-9]*"):
         try:
             if (b"legion.worker.main" in (d / "cmdline").read_bytes()
-                    and f"WORKER_ID={worker}".encode() in (d / "environ").read_bytes().split(b"\0")):
+                    and want <= set((d / "environ").read_bytes().split(b"\0"))):
                 return int(d.name)
         except OSError:
             continue
@@ -145,9 +147,10 @@ def test_results(tiny):
     workers = {n: tiny.turns(n, 1)["worker"] for n in names}
     [lone] = [n for n in names if list(workers.values()).count(workers[n]) == 1]
     victim = workers[lone]
-    pid = worker_pid(victim)
+    pid = worker_pid(run, victim)
+    assert pid is not None
     os.kill(pid, signal.SIGKILL)  # no drain, no exit record
-    tiny.wait(lambda: worker_pid(victim) not in (None, pid))
+    tiny.wait(lambda: worker_pid(run, victim) not in (None, pid))
     tiny.legion("prompt", lone, "again")
     tiny.turns(lone, 2)
     tiny.legion("stop", "tiny", "--delete", "--yes")  # drains: the Trials are verified

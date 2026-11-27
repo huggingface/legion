@@ -26,7 +26,9 @@ gives the same result, and a saved result stays valid next to its run.
 `path` is one of these:
 
 - a local run bundle, `.legion/<swarm>-<time>/` ([local runs](local.md));
-- a folder holding exactly one bundle under `.legion/`, such as a CIB case folder;
+- a folder holding exactly one bundle under `.legion/`, such as a CIB case folder. This wins
+  over the Slurm layout below, so a local `legion init` folder with `experiment/` reads as its
+  bundle;
 - a Slurm run directory, `legion init`'s RUN_DIR ([Slurm](slurm.md)).
 
 Read a Slurm run after `legion stop --release`. Its Trials are verified as the workers drain.
@@ -42,8 +44,8 @@ infrastructure outcome, so there is nothing to score.
 | `preempted` | The agent's worker exited preempted (Slurm exit 75), whether or not it was relaunched. |
 | `worker_replaced` | The agent's worker was relaunched after a crash, a kill or a planned restart. A relaunched worker reuses its Trial names, so its Trial files can be overwritten ([#121](https://github.com/huggingface/legion/issues/121)). |
 | `worker_lost` | The agent's worker started and never recorded an exit. |
-| `timeout` | Harbor's `AgentTimeoutError`, `AgentSetupTimeoutError`, `VerifierTimeoutError` or `EnvironmentStartTimeoutError`. |
-| `harness_error` | Any other exception in the Trial, from Pi or Harbor, including a cancelled Trial. |
+| `timeout` | Harbor's `AgentTimeoutError`, `AgentSetupTimeoutError`, `VerifierTimeoutError` or `EnvironmentStartTimeoutError`, at the top level or in any step of a multi-step Trial. |
+| `harness_error` | Any other exception in the Trial or one of its steps, from Pi or Harbor, including a cancelled Trial. |
 | `unknown` | No evidence: no `result.json`, no verifier result, a missing planned agent, a spec that doesn't load, or a run that didn't end. |
 
 - A **Trial**'s outcome comes from its own `result.json`.
@@ -126,12 +128,15 @@ slurm: RUN_DIR/
   launch/<worker>-<incarnation>.env           one per worker launch
 ```
 
-Each worker launch writes an incarnation record. It records the Slurm job, host, start time and
+Each worker launch writes an incarnation record. The records decide which launches an agent
+ran on, so a crash before an agent arrived doesn't count against it. It records the Slurm job, host, start time and
 the agents placed on the worker as they arrive. It is completed with `ended_at` and `exit` once
 the worker has drained (its Trials ended and were verified) or has been preempted. A worker that
 was killed leaves its record without an exit. Runs from before these records exist still show
 relaunches through their `launch/` env files, but which agents the worker held is unknown, so
-the run itself is `worker_replaced`.
+the run itself is `worker_replaced`. A run with records ignores those files, because one is
+written before `sbatch` and stays when a submission is refused. Spec errors are reported by
+field and kind only (`spec: inference.api_key_env: value_error`), never with the resolved value.
 
 Keeping Trial results across a relaunch is still open
 ([#121](https://github.com/huggingface/legion/issues/121)). Until it lands, the affected agents
