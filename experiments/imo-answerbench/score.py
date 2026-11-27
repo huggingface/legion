@@ -8,6 +8,8 @@ from huggingface_hub import hf_hub_download
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from math_eval_common import (
+    DEFAULT_JUDGE_BASE_URL,
+    DEFAULT_JUDGE_MODEL,
     compare_binary,
     find_last_boxed_content,
     judge_text,
@@ -111,17 +113,17 @@ def main():
     parser.add_argument("--k", type=int, default=4)
     parser.add_argument("--judge", action="store_true")
     parser.add_argument("--provider", choices=["openai", "gemini"], default="openai")
-    parser.add_argument("--judge-model")
+    parser.add_argument("--judge-model", default=DEFAULT_JUDGE_MODEL)
     parser.add_argument("--judge-base-url")
     parser.add_argument("--judge-api-key-env", help="Defaults to HF_INFERENCE_TOKEN or GEMINI_API_KEY")
     parser.add_argument("--reference-dir")
     args = parser.parse_args()
     if args.k < 2:
         parser.error("--k must be >= 2")
+    if not args.judge_base_url and args.provider == "openai":
+        args.judge_base_url = DEFAULT_JUDGE_BASE_URL
     if not args.judge_api_key_env:
         args.judge_api_key_env = "GEMINI_API_KEY" if args.provider == "gemini" else "HF_INFERENCE_TOKEN"
-    if args.judge and not args.judge_model:
-        parser.error("--judge requires --judge-model")
     print(json.dumps(score(args.runs, args), indent=2, ensure_ascii=False))
 
 

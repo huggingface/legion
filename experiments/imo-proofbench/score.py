@@ -6,6 +6,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from math_eval_common import (
+    DEFAULT_JUDGE_BASE_URL,
+    DEFAULT_JUDGE_MODEL,
     compare_proof,
     judge_text,
     load_runs,
@@ -80,7 +82,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("runs", nargs="+")
     parser.add_argument("--k", type=int, default=4)
-    parser.add_argument("--judge-model", required=True)
+    parser.add_argument("--judge-model", default=DEFAULT_JUDGE_MODEL)
     parser.add_argument("--provider", choices=["openai", "gemini"], default="openai")
     parser.add_argument("--judge-base-url")
     parser.add_argument("--judge-api-key-env", help="Defaults to HF_INFERENCE_TOKEN or GEMINI_API_KEY")
@@ -89,6 +91,8 @@ def main():
     args = parser.parse_args()
     if args.k < 2:
         parser.error("--k must be >= 2")
+    if not args.judge_base_url and args.provider == "openai":
+        args.judge_base_url = DEFAULT_JUDGE_BASE_URL
     if not args.judge_api_key_env:
         args.judge_api_key_env = "GEMINI_API_KEY" if args.provider == "gemini" else "HF_INFERENCE_TOKEN"
     records = score(args.runs, args)

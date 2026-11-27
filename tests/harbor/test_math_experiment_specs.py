@@ -24,6 +24,8 @@ def test_math_spec(name, revision, filename):
         env["BOARD_SPACE"] = "test-board"
     spec = Spec.load(path, env=env)
     assert spec.task.revision == revision
+    assert spec.workers.turn_timeout == ("30m" if filename == "hf-jobs-thinking.yaml" else "6m")
+    assert spec.limits.run_timeout_seconds == 2400
     assert spec.team_file == path.parent / "team.md"
     board = spec.resources["message_board"]
     assert board["wake"] == ["mention", "thread", "channel"]
@@ -88,6 +90,7 @@ def test_solo_math_spec(name, revision, filename):
     spec = Spec.load(path, env={"TASK_ID": "example", "SERVER_URL": "https://example.com/v1"})
     assert spec.task.revision == revision
     assert spec.agents.count == 1 and spec.workers.agents_per_worker == 1
+    assert spec.workers.turn_timeout == "30m" and spec.limits.run_timeout_seconds == 2400
     assert spec.team_file is None and "message_board" not in spec.resources
     assert spec.loop is None
     assert spec.environment.backend == ("podman" if filename == "solo.yaml" else "hf-sandbox")

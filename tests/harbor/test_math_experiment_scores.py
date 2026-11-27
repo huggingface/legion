@@ -3,6 +3,7 @@ import importlib.util
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.error import HTTPError, URLError
 
 import httpx
 import pytest
@@ -191,6 +192,9 @@ def test_missing_verification_and_invalid_proof(tmp_path):
 @respx.mock
 def test_judge_invalid_answer_and_http_failure(tmp_path, monkeypatch):
     mod = module("imo-answerbench")
+    import math_eval_common
+
+    monkeypatch.setattr(math_eval_common, "JUDGE_RETRY_DELAYS", (0, 0, 0))
     monkeypatch.setenv("TEST_JUDGE_KEY", "test")
     task = "imo-bench-algebra-002"
     trial(tmp_path, task, "a", "x", 0)
@@ -734,3 +738,145 @@ def test_answer_vote_terminal_newlines_and_cleanup_consistency():
         assert remove_self_evaluation(text) == remove_self_evaluation(text + "\r\n\n")
     assert mod.normalize(" ## Evaluation\n\\boxed{42}") != mod.normalize("## Evaluation\n\\boxed{42}")
     assert mod.normalize(" \t\n") == ""
+
+
+@pytest.mark.parametrize("status", [408, 429, 500, 503])
+@respx.mock
+def test_judge_retries_transient_http_errors(status, monkeypatch):
+    module("imo-answerbench")
+    import math_eval_common
+
+    monkeypatch.setenv("TEST_JUDGE_KEY", "test")
+    route = respx.post("https://judge/v1/chat/completions").mock(side_effect=[
+        httpx.Response(status), openai_reply(r"\boxed{Correct}")])
+    delays = []
+    answer = math_eval_common.judge_text("prompt", "model", "https://judge/v1", "TEST_JUDGE_KEY",
+                                       sleep=delays.append)
+    assert answer == r"\boxed{Correct}"
+    assert route.call_count == 2 and delays == [1]
+    assert route.calls[0].request.extensions["timeout"] == {
+        "connect": 180, "read": 180, "write": 180, "pool": 180}
+
+
+@respx.mock
+def test_judge_does_not_retry_client_error(monkeypatch):
+    module("imo-answerbench")
+    import math_eval_common
+
+    monkeypatch.setenv("TEST_JUDGE_KEY", "test")
+    route = respx.post("https://judge/v1/chat/completions").mock(return_value=httpx.Response(400))
+    delays = []
+    with pytest.raises(httpx.HTTPStatusError):
+        math_eval_common.judge_text("prompt", "model", "https://judge/v1", "TEST_JUDGE_KEY",
+                                   sleep=delays.append)
+    assert route.call_count == 1 and delays == []
+
+
+@respx.mock
+def test_judge_retries_empty_response_and_stops_after_four_attempts(monkeypatch):
+    module("imo-answerbench")
+    import math_eval_common
+
+    monkeypatch.setenv("TEST_JUDGE_KEY", "test")
+    route = respx.post("https://judge/v1/chat/completions").mock(side_effect=[
+        httpx.Response(200, content=b""), httpx.Response(200, content=b" \n"),
+        openai_reply(" "), openai_reply(r"\boxed{Correct}")])
+    delays = []
+    assert math_eval_common.judge_text("p", "m", "https://judge/v1", "TEST_JUDGE_KEY",
+                                      sleep=delays.append) == r"\boxed{Correct}"
+    assert route.call_count == 4 and delays == [1, 2, 4]
+    route.mock(return_value=openai_reply(""))
+    delays.clear()
+    with pytest.raises(math_eval_common.EmptyJudgeResponse):
+        math_eval_common.judge_text("p", "m", "https://judge/v1", "TEST_JUDGE_KEY",
+                                   sleep=delays.append)
+    assert route.call_count == 8 and delays == [1, 2, 4]
+
+
+@pytest.mark.parametrize("error", [TimeoutError("slow"), httpx.ConnectTimeout("slow"), URLError("offline")])
+@respx.mock
+def test_judge_retries_timeouts(error, monkeypatch):
+    module("imo-answerbench")
+    import math_eval_common
+
+    monkeypatch.setenv("TEST_JUDGE_KEY", "test")
+    route = respx.post("https://judge/v1/chat/completions").mock(side_effect=[
+        error, openai_reply("finished")])
+    delays = []
+    assert math_eval_common.judge_text("p", "m", "https://judge/v1", "TEST_JUDGE_KEY",
+                                      sleep=delays.append) == "finished"
+    assert route.call_count == 2 and delays == [1]
+
+
+@pytest.mark.parametrize("gemini_key", [None, ""])
+@respx.mock
+def test_gemini_google_api_key_fallback(gemini_key, monkeypatch):
+    module("imo-proofbench")
+    import math_eval_common
+
+    if gemini_key is None:
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("GEMINI_API_KEY", gemini_key)
+    monkeypatch.setenv("GOOGLE_API_KEY", "fallback-key")
+    route = respx.post("https://generativelanguage.googleapis.com/v1beta/models/gemini:generateContent").mock(
+        return_value=httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}))
+    assert math_eval_common.judge_text("p", "gemini", None, "GEMINI_API_KEY", gemini=True) == "ok"
+    assert route.calls[0].request.headers["x-goog-api-key"] == "fallback-key"
+    monkeypatch.delenv("CUSTOM_JUDGE_KEY", raising=False)
+    with pytest.raises(ValueError, match="CUSTOM_JUDGE_KEY"):
+        math_eval_common.judge_text("p", "gemini", None, "CUSTOM_JUDGE_KEY", gemini=True)
+
+
+@pytest.mark.parametrize("name", ["imo-answerbench", "imo-proofbench"])
+@pytest.mark.parametrize("provider", ["openai", "gemini"])
+def test_judge_cli_default_configuration(name, provider, monkeypatch, capsys):
+    import sys
+
+    mod = module(name)
+    captured = []
+    def fake_score(roots, args):
+        captured.append(args)
+        return {} if name == "imo-answerbench" else []
+    monkeypatch.setattr(mod, "score", fake_score)
+    argv = ["score.py", "run"]
+    if name == "imo-answerbench":
+        argv.append("--judge")
+    if provider == "gemini":
+        argv += ["--provider", "gemini"]
+    monkeypatch.setattr(sys, "argv", argv)
+    mod.main()
+    capsys.readouterr()
+    args = captured[0]
+    assert args.provider == provider
+    assert args.judge_model == "moonshotai/Kimi-K3.1-Pro"
+    assert args.judge_base_url == ("https://router.huggingface.co/v1" if provider == "openai" else None)
+    assert args.judge_api_key_env == ("HF_INFERENCE_TOKEN" if provider == "openai" else "GEMINI_API_KEY")
+
+
+@respx.mock
+def test_judge_urllib_client_errors_do_not_retry(monkeypatch):
+    module("imo-answerbench")
+    import math_eval_common
+
+    monkeypatch.setenv("TEST_JUDGE_KEY", "test")
+    route = respx.post("https://judge/v1/chat/completions").mock(
+        side_effect=HTTPError("https://judge/v1", 403, "forbidden", {}, None))
+    delays = []
+    with pytest.raises(HTTPError):
+        math_eval_common.judge_text("p", "m", "https://judge/v1", "TEST_JUDGE_KEY",
+                                   sleep=delays.append)
+    assert route.call_count == 1 and delays == []
+
+
+@respx.mock
+def test_gemini_key_takes_precedence_over_fallback(monkeypatch):
+    module("imo-proofbench")
+    import math_eval_common
+
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
+    monkeypatch.setenv("GOOGLE_API_KEY", "google-key")
+    route = respx.post("https://generativelanguage.googleapis.com/v1beta/models/gemini:generateContent").mock(
+        return_value=httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}))
+    assert math_eval_common.judge_text("p", "gemini", None, "GEMINI_API_KEY", gemini=True) == "ok"
+    assert route.calls[0].request.headers["x-goog-api-key"] == "gemini-key"

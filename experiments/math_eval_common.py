@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from collections import Counter
 from datetime import datetime
 from math import comb
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 
 import httpx
 
@@ -99,30 +101,66 @@ def summary(values):
     return {"count": len(values), "mean": sum(values) / len(values) if values else None}
 
 
-def judge_text(prompt, model, base_url, api_key_env, gemini=False):
-    """Request ordinary text; QED-Nano graders use tags, not JSON mode."""
+DEFAULT_JUDGE_MODEL = "moonshotai/Kimi-K3.1-Pro"
+DEFAULT_JUDGE_BASE_URL = "https://router.huggingface.co/v1"
+JUDGE_RETRY_DELAYS = (1, 2, 4)
+
+
+class EmptyJudgeResponse(ValueError):
+    """The judge returned no final text."""
+
+
+def judge_text(prompt, model, base_url, api_key_env, gemini=False, *, sleep=None):
+    """Request text with bounded retries for transient failures."""
     key = os.environ.get(api_key_env)
+    if not key and api_key_env == "GEMINI_API_KEY":
+        key = os.environ.get("GOOGLE_API_KEY")
     if not key:
         raise ValueError(f"Set {api_key_env} for the judge")
+    if sleep is None:
+        sleep = time.sleep
     if gemini:
         base = (base_url or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
         url = f"{base}/models/{model}:generateContent"
-        response = httpx.post(url, headers={"x-goog-api-key": key}, json={
-            "contents": [{"parts": [{"text": prompt}]}],
-        }, timeout=120)
-        response.raise_for_status()
-        parts = response.json()["candidates"][0]["content"]["parts"]
-        content = "".join(part.get("text", "") for part in parts if not part.get("thought"))
+        headers = {"x-goog-api-key": key}
+        payload = {"contents": [{"parts": [{"text": prompt}]}]}
     else:
-        base = (base_url or "https://router.huggingface.co/v1").rstrip("/")
-        response = httpx.post(f"{base}/chat/completions", headers={"Authorization": f"Bearer {key}"},
-                              json={"model": model, "messages": [{"role": "user", "content": prompt}]},
-                              timeout=120)
-        response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
-    if not isinstance(content, str):
-        raise TypeError("Judge must return text")
-    return content
+        base = (base_url or DEFAULT_JUDGE_BASE_URL).rstrip("/")
+        url = f"{base}/chat/completions"
+        headers = {"Authorization": f"Bearer {key}"}
+        payload = {"model": model, "messages": [{"role": "user", "content": prompt}]}
+    for attempt in range(len(JUDGE_RETRY_DELAYS) + 1):
+        try:
+            response = httpx.post(url, headers=headers, json=payload, timeout=180)
+            response.raise_for_status()
+            if not response.content.strip():
+                raise EmptyJudgeResponse("Judge returned an empty response")
+            result = response.json()
+            if gemini:
+                candidates = result.get("candidates") or []
+                parts = (candidates[0].get("content") or {}).get("parts", []) if candidates else []
+                content = "".join(part.get("text", "") for part in parts if not part.get("thought"))
+            else:
+                choices = result.get("choices") or []
+                content = (choices[0].get("message") or {}).get("content") if choices else None
+            if content is None or content == "" or (isinstance(content, str) and not content.strip()):
+                raise EmptyJudgeResponse("Judge returned empty text")
+            if not isinstance(content, str):
+                raise TypeError("Judge must return text")
+            return content
+        except (httpx.HTTPStatusError, HTTPError) as exc:
+            status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else exc.code
+            if status not in (408, 429) and not 500 <= status <= 599:
+                raise
+            if attempt == len(JUDGE_RETRY_DELAYS):
+                raise
+        except (httpx.RequestError, URLError, TimeoutError, EmptyJudgeResponse):
+            if attempt == len(JUDGE_RETRY_DELAYS):
+                raise
+        delay = JUDGE_RETRY_DELAYS[attempt]
+        if delay:
+            sleep(delay)
+    raise AssertionError("unreachable retry loop")
 
 
 def remove_self_evaluation(text):

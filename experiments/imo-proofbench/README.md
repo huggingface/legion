@@ -14,6 +14,12 @@ Install Legion with `uv sync --all-extras`. Set `HF_TOKEN` to a token able to re
 
 Each team run uses four task environments and a board; each solo uses one environment and no board. The HF Sandbox variants would use CPU sandboxes and a public board Space, but do not enforce the task allowlists described above. Standalone specs also start an `h200` model Job. Both the GPU startup and the run are billed; the team loop can run 30 minutes, and server startup can take several minutes. The mini-swarm example estimates $5/hour for `h200`; check current prices and sandbox/endpoint charges before launching. A shared server remains billed until stopped. Use a fresh board and results directory for each run; the board Space persists after the run. These revised specs have not yet been validated in a live run.
 
+## Judge and cluster notes
+
+For AnswerBench and ProofBench scoring, the default open-weight judge is `moonshotai/Kimi-K3.1-Pro` on the HF Router (`https://router.huggingface.co/v1`, `HF_INFERENCE_TOKEN`); SmallMath itself uses its offline verifier. For a Gemini reference judge, use `--provider gemini --judge-model gemini-3.1-pro-preview` with `GEMINI_API_KEY` or, if it is unset or empty, `GOOGLE_API_KEY`. Phase 1 cluster validation reported agreement with Gemini on 60/60 ProofBench and 86/86 AnswerBench cases, and the best open-weight MAE on human-graded IMO-GradingBench.
+
+The Phase 1 runs also found that Pi's default `max_tokens=16384` can truncate long thinking turns; override the limit at the model proxy or server where supported. Solo and thinking variants allow 30 minutes per turn; thinking-off team variants retain six minutes. When invoking `localrun` directly under heavy concurrency, provide a generous verifier drain grace, for example `--grace 600` (the option is in seconds; `--grace 300` means 300 seconds). The current default is 330 seconds, so do not lower it when a larger margin is needed.
+
 ## Launch
 
 The [Qwen3.8 chat template](https://huggingface.co/Qwen/Qwen3.8-27B/blob/37561816e66b5b9153b1b64c10968c18c1e6f4a0/chat_template.jinja#L47-L50) accepts `xhigh`, `medium`, or `low` for thinking; it rejects `high`. The thinking examples use `xhigh`.
@@ -87,12 +93,13 @@ Output-token means use the saved Harbor trial's `result.json` field `agent_resul
 Pass one or more result roots, each containing `<swarm>/<agent>/trials/<trial>/result.json` and its `verifier/` directory. The trial with the latest completion timestamp per agent is used (attempt number breaks timestamp ties); multiple trials with a missing completion timestamp are rejected as ambiguous; each root/swarm/task is a separate team. A missing verifier directory or required grading metadata is an error. The examples above write to `$RESULTS_DIR`.
 
 ```sh
-uv run python experiments/imo-proofbench/score.py "$RESULTS_DIR" --judge-model YOUR_JUDGE_MODEL \
-  --judge-base-url https://router.huggingface.co/v1 --judge-api-key-env HF_INFERENCE_TOKEN \
+uv run python experiments/imo-proofbench/score.py "$RESULTS_DIR" \
   --selected-agent agent-001 --output grades.jsonl
-# Gemini: export GEMINI_API_KEY, then use --provider gemini --judge-model YOUR_GEMINI_MODEL.
+# To compare with Gemini, set GEMINI_API_KEY or GOOGLE_API_KEY and use:
+uv run python experiments/imo-proofbench/score.py "$RESULTS_DIR" \
+  --provider gemini --judge-model gemini-3.1-pro-preview --output grades-gemini.jsonl
 ```
 
 The judge uses the verbatim [QED-Nano ProofBench prompt](https://github.com/CMU-AIRe/QED-Nano/blob/02a4699ed380f8e980a8d44c755b8bfd4e310718/eval/configs/prompts/proofbench.txt) and removes self-evaluation sections before grading. It accepts only the four rubric scores 0, 1, 6 and 7 in the first `<points>N out of 7</points>` tag; malformed outputs abort. This follows the prompt's first-tag instruction: QED-Nano's current `extract_html` implementation selects the last tag if several are present.
 
-OpenAI-compatible endpoints, including OpenAI, work via `--judge-base-url` and `--judge-api-key-env`; Gemini uses its native API and defaults to `GEMINI_API_KEY` (for example, `--judge-model gemini-2.5-pro`). The HF Router can use `HF_INFERENCE_TOKEN` or `HF_TOKEN` via `--judge-api-key-env`. Each proof record has its grade and percent of 7; each team record reports mean, max, identical-proof consensus and an optional preselected agent, in points and percent. Consensus averages judge scores of the unique plurality of exactly identical proof texts; ties have no consensus. Select an agent independently of the judge to avoid an oracle. The selection applies to multi-agent runs; solo runs have no selected agent. A missing or structurally invalid submission gets zero; an API or malformed judge response aborts. LLM grades are estimates and may vary by model and run.
+OpenAI-compatible endpoints, including OpenAI, work via `--judge-base-url` and `--judge-api-key-env`; Gemini uses its native API and defaults to `GEMINI_API_KEY`, falling back to `GOOGLE_API_KEY` (for example, `--judge-model gemini-3.1-pro-preview`). The HF Router can use `HF_INFERENCE_TOKEN` or `HF_TOKEN` via `--judge-api-key-env`. Each proof record has its grade and percent of 7; each team record reports mean, max, identical-proof consensus and an optional preselected agent, in points and percent. Consensus averages judge scores of the unique plurality of exactly identical proof texts; ties have no consensus. Select an agent independently of the judge to avoid an oracle. The selection applies to multi-agent runs; solo runs have no selected agent. A missing or structurally invalid submission gets zero; an API or malformed judge response aborts. LLM grades are estimates and may vary by model and run.
