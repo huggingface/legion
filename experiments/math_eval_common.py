@@ -102,6 +102,7 @@ def summary(values):
 
 
 DEFAULT_JUDGE_MODEL = "moonshotai/Kimi-K3.1-Pro"
+DEFAULT_GEMINI_JUDGE_MODEL = "gemini-3.1-pro-preview"
 DEFAULT_JUDGE_BASE_URL = "https://router.huggingface.co/v1"
 JUDGE_RETRY_DELAYS = (1, 2, 4)
 
@@ -154,7 +155,7 @@ def judge_text(prompt, model, base_url, api_key_env, gemini=False, *, sleep=None
                 raise
             if attempt == len(JUDGE_RETRY_DELAYS):
                 raise
-        except (httpx.RequestError, URLError, TimeoutError, EmptyJudgeResponse):
+        except (httpx.RequestError, URLError, TimeoutError, EmptyJudgeResponse, json.JSONDecodeError):
             if attempt == len(JUDGE_RETRY_DELAYS):
                 raise
         delay = JUDGE_RETRY_DELAYS[attempt]

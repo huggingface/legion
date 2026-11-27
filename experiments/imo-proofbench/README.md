@@ -16,7 +16,7 @@ Each team run uses four task environments and a board; each solo uses one enviro
 
 ## Judge and cluster notes
 
-For AnswerBench and ProofBench scoring, the default open-weight judge is `moonshotai/Kimi-K3.1-Pro` on the HF Router (`https://router.huggingface.co/v1`, `HF_INFERENCE_TOKEN`); SmallMath itself uses its offline verifier. For a Gemini reference judge, use `--provider gemini --judge-model gemini-3.1-pro-preview` with `GEMINI_API_KEY` or, if it is unset or empty, `GOOGLE_API_KEY`. Phase 1 cluster validation reported agreement with Gemini on 60/60 ProofBench and 86/86 AnswerBench cases, and the best open-weight MAE on human-graded IMO-GradingBench.
+For AnswerBench and ProofBench scoring, the default open-weight judge is `moonshotai/Kimi-K3.1-Pro` on the HF Router (`https://router.huggingface.co/v1`, `HF_INFERENCE_TOKEN`); SmallMath itself uses its offline verifier. For a Gemini reference judge, use `--provider gemini` (default model `gemini-3.1-pro-preview`) with `GEMINI_API_KEY` or, if it is unset or empty, `GOOGLE_API_KEY`. Phase 1 cluster validation reported agreement with Gemini on 60/60 ProofBench and 86/86 AnswerBench cases, and the best open-weight MAE on human-graded IMO-GradingBench.
 
 The Phase 1 runs also found that Pi's default `max_tokens=16384` can truncate long thinking turns; override the limit at the model proxy or server where supported. Solo and thinking variants allow 30 minutes per turn; thinking-off team variants retain six minutes. When invoking `localrun` directly under heavy concurrency, provide a generous verifier drain grace, for example `--grace 600` (the option is in seconds; `--grace 300` means 300 seconds). The current default is 330 seconds, so do not lower it when a larger margin is needed.
 

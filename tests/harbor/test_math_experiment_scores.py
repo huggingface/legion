@@ -849,7 +849,8 @@ def test_judge_cli_default_configuration(name, provider, monkeypatch, capsys):
     capsys.readouterr()
     args = captured[0]
     assert args.provider == provider
-    assert args.judge_model == "moonshotai/Kimi-K3.1-Pro"
+    assert args.judge_model == ("moonshotai/Kimi-K3.1-Pro" if provider == "openai"
+                                else "gemini-3.1-pro-preview")
     assert args.judge_base_url == ("https://router.huggingface.co/v1" if provider == "openai" else None)
     assert args.judge_api_key_env == ("HF_INFERENCE_TOKEN" if provider == "openai" else "GEMINI_API_KEY")
 
@@ -880,3 +881,38 @@ def test_gemini_key_takes_precedence_over_fallback(monkeypatch):
         return_value=httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}))
     assert math_eval_common.judge_text("p", "gemini", None, "GEMINI_API_KEY", gemini=True) == "ok"
     assert route.calls[0].request.headers["x-goog-api-key"] == "gemini-key"
+
+
+@respx.mock
+def test_judge_retries_malformed_json_then_succeeds(monkeypatch):
+    module("imo-answerbench")
+    import math_eval_common
+
+    monkeypatch.setenv("TEST_JUDGE_KEY", "test")
+    route = respx.post("https://judge/v1/chat/completions").mock(side_effect=[
+        httpx.Response(200, text="<html>proxy error</html>"),
+        httpx.Response(200, text='{"choices": ['),
+        openai_reply(r"\boxed{Correct}"),
+    ])
+    delays = []
+    assert math_eval_common.judge_text("p", "m", "https://judge/v1", "TEST_JUDGE_KEY",
+                                      sleep=delays.append) == r"\boxed{Correct}"
+    assert route.call_count == 3 and delays == [1, 2]
+
+
+@pytest.mark.parametrize("name", ["imo-answerbench", "imo-proofbench"])
+@pytest.mark.parametrize("provider", ["openai", "gemini"])
+def test_judge_cli_preserves_explicit_model(name, provider, monkeypatch, capsys):
+    import sys
+
+    mod = module(name)
+    captured = []
+    def fake_score(roots, args):
+        captured.append(args)
+        return {} if name == "imo-answerbench" else []
+    monkeypatch.setattr(mod, "score", fake_score)
+    monkeypatch.setattr(sys, "argv", ["score.py", "run", "--provider", provider,
+                                      "--judge-model", "custom-model"])
+    mod.main()
+    capsys.readouterr()
+    assert captured[0].judge_model == "custom-model"
