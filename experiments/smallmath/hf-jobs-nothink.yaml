@@ -20,8 +20,10 @@ agents:
 team_file: team.md
 resources:
   message_board:
+    wake: ["mention", "thread", "channel"]
     space_id: ${BOARD_SPACE}
     private: false
+tools: [message_board.post, message_board.read, message_board.wait]
 environment:
   backend: hf-sandbox
 workers:
@@ -31,10 +33,17 @@ workers:
   turn_timeout: 6m
 loop:
   prompt: Continue solving and ensure /app/answer.txt contains your final submission.
-  every: turn_end
+  every: 24h
+  notices: true
+  on: ["message_board.channel", "message_board.mention", "message_board.thread"]
+  wake:
+    min_gap: 20s
+    max: null
   while:
     until: 30m
     max_rounds: 100
+  final:
+    prompt: "The run is ending. Make sure /app/answer.txt holds just your final answer, then stop."
 limits:
   run_timeout_seconds: 2400
   agent_max_turns: 60

@@ -20,12 +20,6 @@ workers:
     LEGION_RESULTS_DIR: ${RESULTS_DIR:-./results}
   agents_per_worker: 1
   turn_timeout: 6m
-loop:
-  prompt: Continue solving and ensure /app/proof.md contains your final submission.
-  every: turn_end
-  while:
-    until: 30m
-    max_rounds: 100
 limits:
   run_timeout_seconds: 2400
   agent_max_turns: 60

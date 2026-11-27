@@ -12,7 +12,7 @@ The pinned Harbor tasks require `network_mode = "allowlist"` for both the agent 
 
 Install Legion with `uv sync --all-extras`. Set `HF_TOKEN` to a token able to read the dataset, run Jobs, and create and manage a board Space; set `HF_INFERENCE_TOKEN` to a separate token that can access the model endpoint and read the Job's namespace. Never use the infrastructure token as the agents' inference key. See [mini-swarm's token setup](../mini-swarm/README.md#tokens) and [billing](../../docs/billing.md).
 
-Each team run uses four CPU HF Sandboxes and a public board Space; each solo uses one sandbox and no board. Standalone specs also start an `h200` model Job. Both the GPU startup and the run are billed; the loop can run 30 minutes, and server startup can take several minutes. The mini-swarm example estimates $5/hour for `h200`; check current prices and sandbox/endpoint charges before launching. A shared server remains billed until stopped. Use a fresh board and results directory for each run; the board Space persists after the run. No live validation of these specs has been performed.
+Each team run uses four task environments and a board; each solo uses one environment and no board. The HF Sandbox variants would use CPU sandboxes and a public board Space, but do not enforce the task allowlists described above. Standalone specs also start an `h200` model Job. Both the GPU startup and the run are billed; the team loop can run 30 minutes, and server startup can take several minutes. The mini-swarm example estimates $5/hour for `h200`; check current prices and sandbox/endpoint charges before launching. A shared server remains billed until stopped. Use a fresh board and results directory for each run; the board Space persists after the run. These revised specs have not yet been validated in a live run.
 
 ## Launch
 
@@ -52,6 +52,8 @@ RUN_NAME="$SERVER_RUN_NAME" uv run legion serve experiments/imo-answerbench/hf-j
 
 ## Solo versus team evaluation
 
+Solo specs have no loop: they wait for one explicit kickoff prompt and are not automatically re-prompted. Wait for that turn to finish, then drain the worker so Harbor runs the verifier. A local no-loop run does not stop itself; ending it also stops a standalone model Job. Team specs start a loop, wake on board messages and send a final submission reminder at the end.
+
 The thinking-off comparison uses the same task and model for four independently launched solo runs (`solo.yaml`, N=1, no board) and a separate team run (`spec.yaml`, N=4). Use a shared no-thinking server from `hf-jobs-nothink.yaml` via `legion serve`, or a compatible Slurm/local vLLM server with thinking disabled. The standalone `hf-jobs-solo-nothink.yaml` starts a separate model Job for one solo run; it is more expensive when repeated. Never reuse a results directory: each independent run must have its own `RUN_NAME` and `RESULTS_DIR`. `BOARD_SPACE` is required only for the team. The commands below are examples that incur charges; wait for budget approval.
 
 ```sh
@@ -62,8 +64,14 @@ i=1
 export RUN_NAME="imo-answerbench-solo-$i"
 export RESULTS_DIR="$PWD/runs/$RUN_NAME/results"
 uv run legion launch experiments/imo-answerbench/solo.yaml
+# Wait until agent-001 appears in status, then send exactly one kickoff.
 uv run legion status "$RUN_NAME"
-# Wait until this run and its verifier have finished before launching the next one.
+uv run legion prompt --swarm "$RUN_NAME" --type agent "Solve the task and write your final submission to /app/answer.txt."
+# Wait until the turn has finished and the agent is idle; do not send another prompt.
+uv run legion status "$RUN_NAME"
+# For local compute, drain the worker and run the verifier before the next run:
+uv run legion stop "$RUN_NAME" --delete --yes
+# On Slurm, use --release to drain and preserve the run as described in docs/slurm.md.
 # Then launch an independent team run on the same task:
 export RUN_NAME="imo-answerbench-team"
 export BOARD_SPACE="$RUN_NAME"
