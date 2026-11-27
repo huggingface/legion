@@ -2,7 +2,6 @@
 import argparse
 import json
 import sys
-import unicodedata
 from pathlib import Path
 
 from huggingface_hub import hf_hub_download
@@ -46,7 +45,9 @@ def reference(task, directory):
 
 
 def normalize(answer):
-    return " ".join(unicodedata.normalize("NFC", answer).split())
+    # Preserve all internal text: QED extraction and the judge see line breaks,
+    # spacing and Unicode exactly as submitted. This is independent of reward.
+    return answer.strip()
 
 
 def equivalent(answer, gold, problem, args):

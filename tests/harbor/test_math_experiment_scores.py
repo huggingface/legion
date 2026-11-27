@@ -543,7 +543,7 @@ def test_qed_boxed_verdicts_and_nested_braces():
     assert parse_answer_verdict(r"\boxed{Incorrect} and finally \boxed{Correct}") is True
     assert parse_answer_verdict(r"\boxed{Correct} and finally \boxed{Incorrect}") is False
     for invalid in ("Correct", r"\boxed{Maybe}", r"\boxed{Correct"):
-        with pytest.raises(ValueError, match="boxed Correct or Incorrect"):
+        with pytest.raises(ValueError, match="boxed"):
             parse_answer_verdict(invalid)
 
 
@@ -612,3 +612,51 @@ def test_answer_gemini_text_response_and_api_key(tmp_path, monkeypatch):
     assert result["teams"][0]["best_of_n"] == 1
     assert route.calls[0].request.headers["x-goog-api-key"] == "test"
     assert "generationConfig" not in json.loads(route.calls[0].request.content)
+
+
+@pytest.mark.parametrize("response", [
+    "<thinking>...\\boxed{Correct}...</thinking>\n\\boxed{Incorrect",
+    "<thinking>...\\boxed{Correct}...</thinking>",
+    "<thinking>...\\boxed{Correct}",
+    "\\boxed{Correct} then \\boxed{Incorrect",
+    "\\boxed{Correct} then \\boxed",
+])
+def test_answer_verdict_rejects_incomplete_or_analysis_only(response):
+    module("imo-answerbench")
+    from math_eval_common import parse_answer_verdict
+
+    with pytest.raises(ValueError):
+        parse_answer_verdict(response)
+
+
+def test_answer_verdict_uses_complete_box_after_thinking():
+    module("imo-answerbench")
+    from math_eval_common import parse_answer_verdict
+
+    assert parse_answer_verdict("<thinking>\\boxed{Correct}</thinking>\n\\boxed{Incorrect}") is False
+    assert parse_answer_verdict("<thinking>\\boxed{Incorrect}</thinking>\n\\boxed{Correct}") is True
+
+
+@respx.mock
+def test_answer_voting_preserves_qed_box_line_boundaries(tmp_path, monkeypatch):
+    mod = module("imo-answerbench")
+    monkeypatch.setenv("TEST_JUDGE_KEY", "test")
+    task = "imo-bench-algebra-002"
+    trial(tmp_path, task, "a", "\\boxed{wrong}\n\\boxed{gold}", 0)
+    trial(tmp_path, task, "b", "\\boxed{wrong} \\boxed{gold}", 0)
+    refs = tmp_path / "references"
+    refs.mkdir()
+    (refs / f"{task}.json").write_text(json.dumps({"kind": "literal", "answer": "gold"}))
+    (refs / f"{task}.md").write_text("Problem statement")
+    route = respx.post("https://judge/v1/chat/completions").mock(side_effect=[
+        openai_reply(r"<thinking>Matches.</thinking> \boxed{Correct}"),
+        openai_reply(r"<thinking>Not equivalent.</thinking> \boxed{Incorrect}"),
+    ])
+    result = mod.score([tmp_path], answer_args(judge=True, reference_dir=str(refs)))
+    rows = result["teams"][0]["agents"]
+    assert [row["correct"] for row in rows] == [1, 0]
+    assert rows[0]["answer"] != rows[1]["answer"]
+    assert result["teams"][0]["majority_answer"] is None
+    prompts = [json.loads(call.request.content)["messages"][0]["content"] for call in route.calls]
+    assert "Model Solution: gold\n" in prompts[0]
+    assert "Model Solution: wrong,gold\n" in prompts[1]

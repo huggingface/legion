@@ -4,6 +4,10 @@
 
 Adapted from [MathArena/smallmath](https://huggingface.co/datasets/MathArena/smallmath), source revision `13ef9727659718de8bcba221cfe8f8a65bf88a99`. The dataset is CC-BY-NC-SA-4.0; retain MathArena attribution and observe its noncommercial and share-alike terms.
 
+## Network backend
+
+The pinned Harbor tasks require `network_mode = "allowlist"` for both the agent and verifier. Until HF Sandbox enforces allowlists ([huggingface/legion#140](https://github.com/huggingface/legion/issues/140)), use a network-enforcing backend: `ENV_BACKEND=podman` on Slurm or local compute, or `ENV_BACKEND=docker` for local compute. The standalone `hf-jobs-*.yaml` examples currently select `hf-sandbox` and cannot enforce this task requirement; use the URL specs with a compatible backend and a reachable model server instead.
+
 ## Prerequisites and cost
 
 Install Legion with `uv sync --all-extras`. Set `HF_TOKEN` to a token able to read the dataset, run Jobs, and create and manage a board Space; set `HF_INFERENCE_TOKEN` to a separate token that can access the model endpoint and read the Job's namespace. Never use the infrastructure token as the agents' inference key. See [mini-swarm's token setup](../mini-swarm/README.md#tokens) and [billing](../../docs/billing.md).

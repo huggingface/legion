@@ -172,8 +172,33 @@ def find_last_boxed_content(text):
 
 
 def parse_answer_verdict(text):
-    # A verdict is the final box, even if other boxes appear on the same line.
-    matches = _boxed_matches(text)
+    """Accept a complete final verdict, never a box left inside the judge's analysis."""
+    in_thinking = False
+    verdict_start = 0
+    for tag in re.finditer(r"</?thinking>", text, re.IGNORECASE):
+        closing = tag.group().startswith("</")
+        if closing != in_thinking:
+            raise ValueError("Judge returned malformed thinking tags")
+        in_thinking = not closing
+        if closing:
+            verdict_start = tag.end()
+    if in_thinking:
+        raise ValueError("Judge returned unclosed thinking tags")
+    verdict = text[verdict_start:]
+    # Check every explicit box command, including nested boxes. An unfinished
+    # trailing box must not cause the previous valid box to become the verdict.
+    for command in re.finditer(r"\\(?:boxed|fbox)\b", verdict):
+        opening = command.end()
+        if opening >= len(verdict) or verdict[opening] != "{":
+            raise ValueError("Judge returned an unfinished boxed verdict")
+        depth = 1
+        for char in verdict[opening + 1:]:
+            depth += (char == "{") - (char == "}")
+            if depth == 0:
+                break
+        else:
+            raise ValueError("Judge returned an unfinished boxed verdict")
+    matches = _boxed_matches(verdict)
     boxed = _remove_inner_boxed(matches[-1][2]).strip().lower() if matches else None
     if boxed not in {"correct", "incorrect"}:
         raise ValueError("Judge must return a final boxed Correct or Incorrect verdict")
