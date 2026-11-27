@@ -50,7 +50,7 @@ def _main(ctx: typer.Context, run: str = typer.Option(
         help="Run every command against RUN_DIR (`legion init`): its cluster.env and run.env as "
              "the first --env files, its controller (hosts/controller.host) and token. Also LEGION_RUN_DIR, which "
              "an exported LEGION_URL beats; --run beats LEGION_URL.")) -> None:
-    _API[:] = [] if ctx.invoked_subcommand in ("init", "world") else [
+    _API[:] = [] if ctx.invoked_subcommand in ("init", "world", "results") else [
         Client.for_run(run, need_host=ctx.invoked_subcommand not in ("launch", "serve"))]
 
 
