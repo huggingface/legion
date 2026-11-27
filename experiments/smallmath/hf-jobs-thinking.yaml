@@ -11,7 +11,7 @@ inference:
     startup_timeout: 30m
   api_key_env: HF_INFERENCE_TOKEN
   max_working: 4
-  reasoning_effort: high
+  reasoning_effort: xhigh
 task:
   repo: https://huggingface.co/datasets/HuggingFaceSwarms/SmallMath
   selector: ${TASK_ID}

@@ -34,7 +34,7 @@ def test_math_spec(name, revision, filename):
                 "--tool-call-parser", "qwen3_coder"]
     if filename == "hf-jobs-thinking.yaml":
         expected += ["--reasoning-parser", "qwen3"]
-        assert spec.inference.reasoning_effort == "high"
+        assert spec.inference.reasoning_effort == "xhigh"
     expected += ["--tensor-parallel-size", "1", "--max-num-seqs", "4",
                  "--max-model-len", "131072"]
     if filename == "hf-jobs-nothink.yaml":
@@ -46,7 +46,7 @@ def test_math_spec(name, revision, filename):
 def test_shared_server_for_different_tasks(name):
     path = ROOT / name / "spec.yaml"
     base = {"BOARD_SPACE": "test-board", "SERVER_URL": "https://example.com/v1",
-            "REASONING_EFFORT": "high"}
+            "REASONING_EFFORT": "xhigh"}
     first = Spec.load(path, env={**base, "TASK_ID": "task-one"})
     second = Spec.load(path, env={**base, "TASK_ID": "task-two"})
     assert first.task.selector != second.task.selector
@@ -54,4 +54,4 @@ def test_shared_server_for_different_tasks(name):
         swarm = compile_spec(spec, {"repo": "example", "selector": spec.task.selector,
                                     "revision": BENCHMARKS[name]})
         assert swarm.inference.urls == ["https://example.com/v1"]
-        assert swarm.inference.reasoning_effort == "high"
+        assert swarm.inference.reasoning_effort == "xhigh"

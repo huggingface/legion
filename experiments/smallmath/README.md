@@ -12,6 +12,8 @@ Each run uses four CPU HF Sandboxes, a public board Space and, in the standalone
 
 ## Launch
 
+The [Qwen3.8 chat template](https://huggingface.co/Qwen/Qwen3.8-27B/blob/37561816e66b5b9153b1b64c10968c18c1e6f4a0/chat_template.jinja#L47-L50) accepts `xhigh`, `medium`, or `low` for thinking; it rejects `high`. The thinking examples use `xhigh`.
+
 Choose a task, unique run and public board name. Set an absolute results directory accessible to local workers; this preserves the verifier outputs used by the scorer. For Slurm, Legion writes `<run dir>/results` on the shared disk instead. See [environment choices](../README.md#where-agents-run) and [Slurm](../../docs/slurm.md). These commands launch paid resources; run only after budget approval.
 
 ```sh
@@ -21,12 +23,12 @@ export BOARD_SPACE="$RUN_NAME"
 export RESULTS_DIR="$PWD/runs/$RUN_NAME/results"
 # One standalone run, no thinking:
 uv run legion launch experiments/smallmath/hf-jobs-nothink.yaml
-# Or, with thinking and reasoning_effort=high (use a fresh RUN_NAME/BOARD_SPACE/RESULTS_DIR):
+# Or, with thinking and reasoning_effort=xhigh (use a fresh RUN_NAME/BOARD_SPACE/RESULTS_DIR):
 uv run legion launch experiments/smallmath/hf-jobs-thinking.yaml
 uv run legion status "$RUN_NAME"
 ```
 
-The `hf_jobs` specs start and stop their own model server. To share one server across multiple tasks, start one of those server specs with `legion serve`; use the printed `/v1` URL with `spec.yaml` for each independent run. For thinking, set `REASONING_EFFORT=high`; for the no-thinking server leave it `off`. Select the corresponding server configuration, and give each run a fresh `RUN_NAME`, `BOARD_SPACE`, `RESULTS_DIR`, and `TASK_ID`.
+The `hf_jobs` specs start and stop their own model server. To share one server across multiple tasks, start one of those server specs with `legion serve`; use the printed `/v1` URL with `spec.yaml` for each independent run. For thinking, set `REASONING_EFFORT=xhigh`; for the no-thinking server leave it `off`. Select the corresponding server configuration, and give each run a fresh `RUN_NAME`, `BOARD_SPACE`, `RESULTS_DIR`, and `TASK_ID`.
 
 ```sh
 # BOARD_SPACE and TASK_ID must be set. Choose one server mode:
@@ -35,8 +37,8 @@ uv run legion serve experiments/smallmath/hf-jobs-nothink.yaml --timeout 4h
 # Or use the thinking server instead:
 uv run legion serve experiments/smallmath/hf-jobs-thinking.yaml --timeout 4h
 export SERVER_URL='https://<job-id>--8000.hf.jobs/v1'
-# Set high for the thinking server, or off for the no-thinking server.
-export REASONING_EFFORT=high
+# Set xhigh for the thinking server, or off for the no-thinking server.
+export REASONING_EFFORT=xhigh
 uv run legion launch experiments/smallmath/spec.yaml
 # After all runs finish, stop the server using the same spec you started:
 RUN_NAME="$SERVER_RUN_NAME" uv run legion serve experiments/smallmath/hf-jobs-thinking.yaml --stop
@@ -46,10 +48,10 @@ RUN_NAME="$SERVER_RUN_NAME" uv run legion serve experiments/smallmath/hf-jobs-th
 
 ## Scoring
 
-Pass one or more result roots, each containing `<swarm>/<agent>/trials/<trial>/result.json` and its `verifier/` directory. The latest numbered trial per agent is used; each root/swarm/task is a separate team. A missing verifier directory or required grading metadata is an error. The examples above write to `$RESULTS_DIR`.
+Pass one or more result roots, each containing `<swarm>/<agent>/trials/<trial>/result.json` and its `verifier/` directory. The trial with the latest completion timestamp per agent is used (attempt number breaks timestamp ties); multiple trials with a missing completion timestamp are rejected as ambiguous; each root/swarm/task is a separate team. A missing verifier directory or required grading metadata is an error. The examples above write to `$RESULTS_DIR`.
 
 ```sh
 uv run python experiments/smallmath/score.py "$RESULTS_DIR" --manifest /path/to/tasks/manifest.json > scores.json
 ```
 
-Omit `--manifest` to download the pinned dataset manifest. The output contains solo and unique-plurality `maj@N` accuracy overall, by team size, and by difficulty level. Integer spellings such as `+001` and `1` vote together; other text is compared literally. Missing answers abstain and ties score zero. Empty strata have a null mean.
+Omit `--manifest` to download the pinned dataset manifest. The output contains solo and unique-plurality `maj@N` accuracy overall, by team size, and by difficulty level. Accepted integer spellings such as `+001` and `1` vote together; rejected submissions retain their spelling and do not inherit the grade of a canonical integer. Missing answers abstain and ties score zero. Empty strata have a null mean.

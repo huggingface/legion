@@ -5,6 +5,7 @@ inference:
   urls:
     - ${SERVER_URL}
   api_key_env: HF_INFERENCE_TOKEN
+  # For Qwen3.8 thinking use xhigh (not high); its template accepts xhigh, medium, low.
   reasoning_effort: ${REASONING_EFFORT:-off}
 task:
   repo: https://huggingface.co/datasets/HuggingFaceSwarms/IMO-ProofBench

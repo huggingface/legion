@@ -47,7 +47,7 @@ def score(roots, args):
             else:
                 value, reason = 0, "No structurally valid proof submitted"
             rows.append({"type": "proof", "run": team["run"], "swarm": team["swarm"],
-                         "task": team["task"], "agent": agent["agent"], "score": value,
+                         "task": team["task"], "task_id": team["task_id"], "agent": agent["agent"], "score": value,
                          "percent_of_7": 100 * value / 7, "reason": reason, "proof": proof})
         selected = [r for r in rows if r["agent"] == args.selected_agent]
         if args.selected_agent and not selected:
@@ -57,7 +57,7 @@ def score(roots, args):
         consensus_scores = [r["score"] for r in rows if consensus and r["proof"] == consensus]
         records.extend(rows)
         records.append({"type": "team", "run": team["run"], "swarm": team["swarm"],
-                        "task": team["task"], "n": len(rows),
+                        "task": team["task"], "task_id": team["task_id"], "n": len(rows),
                         "mean": summary(r["score"] for r in rows)["mean"],
                         "max": max(r["score"] for r in rows),
                         "consensus": summary(consensus_scores)["mean"],

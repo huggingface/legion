@@ -13,9 +13,14 @@ from math_eval_common import load_runs, majority, offline_reward, read_text, sum
 REVISION = "57dbf3f7e83aa8c5c980387a2216d7bb87e4e7cc"
 
 
-def canonical(answer):
+def canonical(answer, accepted):
     answer = answer.strip()
-    return str(int(answer)) if re.fullmatch(r"[+-]?\d+", answer) else answer
+    # Preserve rejected text: an oversized or invalid spelling must not inherit a correct grade.
+    if accepted and re.fullmatch(r"[+-]?[0-9]+", answer):
+        negative = answer.startswith("-")
+        digits = answer.lstrip("+-").lstrip("0") or "0"
+        return "-" + digits if negative and digits != "0" else digits
+    return answer
 
 
 def score(roots, manifest):
@@ -26,16 +31,19 @@ def score(roots, manifest):
     levels = {item["task"]: int(item["level"]) for item in metadata["tasks"]}
     teams = []
     for team in load_runs(roots):
-        if team["task"] not in levels or levels[team["task"]] not in range(1, 7):
+        if team["task_id"] not in levels or levels[team["task_id"]] not in range(1, 7):
             raise ValueError(f"Missing valid difficulty for {team['task']}")
-        rows = [{"agent": a["agent"], "answer": canonical(read_text(a["verifier"] / "answer.txt")),
-                 "correct": offline_reward(a)} for a in team["agents"]]
+        rows = []
+        for agent in team["agents"]:
+            correct = offline_reward(agent)
+            answer = canonical(read_text(agent["verifier"] / "answer.txt"), correct)
+            rows.append({"agent": agent["agent"], "answer": answer, "correct": correct})
         winner = majority([row["answer"] for row in rows])
         votes = [row["correct"] for row in rows if row["answer"] == winner] if winner else []
         if len(set(votes)) > 1:
             raise ValueError("Identical answers received inconsistent grades")
         teams.append({"run": team["run"], "swarm": team["swarm"], "task": team["task"],
-                      "level": levels[team["task"]], "n": len(rows), "agents": rows,
+                      "task_id": team["task_id"], "level": levels[team["task_id"]], "n": len(rows), "agents": rows,
                       "majority_answer": winner, "maj_at_n": votes[0] if votes else 0})
     def metrics(group):
         return {"solo": summary(a["correct"] for t in group for a in t["agents"]),

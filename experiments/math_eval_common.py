@@ -6,13 +6,14 @@ import json
 import os
 import re
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 
 import httpx
 
 
 def load_runs(roots):
-    """Read independent result trees, keeping the latest numbered trial per agent."""
+    """Read independent result trees, keeping the latest completed trial per agent."""
     runs = []
     for root in roots:
         root = Path(root)
@@ -27,27 +28,41 @@ def load_runs(roots):
                 raise ValueError(f"Missing task_name in {result}")
             agent = trial.parent.parent.name
             swarm = trial.parent.parent.parent.relative_to(root).as_posix()
+            task_id = task.rsplit("/", 1)[-1]
+            if not task_id or task_id in {".", ".."}:
+                raise ValueError(f"Invalid task_name in {result}: {task!r}")
             key = (swarm, task, agent)
+            finished = data.get("finished_at")
+            if finished is not None:
+                try:
+                    timestamp = datetime.fromisoformat(finished)
+                    if timestamp.utcoffset() is None:
+                        raise ValueError("timestamp has no timezone")
+                    finished = timestamp.timestamp()
+                except (ValueError, AttributeError, TypeError, OverflowError) as exc:
+                    raise ValueError(f"Invalid finished_at in {result}") from exc
             match = re.search(r"-t(\d+)$", trial.name)
-            order = (int(match.group(1)) if match else 0, data.get("finished_at") or "", trial.name)
+            order = (finished, int(match.group(1)) if match else 0, trial.name)
             previous = grouped.get(key)
+            if previous is not None and (finished is None or previous[0][0] is None):
+                raise ValueError(f"Cannot order multiple trials without finished_at for {agent}")
             if previous is None or order > previous[0]:
-                grouped[key] = (order, trial, data)
+                grouped[key] = (order, trial, data, task_id)
         if not grouped:
             raise ValueError(f"No Legion trial results found under {root}")
         teams = {}
-        for (swarm, task, agent), (_, trial, data) in grouped.items():
+        for (swarm, task, agent), (_, trial, data, task_id) in grouped.items():
             verifier = trial / "verifier"
             if not verifier.is_dir():
                 candidates = sorted(trial.glob("steps/*/verifier"))
                 if len(candidates) != 1:
                     raise ValueError(f"Expected one verifier directory in {trial}")
                 verifier = candidates[0]
-            teams.setdefault((swarm, task), []).append({
+            teams.setdefault((swarm, task, task_id), []).append({
                 "agent": agent, "trial": str(trial), "verifier": verifier, "result": data,
             })
-        runs.extend({"run": str(root), "swarm": swarm, "task": task, "agents": agents}
-                    for (swarm, task), agents in sorted(teams.items()))
+        runs.extend({"run": str(root), "swarm": swarm, "task": task, "task_id": task_id, "agents": agents}
+                    for (swarm, task, task_id), agents in sorted(teams.items()))
     return runs
 
 
