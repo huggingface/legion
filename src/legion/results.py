@@ -71,6 +71,19 @@ class Outcome(StrEnum):
 
 
 _ORDER = list(Outcome)
+# A sweep receipt's `failure` (legion sweep's attempt.json) as an outcome. Its `phase` and
+# `failure` stay in `reasons` as written; a failure not listed here is `unknown`.
+RECEIPT_FAILURES = {
+    "worker_crash": Outcome.WORKER_REPLACED,  # a crashed worker is relaunched
+    "worker_replacement": Outcome.WORKER_REPLACED,
+    "worker_launch_refused": Outcome.WORKER_LOST,
+    "worker_unavailable": Outcome.WORKER_LOST,
+    "released_before_completion": Outcome.WORKER_LOST,
+    "unsynced_workers": Outcome.WORKER_LOST,
+    "worker_accounting_failed": Outcome.WORKER_LOST,
+    "run_timeout": Outcome.TIMEOUT,
+    "agent_execution_error": Outcome.HARNESS_ERROR,
+}
 
 
 class TrialResult(BaseModel):
@@ -276,9 +289,30 @@ def _agent(name: str, trials: list[TrialResult], workers: list[WorkerResult]) ->
                        reward=last.reward if last and last.outcome.completed else None)
 
 
+def _receipt(root: Path) -> tuple[Outcome, str] | None:
+    """What a sweep attempt's receipt says went wrong, in its own words; None: nothing."""
+    receipt = _read(root / RECEIPT)
+    if not isinstance(receipt, dict) or receipt.get("phase") == "completed":
+        return None
+    phase, failure = str(receipt.get("phase")), receipt.get("failure")
+    why = f"{RECEIPT}: {phase}" + (f", {failure}" if failure else "")
+    if isinstance(receipt.get("note"), str) and receipt["note"]:
+        why += f" ({receipt['note']})"
+    if failure:
+        return RECEIPT_FAILURES.get(str(failure), Outcome.UNKNOWN), why
+    # no failure code: a setup that failed (legion init, the launch), or an attempt not settled
+    return (Outcome.HARNESS_ERROR if phase == "setup_failed" else Outcome.UNKNOWN), why
+
+
 def _settle(result: RunResult, run_reasons: list[tuple[Outcome, str]]) -> RunResult:
-    """The run's outcome: completed only when every agent is and nothing else is wrong."""
+    """The run's outcome: completed only when every agent is and nothing else is wrong. A sweep
+    receipt's failure is evidence too: an agent without any of its own takes it."""
     reasons = list(run_reasons)
+    if (receipt := _receipt(result.root)) is not None:
+        reasons.append(receipt)
+        for a in result.agents:
+            if a.outcome is Outcome.UNKNOWN:
+                a.outcome = receipt[0]
     for a in result.agents:
         if a.outcome.completed:
             continue
@@ -286,10 +320,11 @@ def _settle(result: RunResult, run_reasons: list[tuple[Outcome, str]]) -> RunRes
         if a.workers and a.outcome in (Outcome.PREEMPTED, Outcome.WORKER_REPLACED,
                                        Outcome.WORKER_LOST):
             why = f"worker {', '.join(a.workers)}"
-        elif last is not None:
+        elif last is not None and last.outcome is a.outcome:
             why = f"Trial {last.name}" + (f" ({last.exception_type})" if last.exception_type else "")
-        else:
-            why = "no Trials"
+        else:  # no evidence of its own: none at all, or the receipt's
+            why = "no Trials" if last is None else f"Trial {last.name} unverified"
+            why += f"; see {RECEIPT}" if receipt is not None and a.outcome is receipt[0] else ""
         reasons.append((a.outcome, f"{a.name}: {a.outcome.value}, {why}"))
     if result.planned_agents is not None and len(result.agents) < result.planned_agents:
         why = f"{len(result.agents)} of the {result.planned_agents} planned agents found"

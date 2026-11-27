@@ -58,6 +58,20 @@ infrastructure outcome, so there is nothing to score.
   the first outcome found, in table order. `reasons` lists every problem, for example
   `agent-002: worker_replaced, worker tiny-writer-w0001`.
 
+A sweep attempt's receipt (`attempt.json` in its run directory) is evidence too. When it records
+a failure, `reasons` keeps the receipt's own words, for example
+`attempt.json: infrastructure_failure, worker_crash`. Every agent with no evidence of its own,
+such as no Trials or an unverified one, takes the receipt's outcome instead of `unknown`:
+
+| receipt `failure` | outcome |
+|---|---|
+| `worker_crash`, `worker_replacement` | `worker_replaced` |
+| `worker_launch_refused`, `worker_unavailable`, `released_before_completion`, `unsynced_workers`, `worker_accounting_failed` | `worker_lost` |
+| `run_timeout` | `timeout` |
+| `agent_execution_error` | `harness_error` |
+| none, phase `setup_failed` | `harness_error` |
+| any other, or an attempt that has not settled | `unknown` |
+
 A sweep or a scorer decides what to retry. Every outcome except `completed` is an
 infrastructure outcome.
 

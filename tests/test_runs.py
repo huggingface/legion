@@ -492,6 +492,23 @@ def test_slurm(tiny, slurm, hub, tmp_path, monkeypatch):
     (tmp_path / "attempt.json").write_text('{"run_id": "cell-1", "attempt": 2}')
     assert (results.load(tmp_path).run_id, results.load(tmp_path).attempt) == ("cell-1", 2)
 
+    # a sweep attempt (legion sweep) that kept no Trial: its receipt's failure is the evidence,
+    # in its own words; each planned agent takes it rather than `unknown`
+    failed = tmp_path / "sweep-ab12-cell-r0"
+    (failed / "experiment").mkdir(parents=True)
+    (failed / "experiment" / "spec.yaml").write_text(
+        Path(spec).read_text().replace("name: tiny", "name: sweep-ab12-cell-r0")
+        + "naming: consecutive-id\n")
+    (failed / "attempt.json").write_text(json.dumps(
+        {"phase": "infrastructure_failure", "failure": "worker_crash", "note": None}))
+    f = results.load(failed)
+    assert (f.run_id, f.attempt_id, f.attempt) == ("sweep-ab12-cell", failed.name, 0)
+    assert (f.outcome, f.reasons) == (Outcome.WORKER_REPLACED, [
+        "attempt.json: infrastructure_failure, worker_crash",
+        "agent-001: worker_replaced, no Trials; see attempt.json"]), f
+    assert [(a.name, a.outcome, a.reward, a.trials) for a in f.agents] == [
+        ("agent-001", Outcome.WORKER_REPLACED, None, [])]
+
 
 def test_hf_jobs(tiny, hub, tmp_path, monkeypatch):
     """compute: hf-jobs on the fake Hub (tests/fake_hub.py; a job runs on this machine): the
