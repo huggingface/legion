@@ -41,7 +41,7 @@ task:
 agents:
   count: 2
 environment:
-  backend: docker
+  backend: docker                       # a machine running dockerd; unset: podman (Local runs, below)
 limits:
   run_timeout_seconds: 900
   agent_max_turns: 30
@@ -84,6 +84,21 @@ used internally by `legion launch`, which supplies its already prepared checkpoi
   apply the change to the running swarm; a broken save is shown and not applied
   ([live.md](live.md)).
 
+## Local runs
+
+`environment.backend` picks the container engine for each agent's Trial. The default is
+`podman`, rootless, which also runs on Slurm and the HF cluster ([slurm.md](slurm.md)).
+`docker` is for `compute: local` only, on a machine that already runs dockerd with Compose;
+Slurm refuses it. A spec that relied on the old `docker` default must now say so:
+
+```yaml
+environment:
+  backend: docker
+```
+
+`Dockerfile.controller` and `Dockerfile.worker` are the images legion's controller and workers
+deploy in (a Space, HF Jobs: [deploy-job.md](deploy-job.md)), not the engine the Trials run on.
+
 ## Reaching the run
 
 While the run is up, `.legion/current` (mode 0600) holds the controller URL
@@ -102,7 +117,7 @@ From elsewhere: `LEGION_CURRENT=/path/to/.legion/current legion status`, or set 
 `LEGION_TOKEN` from that file.
 
 **At the end** the run halts the reconcile loop (nothing relaunches) and drains every worker:
-idle agents stop at once, in-flight turns get 10 s (`--grace` of the foreground harness). Then each remaining worker gets
+idle agents stop at once, in-flight turns and verifiers get 330 s by default (`--grace` can change this). Then each remaining worker gets
 SIGTERM: it interrupts its turns (a `turn_interrupted` event) and its harness kills the tool
 processes it started. Up to 5 s later (90 s for a `harbor` worker, which first cancels its Trials
 and waits for their containers to stop), anything still alive is killed, including tool

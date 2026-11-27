@@ -1,0 +1,48 @@
+# A team of 4 on one AoPS problem, sharing a message board. What it needs and how to launch: README.md.
+name: ${RUN_NAME:-team-4}
+model: ${MODEL}
+pricing: [0, 1, 0]     # not real prices: with $1 per 1M output tokens, agent_usd below is a per-agent output-token cap
+naming: consecutive-id
+inference:
+  urls:
+    - ${SERVER_URL}
+task:
+  repo: https://huggingface.co/datasets/HuggingFaceSwarms/aops-math-bench
+  selector: math-${TASK_ID}
+  revision: ${TASK_REV:-3f6f3d5f1f03ea2fc92b303c91036085a957aadb}   # agents' network blocked except the model server
+agents:
+  count: 4
+team_file: team.md
+resources:
+  message_board:
+    channels: [general]
+    wake: ["mention", "thread", "channel"]
+    rules:
+      max_len: 2000
+      min_post_gap: 5s
+      max_posts: 40
+      max_channels: 1
+tools_dir: ../../aops-math-bench/setups/tools   # downloaded with the dataset (README); legion's message_board.* once they post from a file
+tools: [board.post, board.read, board.wait]
+environment:
+  backend: podman
+workers:
+  agents_per_worker: 4
+  turn_timeout: 6m
+loop:
+  prompt: "Continue until /app/answer.txt holds your final answer, then stop."
+  every: 24h
+  notices: true
+  on: ["message_board.channel", "message_board.mention", "message_board.thread"]
+  wake:
+    min_gap: 20s
+    max: null
+  while:
+    until: 30m
+    max_rounds: 1000
+    agent_usd: 0.032768   # = 32,768 output tokens per agent
+  final:
+    prompt: "The run is ending. Make sure /app/answer.txt holds just your final answer (the value only), then stop."
+limits:
+  run_timeout_seconds: 2400
+  agent_max_turns: 60

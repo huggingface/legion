@@ -158,7 +158,9 @@ class LegionPi(Pi):
                 prompt = await self._next_prompt(environment, deadline)
                 if prompt is None:
                     return
-                text = f"{instruction}\n\n{prompt}" if fresh else prompt
+                # an empty first prompt (`loop.prompt: ""`): the task's instruction alone, as
+                # the upstream launcher sends it
+                text = (f"{instruction}\n\n{prompt}" if prompt else instruction) if fresh else prompt
                 ended, used, model_error = await self._turn(text, fresh, environment, totals)
                 transient = ended.data.get("reason") == "model_transport"
                 # the model's own error (a 500) says nothing about the restored sessions
@@ -221,11 +223,14 @@ class LegionPi(Pi):
         output = self.logs_dir / self._OUTPUT_FILENAME
         with suppress(OSError):
             output.unlink()  # a turn that never ran must not recount the last one
-        # shortcut: on hf-sandbox a turn that fails before Pi starts recounts the remote pi.txt
-        # of the turn before (overcounts spend, the safe side); delete it remotely if it matters.
         error = None
+        cleared = environment.is_path_mounted(self.environment_logs_dir, self.logs_dir)
         try:
             try:
+                if not cleared:
+                    remote = (self.environment_logs_dir / self._OUTPUT_FILENAME).as_posix()
+                    await self.exec_as_agent(environment, f"rm -f {shlex.quote(remote)}")
+                    cleared = True
                 if first:
                     await super().run(text, environment, AgentContext())
                 else:
@@ -234,10 +239,13 @@ class LegionPi(Pi):
                 error = safe_error(exc)  # Harbor's: the command (with the prompt), then output
                 error = error if len(error) <= 500 else f"{error[:60]} ... {error[-400:]}"
             try:
-                await self._pull(environment, output)
+                if cleared:
+                    await self._pull(environment, output)
             except Exception as exc:
                 ch.emit(AdapterEvent("error", error=f"session sync: {safe_error(exc)[:300]}"))
             pi_error = terminal_pi_error(output, ch.max_turns)
+            capped = (ch.max_turns is not None and pi_error is None
+                      and terminal_pi_error(output) == "This operation was aborted")
             error = pi_error or error  # Pi's own words first
             messages, usage = read_turn(output)
             for message in messages:
@@ -254,7 +262,7 @@ class LegionPi(Pi):
                 transient = pi_error and transient_error(pi_error)
                 data = {"reason": "model_transport"} if transient else {}
             else:
-                status, data = "completed", {}
+                status, data = "completed", {"reason": "max_turns"} if capped else {}
             ended = AdapterEvent("turn_ended", status=status, data=data,
                                  error=error if status == "error" else None)
             ch.emit(ended)

@@ -230,3 +230,18 @@ async def test_turn_events_carry_prompt_ids(tmp_path):
     assert evs["turn_started"]["prompt_id"] == "b-1"
     assert evs["turn_ended"]["prompt_id"] == "b-2"
     assert evs["turn_ended"]["prompt_ids"] == ["b-1", "b-2"]
+
+
+async def test_start_failure_defers_final_prompt(tmp_path):
+    from legion.models import LoopMeta
+
+    class FailingAdapter(ScriptedAdapter):
+        async def start(self, *args, **kwargs):
+            raise RuntimeError("start failed")
+
+    rt, _ = runtime(tmp_path, adapter=FailingAdapter(tmp_path / "home"))
+    await rt.setup(restore=False)
+    await rt.prompt("finish", loop=LoopMeta(kind="final", type="researcher"))
+    await until(lambda: rt.phase == "none")
+    deferred = [e for e in rt.outbox._q if e.type == "prompt_deferred"]
+    assert deferred[0].data["data"]["loop"]["kind"] == "final"

@@ -34,7 +34,7 @@ from legion.controller.inference import InferenceError
 from legion.controller.inference import check as inference_check
 from legion.controller.loop import LoopEngine, loop_status, swarm_stream
 from legion.controller.preflight import run_preflight
-from legion.controller.reconcile import agent_state, record_heartbeat, worker_state
+from legion.controller.reconcile import agent_state, harbor_roster, record_heartbeat, worker_state
 from legion.controller.servers import Servers, drain_grace
 from legion.controller.spawn import (
     Refused,
@@ -356,7 +356,7 @@ def swarm_status(store: Store, spec: SwarmSpec, now: float,
         agents_total=len(agents),
         workers_total=len(workers),
         pending_prompts=sum(pending.values()),
-        cost_usd=round(sum(t.cost_usd for t in types.values()), 6),
+        cost_usd=round(store.swarm_cost(spec.swarm), 6),
         budget_stop=(flags := store.swarm_flags(spec.swarm)).get("budget_stop"),
         held=_held_view(flags.get("holds")),
         released={**(r := flags["released"]), "since": _dt(r["since"]).isoformat(),
@@ -1659,6 +1659,9 @@ def create_app(
         ts = spec.types.get(w["type"]) if spec is not None and w is not None else None
         if ts is not None:
             # docs/live.md: a changed type spec (prompts, limits, ...) reaches the worker here; it applies them at each agent's next turn boundary
+            if ts.harbor and not ts.harbor.roster:
+                ts = ts.model_copy(update={"harbor": ts.harbor.model_copy(
+                    update={"roster": harbor_roster(store, spec)})})
             wts = worker_type_spec(ts)  # never `loop.notices` (controller only)
             rev = type_spec_rev(wts)
             if hb.spec_rev != rev:

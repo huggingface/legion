@@ -104,6 +104,8 @@ def test_concurrent_runs_spread_their_same_named_agents():
     ({"urls": ["http://a/v1", "http://a/v1/"]}, "must not repeat a URL"),
     ({"urls": []}, "at least one URL"),
     ({"metrics": True}, "it needs urls"),
+    ({"urls": ["http://a/v1"], "metrics": True, "preflight": False}, "preflight: false keeps"),
+    ({"api_format": "google_generate_content"}, "openai_chat_completions"),
     ({"api_key_env": "hf_abc-123"}, "env var name"),
     ({"max_working": 0}, "greater than or equal to 1"),
     ({"hf_router": {"provider": "deepinfra:fast"}}, "must be a name"),
@@ -111,6 +113,14 @@ def test_concurrent_runs_spread_their_same_named_agents():
 ])
 def test_block_validation(inference, needle):
     assert needle in err({"a": {**HB, "model": "m"}}, inference)
+
+
+@pytest.mark.parametrize("api_format", ["openai_responses", "anthropic_messages"])
+@pytest.mark.parametrize("router", [{}, {"hf_router": {"provider": "deepinfra"}}])
+def test_the_router_only_accepts_chat_completions(api_format, router):
+    inference = {**router, "api_format": api_format}
+    msg = err({"a": {**HB, "model": "Qwen/Qwen3.8-27B"}}, inference)
+    assert "hf_router requires api_format: openai_chat_completions" in msg
 
 
 def test_a_type_runs_on_its_own_block():

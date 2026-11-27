@@ -27,6 +27,17 @@ casually: controller, worker and CLI all import it.
 - YAML (spec files, and YAML snippets in docs and READMEs): write mappings in block style, never
   inline `{a: 1}`; inline lists like `[a, b]` and an empty mapping `{}` are fine.
 
+## Container engines
+- `environment.backend: podman` is the default and the engine on the HF cluster: run it on
+  hopper-cpu. The GPU nodes' podman 3.4 cannot create the networks legion gives each Trial, so
+  model servers go there (scripts/slurm/serve-vllm.sbatch) and agents do not.
+- `backend: docker` is only for `compute: local` on a machine that already runs dockerd. Slurm
+  refuses it and the cluster has no Docker.
+- `Dockerfile.controller` / `Dockerfile.worker` are deployment images for the Space and HF Jobs,
+  not the engine a Trial runs on.
+- Docker-engine docs live in the "Local runs" sections (docs/local.md, experiments/README.md);
+  Slurm and cluster docs mention podman only.
+
 ## Tests
 Be conservative about adding tests.
 - **Do not add tests by default.** Add one only when the user asks for it, or when a change to **core** legion
