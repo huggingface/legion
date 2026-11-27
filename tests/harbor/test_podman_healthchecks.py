@@ -12,8 +12,9 @@ healthchecks = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(healthchecks)
 
 
+@pytest.mark.parametrize("timeout", [False, True])
 async def test_checks_use_declared_interval_and_skip_containers_without_checks(
-    monkeypatch,
+    monkeypatch, timeout,
 ):
     calls = []
     ticks = iter([0, 2, 4])
@@ -32,7 +33,9 @@ async def test_checks_use_declared_interval_and_skip_containers_without_checks(
                 json.dumps([container, {"Id": "b" * 64, "Config": {}}]).encode(),
                 b"",
             )
-        # Unhealthy status is recorded by Podman; it must not crash the scheduler.
+        # Unhealthy or timed-out checks must not crash the scheduler.
+        if timeout and calls.count(("healthcheck", "run", "aaaaaaaaaaaa")) == 1:
+            raise TimeoutError
         return 1, b"", b""
 
     original_sleep = asyncio.sleep

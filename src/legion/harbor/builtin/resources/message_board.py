@@ -217,10 +217,17 @@ class Resource:
 
     def _gate(self):
         """Client options for a private Space: its gate takes the launcher's HF token."""
-        if not (self.space and self.space.private):
+        hf_token = self.hf_token
+        if self.options.url and (httpx.URL(self.options.url).host or "").endswith(".hf.space"):
+            hf_token = get_token()
+            if hf_token and hf_token not in self.secrets:
+                self.secrets.append(hf_token)
+        elif not (self.space and self.space.private):
+            return {}
+        if not hf_token:
             return {}
         return {
-            "headers": {"Authorization": f"Bearer {self.hf_token}"},
+            "headers": {"Authorization": f"Bearer {hf_token}"},
             "token_header": "X-Msgboard-Token",
         }
 

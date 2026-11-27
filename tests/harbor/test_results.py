@@ -21,3 +21,9 @@ def test_safe_error_redacts_longer_credentials_before_shared_prefixes(monkeypatc
     result = safe_error(ValueError("test-token-with-private-suffix"), ["test-token"])
 
     assert result == "ValueError: [redacted]"
+
+
+def test_safe_error_ignores_short_environment_values(monkeypatch):
+    monkeypatch.setenv("TOKEN_LIMIT", "1")
+    monkeypatch.setenv("API_KEY_LONG", "abcdefgh")
+    assert safe_error(ValueError("1 abcdefgh")) == "ValueError: 1 [redacted]"

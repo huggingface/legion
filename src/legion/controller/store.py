@@ -11,6 +11,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import shutil
 import sqlite3
 import threading
 from collections.abc import Callable, Iterable
@@ -428,6 +429,10 @@ class Store:
             self._x("DELETE FROM health_samples WHERE swarm = ?", [name])
             self._x("DELETE FROM usage WHERE swarm = ?", [name])
             self._x("DELETE FROM controls WHERE swarm = ?", [name])
+            self._x("DELETE FROM event_index WHERE swarm = ?", [name])
+            path = self.data_dir / "events" / name
+            if path.exists():
+                shutil.rmtree(path)
 
     # ----------------------------------------------------------------- tools bundles
 
@@ -589,7 +594,7 @@ class Store:
         self._x("DELETE FROM agents WHERE name = ?", [name])
         self._x("DELETE FROM pending_prompts WHERE agent = ?", [name])
         self._x("DELETE FROM agent_tokens WHERE agent = ?", [name])  # revoke
-        self._x("DELETE FROM spawn_keys WHERE parent = ?", [name])
+        self._x("DELETE FROM spawn_keys WHERE parent = ? OR child = ?", [name, name])
         self._x("DELETE FROM loop_agents WHERE agent = ?", [name])
 
     def mark_removing(self, name: str) -> None:

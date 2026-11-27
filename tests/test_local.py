@@ -12,6 +12,7 @@ import re
 import sys
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 
 import httpx
 import pytest
@@ -362,6 +363,7 @@ def test_write_bundle(tmp_path):
     store = Store(tmp_path / "data")
     spec = local_spec(env={"X_TOKEN": "hunter2", "OPENAI_API_KEY": "sk-1", "MODE": "fast"})
     store.put_swarm(spec, time.time())
+    store.put_control("loc", "success", {"agent": "w-0000"})
     store.insert_agent("w-0000", "loc", "w", 0, time.time())
     store.insert_agent("w-0001", "loc", "w", 1, time.time())
     _events(store, "w-0001", "turn_started", "turn_ended")
@@ -373,6 +375,7 @@ def test_write_bundle(tmp_path):
     assert totals["agents"] == 2 and totals["turns_completed"] == 2 and totals["events"] == 4
     doc = json.loads((tmp_path / "run" / "run.json").read_text())
     assert doc["stop_reason"] == "idle" and doc["compute"] == "local"
+    assert doc["success"] == {"agent": "w-0000"}
     assert doc["spec"]["types"]["w"]["env"] == {"X_TOKEN": "<redacted>",
                                                 "OPENAI_API_KEY": "<redacted>", "MODE": "fast"}
     assert "hunter2" not in (tmp_path / "run" / "run.json").read_text()
@@ -479,3 +482,29 @@ def test_launch_ends_the_local_run_it_started_on_ctrl_c(tmp_path, monkeypatch):
     monkeypatch.setattr("legion.ops._launch", interrupted)
     runner.invoke(cli.app, ["launch", "spec.yaml", "--skip-preflight"])
     assert ended == [run]
+
+
+async def test_until_idle_stops_on_recorded_success(tmp_path):
+    spec = SwarmSpec.model_validate({
+        "swarm": "success", "compute": "local", "inference": FAKE,
+        "types": {"w": {**TYPE, "replicas": 0}}})
+    out = io.StringIO()
+    task = asyncio.create_task(localrun.run_local(localrun.RunOptions(
+        spec=spec, data_dir=tmp_path, until=30, until_idle=True, refresh=0.05, grace=0, out=out)))
+    current = tmp_path / "current"
+    while not current.exists():
+        assert not task.done(), out.getvalue()
+        await asyncio.sleep(0.02)
+    info = json.loads(current.read_text())
+    external = Store(Path(info["run_dir"]) / "controller")
+    external.put_control("success", "success", {"agent": "winner"})
+    external.close()
+    result = await asyncio.wait_for(task, 10)
+    assert result.reason == "success"
+    assert json.loads((result.run_dir / "run.json").read_text())["success"] == {"agent": "winner"}
+
+
+def test_default_grace_allows_verifier_to_finish():
+    from legion.worker.agents import VERIFY_WAIT
+
+    assert localrun.RunOptions(spec=local_spec()).grace >= VERIFY_WAIT + 30

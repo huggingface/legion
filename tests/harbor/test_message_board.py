@@ -141,3 +141,12 @@ async def test_cli_uses_authenticated_socket_and_removes_it(board, tmp_path):
     finally:
         await runtime.stop()
     assert not socket_path.exists()
+
+
+def test_url_space_gate_uses_hf_token(tmp_path, monkeypatch):
+    monkeypatch.setenv("MSGBOARD_OPERATOR_TOKEN", "board-secret")
+    monkeypatch.setenv("HF_TOKEN", "hf-secret")
+    runtime = BoardResource({"url": "https://owner-board.hf.space"},
+                            state_dir=tmp_path, agents=[], secrets=[])
+    assert runtime._gate() == {"headers": {"Authorization": "Bearer hf-secret"},
+                               "token_header": "X-Msgboard-Token"}

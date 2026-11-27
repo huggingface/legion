@@ -365,7 +365,7 @@ class AgentRuntime:
         except Exception as e:
             log.exception("%s: burst failed", self.name)
             self.emit("error", {"error": f"{type(e).__name__}: {e}", "dropped_prompts": len(self.buffer)})
-            self.buffer.clear()
+            self._defer_buffer("start_failed")
         finally:
             self.phase = "stopping"
             await self.adapter.stop()

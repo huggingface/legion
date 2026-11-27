@@ -117,7 +117,7 @@ From elsewhere: `LEGION_CURRENT=/path/to/.legion/current legion status`, or set 
 `LEGION_TOKEN` from that file.
 
 **At the end** the run halts the reconcile loop (nothing relaunches) and drains every worker:
-idle agents stop at once, in-flight turns get 10 s (`--grace` of the foreground harness). Then each remaining worker gets
+idle agents stop at once, in-flight turns and verifiers get 330 s by default (`--grace` can change this). Then each remaining worker gets
 SIGTERM: it interrupts its turns (a `turn_interrupted` event) and its harness kills the tool
 processes it started. Up to 5 s later (90 s for a `harbor` worker, which first cancels its Trials
 and waits for their containers to stop), anything still alive is killed, including tool
