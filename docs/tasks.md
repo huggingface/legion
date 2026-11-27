@@ -152,7 +152,7 @@ See [local usage](local.md) for launching and inspecting a run, and
 
 ## s3-aggregation
 
-The private [s3-aggregation dataset](https://huggingface.co/datasets/HuggingFaceSwarms/s3-aggregation)
+The [s3-aggregation dataset](https://huggingface.co/datasets/HuggingFaceSwarms/s3-aggregation)
 adapts the information-aggregation task of [s³](https://arxiv.org/abs/2611.08615): each of N
 agents holds a private number, and the team must list them all in ascending order. A team has
 one task per slot, `agg-pPP-nNN-sKK`, whose instruction states that slot's number, and the
@@ -162,8 +162,7 @@ Sandboxes, with the board on a public Space chosen for that run. `HF_TOKEN` need
 access, Jobs permission, and create/write access to the board's Space and storage bucket.
 `HF_INFERENCE_TOKEN` is the agents' inference key. `TEAM` picks another team of four (e.g.
 `TEAM=agg-p07-n04`); for another size, set `N` and list that many slots. The dataset README
-covers the cluster, the board rules, the scaling
-sweep and the metrics.
+documents the task and its Harbor verifier. See [Slurm](slurm.md) for cluster runs.
 
 The example omits `namespace`: sandboxes use `HF_TOKEN`'s personal account and router calls
 use the inference key's default billing account with no bill-to header. `BOARD_SPACE` is
@@ -185,7 +184,7 @@ delete a board newly created for this run; leave pre-existing and shared boards 
 
 ## s3-maze
 
-The private [s3-maze dataset](https://huggingface.co/datasets/HuggingFaceSwarms/s3-maze) adapts
+The [s3-maze dataset](https://huggingface.co/datasets/HuggingFaceSwarms/s3-maze) adapts
 the parallel-exploration task of [s³](https://arxiv.org/abs/2611.08615): each of N agents
 searches its own copy of one tree of rooms for the exit with `maze look` and `maze move ROOM`,
 on a budget of 210 moves that one agent rarely finds it in, and the board lets the team split
@@ -196,13 +195,11 @@ default 4) on the HF cluster: one Slurm worker on hopper-cpu in rootless podman,
 board, and `stop_on_success` with the service's `success_check`, so the first agent out ends
 the run. The example includes a protocol hint in its team text (`team.md`, the spec's
 `team_file`), so each agent reads the board and claims a door before it goes through one; remove
-`team_file` for the neutral condition of the earlier sweep. It needs the dataset on the shared
-disk for its `eval/metrics.py` (podman pulls Docker Hub images through `mirror.gcr.io` with
-legion's own `scripts/slurm/registries.conf`, the workers' default),
-`HF_TOKEN` with read access to `HuggingFaceSwarms/s3-maze` and bucket create/write access in
-your personal account, a separate `HF_INFERENCE_TOKEN` with personal Inference Providers
-permission for the agents, and
-the Git credential helper for a private task repo ([Slurm](slurm.md), "Containers").
+`team_file` for the neutral condition of the earlier sweep. Harbor fetches the task revision
+from the spec. The workers pull Docker Hub images through `mirror.gcr.io` with
+`scripts/slurm/registries.conf`. Set `HF_TOKEN` with bucket create/write access in your
+personal account and a separate `HF_INFERENCE_TOKEN` with personal Inference Providers
+permission for the agents.
 
 The example omits `namespace`, so router calls use the inference key's default personal
 billing account with no org bill-to header. Set `BUCKET_ID` to a bare name such as
@@ -211,8 +208,6 @@ Launch creates a missing bucket private and retains an existing bucket's visibil
 See [billing and storage](billing.md) for personal permissions and optional org billing.
 
 ```sh
-DS=/fsx/$USER/s3-maze
-hf download HuggingFaceSwarms/s3-maze --repo-type dataset --revision 3421ea2d46e8963e59cf3690da6ea47739eefb2f --local-dir $DS
 printf 'SLURM_PARTITION=hopper-cpu\nSLURM_MAX_MEM_PER_CPU_MB=2000\nVENV=%s\n' "$PWD/.venv" > cluster.env
 # secrets.env (mode 600): HF_TOKEN, HF_INFERENCE_TOKEN, BUCKET_ID
 uv run legion init $PWD/runs/maze-t01-n04 --from experiments/s3-maze --profile cluster.env --secrets secrets.env
@@ -221,9 +216,8 @@ export LEGION_RUN_DIR=$PWD/runs/maze-t01-n04
 uv run legion launch $LEGION_RUN_DIR/experiment
 uv run legion status maze-t01-n04            # STOPPED ON SUCCESS once an agent is out
 uv run legion stop maze-t01-n04 --release    # ends the controller, or a run nobody won
-uv run python $DS/eval/metrics.py $LEGION_RUN_DIR
 ```
 
-The worker copies each agent's grading, with its move log, and the board export to
-`<run dir>/results/`, where `metrics.py` reads them. The dataset README covers the move budget,
-the grader, the checks and the metrics.
+The worker copies each agent's Harbor verifier result and move log, along with the board
+export, to `<run dir>/results/`. The dataset README covers the move budget, grader and
+standalone Harbor checks.
