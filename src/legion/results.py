@@ -265,18 +265,19 @@ def _trials(root: Path, base: Path) -> dict[str, list[TrialResult]]:
 
 
 def _incarnations(folder: Path) -> dict[str, list[Incarnation]]:
-    """Worker id -> its recorded incarnations, by start."""
+    """Worker id -> its recorded incarnations, by start. A worker with an unreadable record has
+    none: its history is incomplete, so it is read as a worker without records."""
     out: dict[str, list[Incarnation]] = {}
-    for path in sorted(folder.glob("*/*.json")) if folder.is_dir() else []:
-        doc = _read(path)
-        if isinstance(doc, dict):
-            try:
-                out.setdefault(path.parent.name, []).append(Incarnation.model_validate(
-                    {k: doc.get(k) for k in Incarnation.model_fields if k in doc} | {"id": path.stem}))
-            except ValueError:
-                continue
-    for incs in out.values():
-        incs.sort(key=lambda i: (i.started_at is None, i.started_at or datetime.min.replace(tzinfo=UTC)))
+    for worker in sorted(folder.iterdir()) if folder.is_dir() else []:
+        try:
+            incs = [Incarnation.model_validate(
+                        {k: v for k, v in _read(path).items() if k in Incarnation.model_fields}
+                        | {"id": path.stem}) for path in sorted(worker.glob("*.json"))]
+        except (AttributeError, ValueError):  # not a JSON object, or not a record
+            continue
+        if incs:
+            out[worker.name] = sorted(incs, key=lambda i: (
+                i.started_at is None, i.started_at or datetime.min.replace(tzinfo=UTC)))
     return out
 
 
@@ -288,8 +289,8 @@ def _agent(name: str, trials: list[TrialResult], workers: list[WorkerResult]) ->
     for w in held:  # each worker on its own evidence
         if mine := [i for i in w.incarnations if i.recorded and name in i.agents]:
             incs += mine  # the launches it was placed on: crashes before it arrived are not its own
-        else:  # no record names it (none written, or its assignment's write failed): all of it
-            incs += w.incarnations
+        else:  # no record names it (none written, or its assignment's write failed): all of it,
+            incs += w.incarnations or [Incarnation(id=w.id, recorded=False)]  # at least its placement
             crashes += w.crashes
     infra = _infra(incs, crashes)
     last = trials[-1] if trials else None

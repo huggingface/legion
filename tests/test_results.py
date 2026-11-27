@@ -112,16 +112,17 @@ def test_a_worker_without_records_keeps_its_launch_evidence(tmp_path):
     assert [(w.id, len(w.incarnations)) for w in r.workers] == [("w0", 1), ("w1", 2)]
 
 
-def local_bundle(root: Path, records: list[tuple[int, list[str], str | None]]) -> Path:
-    """A local run: agents a and b on worker w0, which crashed once; its `records`; and a
-    completed Trial each."""
+def local_bundle(root: Path, records: list[tuple[int, list[str], str | None]],
+                 workers: dict[str, int] | None = None, a_on: str = "w0") -> Path:
+    """A local run: agents a (on `a_on`) and b on worker w0, `workers` (id: crashes; w0 crashed
+    once by default), w0's `records`, and a completed Trial each."""
     bundle = root / ".legion" / "r-20261127-100000"
     write(bundle / "run.json", {
         "swarm": "r", "started_at": "2026-11-27T10:00:00+00:00",
         "ended_at": "2026-11-27T11:00:00+00:00", "stop_reason": "idle",
         "spec": {"types": {"agent": {"replicas": 2, "harbor": {"config": {"task": {}}}}}},
-        "agents": [{"name": "a", "worker": "w0"}, {"name": "b", "worker": "w0"}],
-        "workers": [{"id": "w0", "crashes": 1}]})
+        "agents": [{"name": "a", "worker": a_on}, {"name": "b", "worker": "w0"}],
+        "workers": [{"id": w, "crashes": n} for w, n in (workers or {"w0": 1}).items()]})
     harbor = bundle / "agents" / "_harbor"
     for n, agents, exit in records:
         record(harbor / "_workers", "w0", n, agents, exit)
@@ -137,6 +138,30 @@ def test_a_failed_assignment_record_falls_back_to_the_worker(tmp_path):
     r = results.load(tmp_path)
     assert {a.name: a.outcome for a in r.agents} == {
         "a": Outcome.WORKER_REPLACED, "b": Outcome.WORKER_REPLACED}
+
+
+def test_a_placement_without_records_still_counts(tmp_path):
+    """a ran on w0 (its record) and is placed on w1 (run.json), which left no record: two
+    workers, so its Trial names were reused there."""
+    local_bundle(tmp_path, [(1, ["a", "b"], "drained")], workers={"w0": 0, "w1": 0}, a_on="w1")
+    r = results.load(tmp_path)
+    assert {a.name: (a.workers, a.outcome) for a in r.agents} == {
+        "a": (["w0", "w1"], Outcome.WORKER_REPLACED), "b": (["w0"], Outcome.COMPLETED)}
+
+
+@pytest.mark.parametrize("launches, outcome", [(0, Outcome.COMPLETED),
+                                               (2, Outcome.WORKER_REPLACED)])
+def test_a_malformed_record_falls_back_to_the_launches(tmp_path, launches, outcome):
+    """A worker with an unreadable record is read as one without records: from its launch
+    files, if any; loading never fails on it."""
+    run = slurm_run(tmp_path)
+    record(run / "results/r/_workers", "w0", 1, ["agent-001", "agent-002"], "drained")
+    write(run / "results/r/_workers/w0" / f"{2:032x}.json", {"agents": None})
+    for n in range(launches):
+        write(run / "launch" / f"w0-{n:032x}.env", "WORKER_ID=w0\n")
+    r = results.load(run)
+    assert r.outcome is outcome and all(not i.recorded for w in r.workers for i in w.incarnations)
+    assert [len(w.incarnations) for w in r.workers] == ([launches] if launches else [])
 
 
 def test_one_local_bundle_wins_over_a_run_dir_layout(tmp_path):
